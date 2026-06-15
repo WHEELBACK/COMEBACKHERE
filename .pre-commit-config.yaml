@@ -1,0 +1,13 @@
+repos:
+  - repo: local
+    hooks:
+      - id: abi-snapshot-hygiene
+        name: ABI snapshot hygiene
+        entry: scripts/check_abi_snapshot_hygiene.sh
+        language: system
+        pass_filenames: false
+      - id: lint-docs
+        name: Markdown lint
+        entry: scripts/lint-docs.sh
+        language: system
+        pass_filenames: false

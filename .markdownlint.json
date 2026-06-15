@@ -1,0 +1,14 @@
+{
+  "default": true,
+  "MD003": { "style": "consistent" },
+  "MD004": { "style": "consistent" },
+  "MD007": { "indent": 2 },
+  "MD013": false,
+  "MD024": { "siblings_only": true },
+  "MD033": false,
+  "MD040": false,
+  "no-hard-tabs": true,
+  "no-trailing-spaces": true,
+  "no-multiple-blanks": true,
+  "proper-names": false
+}

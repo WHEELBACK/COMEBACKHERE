@@ -1,0 +1,17 @@
+{
+  "network": "testnet",
+  "contracts": [
+    {
+      "name": "invoice",
+      "address": "C..."
+    },
+    {
+      "name": "treasury",
+      "address": "C..."
+    },
+    {
+      "name": "compliance",
+      "address": "C..."
+    }
+  ]
+}

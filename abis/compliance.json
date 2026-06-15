@@ -1,0 +1,23 @@
+{
+  "contract": "compliance",
+  "version": "1.0.0",
+  "functions": [
+    "initialize",
+    "is_allowed",
+    "allow_address",
+    "block_address",
+    "allow_address_until",
+    "transfer_admin",
+    "accept_admin",
+    "clear_address",
+    "pause",
+    "unpause"
+  ],
+  "errors": {
+    "1": "Unauthorized",
+    "2": "ContractPaused",
+    "3": "AlreadyInitialized"
+    "1": "unpermitted",
+    "2": "ContractPaused"
+  }
+}

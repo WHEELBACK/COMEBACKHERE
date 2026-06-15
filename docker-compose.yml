@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  soroban:
+    image: stellar/quickstart:latest
+    ports:
+      - "8000:8000"
+      - "11626:11626"
+      - "11625:11625"
+    environment:
+      - NETWORK=standalone
+      - HORIZON_PORT=8000
+      - CORE_PORT=11626
+    volumes:
+      - soroban_data:/var/lib/stellar
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  soroban_data:
+  redis_data:

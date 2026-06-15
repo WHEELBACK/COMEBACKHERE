@@ -1,0 +1,28 @@
+{
+  "contract": "treasury",
+  "version": "1.0.0",
+  "functions": [
+    "initialize",
+    "set_signer",
+    "propose_settlement",
+    "approve_settlement",
+    "execute_settlement",
+    "get_pending_settlements",
+    "pause",
+    "unpause",
+    "raise_dispute",
+    "resolve_dispute",
+    "deposit",
+    "withdraw"
+  ],
+  "threshold": "2-of-3"
+  "execute_settlement_params": ["signer: home", "settlement_id: u64", "token_contract: Address"],
+  "threshold": "2-of-3",
+  "events": [
+    "treasury_initialized",
+    "signer_weight_set",
+    "settlement_proposed",
+    "settlement_approved",
+    "settlement_executed"
+  ]
+}

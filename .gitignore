@@ -1,0 +1,6 @@
+.env
+.env.mainnet
+.env.testnet
+artifacts/addresses.json
+coverage/
+node_modules/
