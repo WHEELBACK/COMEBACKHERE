@@ -1,11 +1,31 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, panic_with_error, Address, Env, Symbol};
+mod events;
 
-const DEFAULT_BATCH_LIMIT: u32 = 50;
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec,
+};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ContractError {
+    Unauthorized = 1,
+    ContractPaused = 2,
+    AlreadyInitialized = 3,
+    InvoiceNotFound = 4,
+    InvoiceAlreadyPaid = 5,
+    InvoiceExpired = 6,
+    InvoiceCancelled = 7,
+    NotMerchant = 8,
+    NotCustomer = 9,
+    RefundNotRequested = 10,
+    AlreadyRefundRequested = 11,
+    GraceWindowNotExpired = 12,
+    DuplicateNonce = 13,
+}
+
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InvoiceStatus {
     Pending,
     Paid,
@@ -15,255 +35,396 @@ pub enum InvoiceStatus {
     Released,
 }
 
-#[derive(Clone, Debug)]
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Invoice {
-    pub id: u32,
+    pub id: u64,
     pub merchant: Address,
-    pub payer: Address,
-    pub amount_usdc: i128,
-    pub gross_usdc: i128,
-    pub expires_at: u64,
+    pub customer: Address,
+    pub amount: i128,
+    pub token: Address,
     pub status: InvoiceStatus,
-    pub paid_at: u64,
+    pub created_at: u64,
+    pub expires_at: u64,
 }
 
-#[derive(Clone, Debug)]
 #[contracttype]
-pub enum InvoiceError {
-    Unauthorized,
-    ContractPaused,
-    InvalidAmount,
-    NotPending,
-    Expired,
-    NotFound,
-    AlreadyInitialized,
-    ZeroDuration,
-    ExpiryOverflow,
-    NotPaid,
+pub enum DataKey {
+    Admin,
+    Paused,
+    Invoice(u64),
+    InvoiceCount,
+    GraceWindow,
+    Nonce(Address, u64),
 }
 
-const ADMIN_KEY: Symbol = Symbol::short("admin");
-const PAUSED_KEY: Symbol = Symbol::short("pause");
-const INIT_KEY: Symbol = Symbol::short("init");
-const NEXT_ID_KEY: Symbol = Symbol::short("nid");
+fn admin(env: &Env) -> Address {
+    env.storage().persistent().get(&DataKey::Admin).unwrap()
+}
+
+fn is_paused(env: &Env) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+}
+
+fn check_not_paused(env: &Env) -> Result<(), ContractError> {
+    if is_paused(env) {
+        Err(ContractError::ContractPaused)
+    } else {
+        Ok(())
+    }
+}
+
+fn check_admin(env: &Env, addr: &Address) -> Result<(), ContractError> {
+    if addr != &admin(env) {
+        Err(ContractError::Unauthorized)
+    } else {
+        Ok(())
+    }
+}
 
 #[contract]
 pub struct InvoiceContract;
 
 #[contractimpl]
 impl InvoiceContract {
-    pub fn initialize(env: Env, admin: Address) {
-        if env.storage().instance().has(&INIT_KEY) {
-            panic_with_error!(&env, InvoiceError::AlreadyInitialized);
+    pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
+        if env.storage().persistent().has(&DataKey::Admin) {
+            return Err(ContractError::AlreadyInitialized);
         }
-        env.storage().instance().set(&ADMIN_KEY, &admin);
-        env.storage().instance().set(&PAUSED_KEY, &false);
-        env.storage().instance().set(&INIT_KEY, &true);
-    }
-
-    pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
-    }
-
-    fn require_not_paused(env: &Env) {
-        if env.storage().instance().get(&PAUSED_KEY).unwrap_or(false) {
-            panic_with_error!(env, InvoiceError::ContractPaused);
-        }
-    }
-
-    fn require_admin(env: &Env, caller: &Address) {
-        let admin: Address = env.storage().instance().get(&ADMIN_KEY).unwrap();
-        if caller != &admin {
-            panic_with_error!(env, InvoiceError::Unauthorized);
-        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Admin, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::GraceWindow, &86400u64);
+        env.storage()
+            .persistent()
+            .set(&DataKey::InvoiceCount, &0u64);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Paused, &false);
+        Ok(())
     }
 
     pub fn create_invoice(
         env: Env,
-        caller: Address,
         merchant: Address,
-        amount_usdc: i128,
-        gross_usdc: i128,
+        customer: Address,
+        amount: i128,
+        token: Address,
         expires_at: u64,
-    ) -> u32 {
-        Self::require_not_paused(&env);
-        caller.require_auth();
+        nonce: u64,
+    ) -> Result<u64, ContractError> {
+        check_not_paused(&env)?;
+        merchant.require_auth();
 
-        if amount_usdc <= 0 || gross_usdc < amount_usdc {
-            panic_with_error!(&env, InvoiceError::InvalidAmount);
+        let nonce_key = DataKey::Nonce(merchant.clone(), nonce);
+        if env.storage().persistent().has(&nonce_key) {
+            return Err(ContractError::DuplicateNonce);
         }
-
-        let id: u32 = env.storage().instance().get(&NEXT_ID_KEY).unwrap_or(1);
-        env.storage().instance().set(&NEXT_ID_KEY, &(id + 1));
-
-        let zero_addr = Address::from_string(&soroban_sdk::String::from_str(
-            &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        ));
-
-        let invoice = Invoice {
-            id,
-            merchant,
-            payer: zero_addr,
-            amount_usdc,
-            gross_usdc,
-            expires_at,
-            status: InvoiceStatus::Pending,
-            paid_at: 0,
-        };
-
-        env.storage().persistent().set(&id, &invoice);
-        env.storage().persistent().extend_ttl(&id, 5000, 5000);
-
-        env.events().publish(("invoice_created", id), &invoice);
-        id
-    }
-
-    pub fn get_invoice(env: Env, id: u32) -> Invoice {
         env.storage()
             .persistent()
-            .get(&id)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound))
-    }
+            .set(&nonce_key, &true);
 
-    pub fn get_invoice_status(env: Env, id: u32) -> InvoiceStatus {
-        let invoice = Self::get_invoice(env, id);
-        invoice.status
-    }
-
-    pub fn mark_paid(env: Env, caller: Address, id: u32) {
-        Self::require_not_paused(&env);
-        caller.require_auth();
-
-        let mut invoice: Invoice = env
+        let mut count: u64 = env
             .storage()
             .persistent()
-            .get(&id)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            .get(&DataKey::InvoiceCount)
+            .unwrap_or(0);
+        count += 1;
+        env.storage()
+            .persistent()
+            .set(&DataKey::InvoiceCount, &count);
 
-        if invoice.status != InvoiceStatus::Pending {
-            panic_with_error!(&env, InvoiceError::NotPending);
-        }
+        let now = env.ledger().timestamp();
+        let invoice = Invoice {
+            id: count,
+            merchant: merchant.clone(),
+            customer,
+            amount,
+            token,
+            status: InvoiceStatus::Pending,
+            created_at: now,
+            expires_at,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(count), &invoice);
 
-        if env.ledger().timestamp() >= invoice.expires_at {
-            panic_with_error!(&env, InvoiceError::Expired);
-        }
-
-        invoice.status = InvoiceStatus::Paid;
-        invoice.payer = caller.clone();
-        invoice.paid_at = env.ledger().timestamp();
-
-        env.storage().persistent().set(&id, &invoice);
-        env.events().publish(("invoice_paid", id, caller), ());
+        events::invoice_created(&env, &merchant, &count);
+        Ok(count)
     }
 
-    pub fn batch_expire(env: Env, offset: u32, limit: u32) -> u32 {
-        if limit > DEFAULT_BATCH_LIMIT {
-            panic_with_error!(&env, InvoiceError::InvalidAmount);
+    pub fn get_invoice(env: Env, invoice_id: u64) -> Result<Invoice, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Invoice(invoice_id))
+            .ok_or(ContractError::InvoiceNotFound)
+    }
+
+    pub fn get_invoice_status(env: Env, invoice_id: u64) -> Result<InvoiceStatus, ContractError> {
+        let invoice = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Invoice>(&DataKey::Invoice(invoice_id))
+            .ok_or(ContractError::InvoiceNotFound)?;
+        Ok(invoice.status)
+    }
+
+    pub fn mark_paids(env: Env, invoice_ids: Vec<u64>) -> Result<(), ContractError> {
+        check_not_paused(&env)?;
+        for id in invoice_ids.iter() {
+            let mut invoice = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Invoice>(&DataKey::Invoice(id))
+                .ok_or(ContractError::InvoiceNotFound)?;
+            if invoice.status != InvoiceStatus::Pending {
+                return Err(ContractError::InvoiceAlreadyPaid);
+            }
+            if env.ledger().timestamp() >= invoice.expires_at {
+                return Err(ContractError::InvoiceExpired);
+            }
+            invoice.status = InvoiceStatus::Paid;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Invoice(id), &invoice);
+            events::invoice_paid(&env, &id);
         }
+        Ok(())
+    }
 
-        let total: u32 = env.storage().instance().get(&NEXT_ID_KEY).unwrap_or(1);
-        let end = (offset + limit).min(total);
-        let mut expired_count: u32 = 0;
+    pub fn cancel_invoiced(env: Env, invoice_id: u64, caller: Address) -> Result<(), ContractError> {
+        check_not_paused(&env)?;
+        let mut invoice = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Invoice>(&DataKey::Invoice(invoice_id))
+            .ok_or(ContractError::InvoiceNotFound)?;
+        if caller != invoice.merchant && caller != invoice.customer {
+            return Err(ContractError::Unauthorized);
+        }
+        if invoice.status != InvoiceStatus::Pending {
+            return Err(ContractError::InvoiceCancelled);
+        }
+        invoice.status = InvoiceStatus::Cancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(invoice_id), &invoice);
+        events::invoice_cancelled(&env, &invoice_id);
+        Ok(())
+    }
 
-        for id in offset..end {
-            if let Some(mut invoice) = env.storage().persistent().get(&id) {
-                if invoice.status == InvoiceStatus::Pending
-                    && env.ledger().timestamp() >= invoice.expires_at
-                {
-                    invoice.status = InvoiceStatus::Expired;
-                    env.storage().persistent().set(&id, &invoice);
-                    expired_count += 1;
-                    env.events().publish(("invoice_expired", id), ());
-                }
+    pub fn request_refund(
+        env: Env,
+        invoice_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        check_not_paused(&env)?;
+        let mut invoice = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Invoice>(&DataKey::Invoice(invoice_id))
+            .ok_or(ContractError::InvoiceNotFound)?;
+        if caller != invoice.customer {
+            return Err(ContractError::NotCustomer);
+        }
+        if invoice.status != InvoiceStatus::Paid {
+            return Err(ContractError::InvoiceNotFound);
+        }
+        if invoice.status == InvoiceStatus::RefundRequested {
+            return Err(ContractError::AlreadyRefundRequested);
+        }
+        invoice.status = InvoiceStatus::RefundRequested;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(invoice_id), &invoice);
+        events::invoice_refund_req(&env, &invoice_id);
+        Ok(())
+    }
+
+    pub fn release_escrow(
+        env: Env,
+        invoice_id: u64,
+        caller: Address,
+    ) -> Result<(), ContractError> {
+        check_not_paused(&env)?;
+        let mut invoice = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Invoice>(&DataKey::Invoice(invoice_id))
+            .ok_or(ContractError::InvoiceNotFound)?;
+        if caller != invoice.merchant {
+            return Err(ContractError::NotMerchant);
+        }
+        if invoice.status != InvoiceStatus::RefundRequested {
+            return Err(ContractError::RefundNotRequested);
+        }
+        let grace_window: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::GraceWindow)
+            .unwrap();
+        if env.ledger().timestamp() < invoice.created_at + grace_window {
+            return Err(ContractError::GraceWindowNotExpired);
+        }
+        invoice.status = InvoiceStatus::Released;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Invoice(invoice_id), &invoice);
+        events::escrow_released(&env, &invoice_id);
+        Ok(())
+    }
+
+    pub fn batch_expire(env: Env, invoice_ids: Vec<u64>) -> Result<(), ContractError> {
+        check_not_paused(&env)?;
+        let now = env.ledger().timestamp();
+        for id in invoice_ids.iter() {
+            let mut invoice = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Invoice>(&DataKey::Invoice(id))
+                .ok_or(ContractError::InvoiceNotFound)?;
+            if invoice.status == InvoiceStatus::Pending && now >= invoice.expires_at {
+                invoice.status = InvoiceStatus::Expired;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::Invoice(id), &invoice);
+                events::invoice_expired(&env, &id);
             }
         }
-
-        expired_count
+        Ok(())
     }
 
-    pub fn request_refund(env: Env, caller: Address, id: u32) {
-        Self::require_not_paused(&env);
-        caller.require_auth();
-
-        let mut invoice: Invoice = env
-            .storage()
+    pub fn pause(env: Env, caller: Address) -> Result<(), ContractError> {
+        check_admin(&env, &caller)?;
+        env.storage()
             .persistent()
-            .get(&id)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-
-        if invoice.status != InvoiceStatus::Paid {
-            panic_with_error!(&env, InvoiceError::NotPaid);
-        }
-
-        if caller != invoice.payer {
-            panic_with_error!(&env, InvoiceError::Unauthorized);
-        }
-
-        invoice.status = InvoiceStatus::RefundRequested;
-        env.storage().persistent().set(&id, &invoice);
-        env.events().publish(("invoice_refund_req", id, caller), ());
+            .set(&DataKey::Paused, &true);
+        events::contract_paused(&env);
+        Ok(())
     }
 
-    pub fn cancel_invoice(env: Env, caller: Address, id: u32) {
-        Self::require_not_paused(&env);
-        caller.require_auth();
-
-        let mut invoice: Invoice = env
-            .storage()
+    pub fn unpause(env: Env, caller: Address) -> Result<(), ContractError> {
+        check_admin(&env, &caller)?;
+        env.storage()
             .persistent()
-            .get(&id)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-
-        if invoice.merchant != caller {
-            panic_with_error!(&env, InvoiceError::Unauthorized);
-        }
-
-        if invoice.status != InvoiceStatus::Pending {
-            panic_with_error!(&env, InvoiceError::NotPending);
-        }
-
-        invoice.status = InvoiceStatus::Cancelled;
-        env.storage().persistent().set(&id, &invoice);
-        env.events().publish(("invoice_cancelled", id), ());
+            .set(&DataKey::Paused, &false);
+        events::contract_unpaused(&env);
+        Ok(())
     }
 
-    pub fn release_escrow(env: Env, caller: Address, id: u32) {
-        Self::require_not_paused(&env);
-        caller.require_auth();
-
-        let mut invoice: Invoice = env
-            .storage()
+    pub fn set_grace_window(env: Env, caller: Address, window: u64) -> Result<(), ContractError> {
+        check_admin(&env, &caller)?;
+        env.storage()
             .persistent()
-            .get(&id)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-
-        if invoice.status != InvoiceStatus::Paid
-            && invoice.status != InvoiceStatus::RefundRequested
-        {
-            panic_with_error!(&env, InvoiceError::NotPaid);
-        }
-
-        invoice.status = InvoiceStatus::Released;
-        env.storage().persistent().set(&id, &invoice);
-        env.events().publish(("escrow_released", id), ());
+            .set(&DataKey::GraceWindow, &window);
+        Ok(())
     }
 
-    pub fn pause(env: Env, caller: Address) {
-        caller.require_auth();
-        Self::require_admin(&env, &caller);
-        env.storage().instance().set(&PAUSED_KEY, &true);
-        env.events().publish(("contract_paused",), ());
-    }
-
-    pub fn unpause(env: Env, caller: Address) {
-        caller.require_auth();
-        Self::require_admin(&env, &caller);
-        env.storage().instance().set(&PAUSED_KEY, &false);
-        env.events().publish(("contract_unpaused",), ());
+    pub fn get_grace_window(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::GraceWindow)
+            .unwrap_or(86400)
     }
 }
 
 #[cfg(test)]
-mod test;
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::{testutils::Events, vec, Env, IntoVal};
+
+    fn setup_env() -> (Env, Address, Address) {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+
+        client.initialize(&admin);
+
+        // set ledger time
+        env.ledger().set_timestamp(1000);
+
+        (env, merchant, customer, token)
+    }
+
+    #[test]
+    fn test_create_invoice_with_unique_nonce_succeeds() {
+        let (_env, merchant, customer, token) = setup_env();
+
+        // first call with nonce=1 should succeed
+        // the env & contract_id are consumed by setup_env, so we need the client
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        env.ledger().set_timestamp(1000);
+
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        let invoice_id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        assert_eq!(invoice_id, 1);
+    }
+
+    #[test]
+    fn test_create_invoice_with_duplicate_nonce_returns_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        env.ledger().set_timestamp(1000);
+
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        // first call succeeds
+        client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+
+        // second call with same nonce should fail with DuplicateNonce
+        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        assert_eq!(result, Err(Ok(ContractError::DuplicateNonce)));
+    }
+
+    #[test]
+    fn test_different_merchants_can_reuse_same_nonce() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let merchant_a = Address::generate(&env);
+        let merchant_b = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        env.ledger().set_timestamp(1000);
+
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        // both merchants can use nonce=1
+        client.create_invoice(&merchant_a, &customer, &1000i128, &token, &5000, &1);
+        client.create_invoice(&merchant_b, &customer, &1000i128, &token, &5000, &1);
+
+        let invoice_a = client.get_invoice(&1).unwrap();
+        let invoice_b = client.get_invoice(&2).unwrap();
+        assert_eq!(invoice_a.merchant, merchant_a);
+        assert_eq!(invoice_b.merchant, merchant_b);
+    }
+}
