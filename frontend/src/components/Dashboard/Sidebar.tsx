@@ -5,6 +5,7 @@ const links = [
   { to: "/invoices", label: "Invoices", icon: "receipt" },
   { to: "/settlements", label: "Settlements", icon: "account_balance" },
   { to: "/disputes", label: "Disputes", icon: "gavel" },
+  { to: "/signers", label: "Signers", icon: "signers" },
   { to: "/settings", label: "Settings", icon: "settings" },
 ];
 
@@ -12,6 +13,7 @@ const iconMap: Record<string, string> = {
   receipt: "\u{1F4CB}",
   account_balance: "\u{1F3E6}",
   gavel: "\u{2696}\u{FE0F}",
+  signers: "\u{1F511}",
   settings: "\u{2699}\u{FE0F}",
 };
 

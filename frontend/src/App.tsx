@@ -1,6 +1,9 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import DashboardLayout from "./components/Dashboard/DashboardLayout";
 import SettlementProposalForm from "./components/SettlementProposal/SettlementProposalForm";
+import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
+import SignerManagement from "./components/SignerManagement/SignerManagement";
+import ABIExplorer from "./components/ABIExplorer";
 
 function InvoicesPage() {
   return <p>Invoices list will appear here.</p>;
@@ -11,7 +14,11 @@ function SettlementsPage() {
 }
 
 function DisputesPage() {
-  return <p>Disputes list will appear here.</p>;
+  return <DisputeVotingPanel />;
+}
+
+function SignersPage() {
+  return <SignerManagement />;
 }
 
 function SettingsPage() {
@@ -26,7 +33,9 @@ export default function App() {
         <Route path="invoices" element={<InvoicesPage />} />
         <Route path="settlements" element={<SettlementsPage />} />
         <Route path="disputes" element={<DisputesPage />} />
+        <Route path="signers" element={<SignersPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="abi" element={<ABIExplorer />} />
       </Route>
     </Routes>
   );

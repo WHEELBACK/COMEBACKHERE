@@ -4,6 +4,7 @@ import { useInvoice } from "../hooks/useInvoice"
 import { useWallet } from "../hooks/useWallet"
 import { StatusBadge } from "./StatusBadge"
 import { PayConfirmationModal } from "./PayConfirmationModal"
+import { TransactionHistory } from "./TransactionHistory"
 
 export function InvoicePayment() {
   const { invoice, loading, error, loadInvoice, pay } = useInvoice()
@@ -11,6 +12,12 @@ export function InvoicePayment() {
   const [invoiceId, setInvoiceId] = useState("")
   const [showConfirm, setShowConfirm] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [timeLeft, setTimeLeft] = useState<{
+    days: number
+    hours: number
+    minutes: number
+    seconds: number
+  } | null>(null)
   const [result, setResult] = useState<{
     success: boolean
     hash?: string
@@ -25,6 +32,37 @@ export function InvoicePayment() {
       loadInvoice(Number(id))
     }
   }, [loadInvoice])
+
+  useEffect(() => {
+    if (!invoice?.expires_at) {
+      setTimeLeft(null)
+      return
+    }
+
+    const updateTimer = () => {
+      const diff = invoice.expires_at * 1000 - Date.now()
+      if (diff <= 0) {
+        setTimeLeft({ days: 0, hours: 0, minutes: 0, seconds: 0 })
+        if (invoice.status === "Pending") {
+          void loadInvoice(Number(invoice.id))
+        }
+        return
+      }
+
+      const totalSeconds = Math.floor(diff / 1000)
+      setTimeLeft({
+        days: Math.floor(totalSeconds / 86400),
+        hours: Math.floor((totalSeconds % 86400) / 3600),
+        minutes: Math.floor((totalSeconds % 3600) / 60),
+        seconds: totalSeconds % 60,
+      })
+    }
+
+    updateTimer()
+    const timer = window.setInterval(updateTimer, 1000)
+
+    return () => window.clearInterval(timer)
+  }, [invoice?.expires_at, invoice?.id, invoice?.status, loadInvoice])
 
   const handleLoadInvoice = async () => {
     setResult(null)
@@ -106,6 +144,18 @@ export function InvoicePayment() {
               <span className="detail-value">{invoice.amount_usdc}</span>
             </div>
             <div className="detail-row">
+              <span className="detail-label">Countdown</span>
+              <span className="detail-value">
+                {invoice.status === "Expired" || (timeLeft && timeLeft.days === 0 && timeLeft.hours === 0 && timeLeft.minutes === 0 && timeLeft.seconds === 0) ? (
+                  <span className="badge badge--expired">Expired</span>
+                ) : timeLeft ? (
+                  `${timeLeft.days}d ${timeLeft.hours}h ${timeLeft.minutes}m ${timeLeft.seconds}s`
+                ) : (
+                  "--"
+                )}
+              </span>
+            </div>
+            <div className="detail-row">
               <span className="detail-label">Gross Amount (USDC)</span>
               <span className="detail-value">{invoice.gross_usdc}</span>
             </div>
@@ -153,6 +203,8 @@ export function InvoicePayment() {
           </div>
         </div>
       )}
+
+      {invoice && <TransactionHistory invoice={invoice} />}
 
       {showConfirm && invoice && (
         <PayConfirmationModal
