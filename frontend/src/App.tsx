@@ -28,6 +28,7 @@ export default function App() {
         <Route path="settlements" element={<SettlementsPage />} />
         <Route path="disputes" element={<DisputesPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="abi" element={<ABIExplorer />} />
       </Route>
     </Routes>
   );
