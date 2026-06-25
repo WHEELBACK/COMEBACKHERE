@@ -25,25 +25,23 @@ pre-commit run --all-files
 
 ## Branch Protection
 
-The `main` branch is protected. Direct pushes are not allowed; all changes must
-go through a pull request.
+The `main` branch is protected. Direct pushes are not allowed; all changes must go through a pull request.
 
 ### Required status checks
 
-All of the following CI checks must pass before a PR can be merged:
+All of the following checks must pass before a PR can be merged:
 
-- `contract-build` — Soroban contracts compile without errors
-- `contract-tests` — contract unit and integration tests pass
-- `abi-snapshot-hygiene` — ABI snapshots in `abis/` are consistent with contract sources
-- `markdown-lint` — documentation passes markdownlint rules
-- `frontend-build` — frontend builds without errors
+- `contract-build` — Soroban contract compilation
+- `contract-tests` — contract unit and integration tests
+- `abi-snapshot-hygiene` — ABI metadata in `abis/` is consistent with contract source
+- `markdown-lint` — documentation linting
+- `frontend-build` — frontend build succeeds
 
 ### Required reviews
 
-- At least **1 approving review** is required for all PRs targeting `main`.
-- At least **2 approving reviews** are required for PRs that touch mainnet-related
-  paths (`docs/MAINNET_DEPLOYMENT.md`, mainnet deployment scripts, or governance
-  configuration).
+- At least **1 approving review** is required for all PRs.
+- At least **2 approving reviews** are required for PRs that touch mainnet-related paths
+  (`docs/MAINNET_DEPLOYMENT.md`, deployment scripts, or governance configuration).
 
 ## ABI snapshots
 
