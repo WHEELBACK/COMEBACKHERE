@@ -55,6 +55,11 @@ impl TreasuryContract {
             panic_with_error!(&e, TreasuryError::ContractPaused);
         }
 
+        let allowlist: Vec<Address> = e.storage().instance().get(&DataKey::TokenAllowlist).unwrap_or_else(|| Vec::new(&e));
+        if !allowlist.is_empty() && !allowlist.contains(&token) {
+            panic_with_error!(&e, TreasuryError::TokenNotAllowed);
+        }
+
         let settlement_id = e
             .storage()
             .instance()
@@ -136,6 +141,27 @@ impl TreasuryContract {
         admin.require_auth();
     }
 
+    pub fn add_token_to_allowlist(e: Env, admin: Address, token: Address) {
+        admin.require_auth();
+        let mut allowlist: Vec<Address> = e.storage().instance().get(&DataKey::TokenAllowlist).unwrap_or_else(|| Vec::new(&e));
+        if !allowlist.contains(&token) {
+            allowlist.push_back(token);
+        }
+        e.storage().instance().set(&DataKey::TokenAllowlist, &allowlist);
+    }
+
+    pub fn remove_token_from_allowlist(e: Env, admin: Address, token: Address) {
+        admin.require_auth();
+        let allowlist: Vec<Address> = e.storage().instance().get(&DataKey::TokenAllowlist).unwrap_or_else(|| Vec::new(&e));
+        let mut updated = Vec::new(&e);
+        for t in allowlist.iter() {
+            if t != token {
+                updated.push_back(t);
+            }
+        }
+        e.storage().instance().set(&DataKey::TokenAllowlist, &updated);
+    }
+
     fn get_settlement_internal(e: &Env, settlement_id: u64) -> Settlement {
         e.storage()
             .instance()
@@ -151,6 +177,7 @@ pub enum TreasuryError {
     ContractPaused = 1,
     NotPending = 2,
     InsufficientApprovals = 3,
+    TokenNotAllowed = 4,
 }
 
 #[contracttype]
@@ -161,4 +188,5 @@ pub enum DataKey {
     Settlement(u64),
     NextSettlementId,
     Threshold,
+    TokenAllowlist,
 }
