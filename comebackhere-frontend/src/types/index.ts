@@ -7,6 +7,23 @@ export enum InvoiceStatus {
   Released = "Released",
 }
 
+export type TransactionEventType =
+  | "invoice_created"
+  | "invoice_paid"
+  | "invoice_expired"
+  | "invoice_cancelled"
+  | "settlement_proposed"
+  | "settlement_executed"
+  | "dispute_raised"
+  | "dispute_resolved"
+
+export interface TransactionEvent {
+  type: TransactionEventType
+  timestamp: number
+  address: string
+  description: string
+}
+
 export interface Invoice {
   id: string
   merchant: string
