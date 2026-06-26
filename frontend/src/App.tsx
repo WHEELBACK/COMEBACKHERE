@@ -1,9 +1,10 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import DashboardLayout from "./components/Dashboard/DashboardLayout";
 import SettlementProposalForm from "./components/SettlementProposal/SettlementProposalForm";
 import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
 import SignerManagement from "./components/SignerManagement/SignerManagement";
 import ABIExplorer from "./components/ABIExplorer";
+import OnboardingWizard from "./components/OnboardingWizard/OnboardingWizard";
 
 function InvoicesPage() {
   return <p>Invoices list will appear here.</p>;
@@ -25,9 +26,15 @@ function SettingsPage() {
   return <p>Settings will appear here.</p>;
 }
 
+function OnboardingPage() {
+  const navigate = useNavigate();
+  return <OnboardingWizard onComplete={() => navigate("/invoices")} />;
+}
+
 export default function App() {
   return (
     <Routes>
+      <Route path="onboarding" element={<OnboardingPage />} />
       <Route element={<DashboardLayout />}>
         <Route index element={<Navigate to="/invoices" replace />} />
         <Route path="invoices" element={<InvoicesPage />} />
