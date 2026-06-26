@@ -2,9 +2,11 @@ import { useState, useEffect } from "react"
 import { InvoicePayment } from "./components/InvoicePayment"
 import { RefundRequest } from "./components/RefundRequest"
 import { ComplianceManager } from "./components/ComplianceManager"
+import { ErrorBoundary } from "./components/ErrorBoundary"
 import { useInvoice } from "./hooks/useInvoice"
 import { useWallet } from "./hooks/useWallet"
 import "./App.css"
+import "./components/ErrorBoundary.css"
 
 type Tab = "payment" | "refund" | "compliance"
 
@@ -124,13 +126,15 @@ export default function App() {
       </nav>
 
       <main className="app-main">
-        {tab === "payment" ? (
-          <InvoicePayment />
-        ) : tab === "refund" ? (
-          <RefundTab />
-        ) : (
-          <ComplianceManager />
-        )}
+        <ErrorBoundary fallbackTitle="This section encountered an error">
+          {tab === "payment" ? (
+            <InvoicePayment />
+          ) : tab === "refund" ? (
+            <RefundTab />
+          ) : (
+            <ComplianceManager />
+          )}
+        </ErrorBoundary>
       </main>
     </div>
   )
