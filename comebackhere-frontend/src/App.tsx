@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { InvoicePayment } from "./components/InvoicePayment"
 import { RefundRequest } from "./components/RefundRequest"
 import { ComplianceManager } from "./components/ComplianceManager"
 import { useInvoice } from "./hooks/useInvoice"
+import { useTheme } from "./hooks/useTheme"
 import { useWallet } from "./hooks/useWallet"
 import "./App.css"
 
@@ -79,26 +80,38 @@ function RefundTab() {
 
 export default function App() {
   const { address, connected, connect, connecting } = useWallet()
+  const { theme, toggleTheme } = useTheme()
   const [tab, setTab] = useState<Tab>("payment")
+  const nextTheme = theme === "dark" ? "light" : "dark"
 
   return (
     <div className="app">
       <header className="app-header">
         <h1>ComebackHere</h1>
-        <div className="wallet-bar">
-          {connected ? (
-            <span className="wallet-address">
-              Connected: {address?.slice(0, 6)}...{address?.slice(-4)}
-            </span>
-          ) : (
-            <button
-              className="btn btn--primary btn--sm"
-              onClick={connect}
-              disabled={connecting}
-            >
-              {connecting ? "Connecting..." : "Connect Wallet"}
-            </button>
-          )}
+        <div className="header-actions">
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={toggleTheme}
+            aria-label={`Switch to ${nextTheme} theme`}
+          >
+            <span>{theme === "dark" ? "Light" : "Dark"}</span>
+          </button>
+          <div className="wallet-bar">
+            {connected ? (
+              <span className="wallet-address">
+                Connected: {address?.slice(0, 6)}...{address?.slice(-4)}
+              </span>
+            ) : (
+              <button
+                className="btn btn--primary btn--sm"
+                onClick={connect}
+                disabled={connecting}
+              >
+                {connecting ? "Connecting..." : "Connect Wallet"}
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
