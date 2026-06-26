@@ -4,6 +4,7 @@ import SettlementProposalForm from "./components/SettlementProposal/SettlementPr
 import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
 import SignerManagement from "./components/SignerManagement/SignerManagement";
 import ABIExplorer from "./components/ABIExplorer";
+import SettlementDetailPage from "./components/SettlementDetail/SettlementDetailPage";
 
 function InvoicesPage() {
   return <p>Invoices list will appear here.</p>;
@@ -32,6 +33,7 @@ export default function App() {
         <Route index element={<Navigate to="/invoices" replace />} />
         <Route path="invoices" element={<InvoicesPage />} />
         <Route path="settlements" element={<SettlementsPage />} />
+        <Route path="settlements/:id" element={<SettlementDetailPage />} />
         <Route path="disputes" element={<DisputesPage />} />
         <Route path="signers" element={<SignersPage />} />
         <Route path="settings" element={<SettingsPage />} />
