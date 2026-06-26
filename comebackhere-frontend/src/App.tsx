@@ -2,9 +2,12 @@ import { useState, useEffect } from "react"
 import { InvoicePayment } from "./components/InvoicePayment"
 import { RefundRequest } from "./components/RefundRequest"
 import { ComplianceManager } from "./components/ComplianceManager"
+import { WalletBar } from "./components/WalletBar"
 import { useInvoice } from "./hooks/useInvoice"
 import { useWallet } from "./hooks/useWallet"
 import "./App.css"
+
+const EXPECTED_NETWORK = import.meta.env.VITE_NETWORK_PASSPHRASE as string ?? "Standalone Network ; February 2025"
 
 type Tab = "payment" | "refund" | "compliance"
 
@@ -80,26 +83,34 @@ function RefundTab() {
 export default function App() {
   const { address, connected, connect, connecting } = useWallet()
   const [tab, setTab] = useState<Tab>("payment")
+  const [network, setNetwork] = useState<string | null>(null)
+
+  useEffect(() => {
+    const detect = async () => {
+      if ((window as any).freighterApi?.getNetwork) {
+        try {
+          const { network: n } = await (window as any).freighterApi.getNetwork()
+          setNetwork(n)
+        } catch {
+          setNetwork(null)
+        }
+      }
+    }
+    if (connected) detect()
+  }, [connected])
 
   return (
     <div className="app">
       <header className="app-header">
         <h1>ComebackHere</h1>
-        <div className="wallet-bar">
-          {connected ? (
-            <span className="wallet-address">
-              Connected: {address?.slice(0, 6)}...{address?.slice(-4)}
-            </span>
-          ) : (
-            <button
-              className="btn btn--primary btn--sm"
-              onClick={connect}
-              disabled={connecting}
-            >
-              {connecting ? "Connecting..." : "Connect Wallet"}
-            </button>
-          )}
-        </div>
+        <WalletBar
+          connected={connected}
+          connecting={connecting}
+          address={address}
+          network={network}
+          expectedNetwork={EXPECTED_NETWORK}
+          onConnect={connect}
+        />
       </header>
 
       <nav className="tabs">
