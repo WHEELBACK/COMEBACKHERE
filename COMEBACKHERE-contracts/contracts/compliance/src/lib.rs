@@ -113,3 +113,43 @@ impl ComplianceContract {
         e.storage().instance().set(&DataKey::Paused, &false);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::Env;
+
+    fn setup(ts: u64) -> (Env, ComplianceContractClient, Address, Address) {
+        let e = Env::default();
+        e.mock_all_auths();
+        let contract_id = e.register_contract(None, ComplianceContract);
+        let c = ComplianceContractClient::new(&e, &contract_id);
+        let admin = Address::generate(&e);
+        let addr = Address::generate(&e);
+        c.initialize(&admin);
+        e.ledger().set_timestamp(ts);
+        (e, c, admin, addr)
+    }
+
+    #[test]
+    fn test_is_allowed_not_expired() {
+        let (_e, c, admin, addr) = setup(1000);
+        c.allow_address_until(&admin, &addr, &2000u64);
+        assert!(c.is_allowed(&addr));
+    }
+
+    #[test]
+    fn test_is_allowed_exactly_at_expiry_returns_false() {
+        let (_e, c, admin, addr) = setup(1000);
+        c.allow_address_until(&admin, &addr, &1000u64);
+        assert!(!c.is_allowed(&addr));
+    }
+
+    #[test]
+    fn test_is_allowed_past_expiry_returns_false() {
+        let (_e, c, admin, addr) = setup(1001);
+        c.allow_address_until(&admin, &addr, &1000u64);
+        assert!(!c.is_allowed(&addr));
+    }
+}
