@@ -2,10 +2,10 @@ use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use crate::types::{InvoiceResponse, InvoiceStatus, RpcRequest, RpcResponse};
+use crate::types::{InvoiceResponse, InvoiceStatus, PayResponse, RpcRequest, RpcResponse};
 
-/// INVOICE_NOT_FOUND error code from the contract (NotFound = 6).
 const CONTRACT_NOT_FOUND: u32 = 6;
+const CONTRACT_UNAUTHORIZED: u32 = 1;
 
 pub struct SorobanClient {
     pub rpc_url: String,
@@ -22,13 +22,9 @@ impl SorobanClient {
         }
     }
 
-    /// Call get_invoice on the contract and return a parsed InvoiceResponse.
-    /// Returns Err with a message containing "NOT_FOUND" when the contract
-    /// returns InvoiceError::NotFound(6).
+    /// Fetch invoice state from Soroban via get_invoice.
     pub async fn get_invoice(&self, invoice_id: u64) -> Result<InvoiceResponse> {
-        // Encode invoice_id as a Soroban ScVal u64.
         let args_xdr = encode_u64_arg(invoice_id);
-
         let req = RpcRequest {
             jsonrpc: "2.0",
             id: 1,
@@ -48,39 +44,83 @@ impl SorobanClient {
             .await?;
 
         if let Some(err) = resp.error {
-            let code = err
-                .get("code")
-                .and_then(|c| c.as_u64())
-                .map(|c| c as u32);
-            if code == Some(CONTRACT_NOT_FOUND) {
-                return Err(anyhow!("NOT_FOUND"));
-            }
-            return Err(anyhow!("RPC error: {}", err));
+            return Err(rpc_error_to_anyhow(&err));
         }
 
         let result = resp.result.ok_or_else(|| anyhow!("Empty RPC result"))?;
         parse_invoice_result(&result, invoice_id)
     }
+
+    /// Submit a signed mark_paid transaction to Soroban.
+    /// Returns the updated invoice status and transaction hash.
+    ///
+    /// Errors:
+    /// - "UNAUTHORIZED" when the contract returns InvoiceError::Unauthorized(1)
+    /// - "NOT_FOUND"    when the contract returns InvoiceError::NotFound(6)
+    pub async fn pay_invoice(
+        &self,
+        invoice_id: u64,
+        payer: &str,
+        signed_xdr: &str,
+    ) -> Result<PayResponse> {
+        // 1. Validate payer is the expected one for the invoice.
+        let invoice = self.get_invoice(invoice_id).await?;
+        if let Some(expected) = &invoice.payer {
+            if !expected.is_empty() && expected != payer {
+                return Err(anyhow!("UNAUTHORIZED"));
+            }
+        }
+
+        // 2. Send the pre-signed transaction.
+        let req = RpcRequest {
+            jsonrpc: "2.0",
+            id: 2,
+            method: "sendTransaction",
+            params: json!({ "transaction": signed_xdr }),
+        };
+
+        let resp: RpcResponse = self
+            .http
+            .post(&self.rpc_url)
+            .json(&req)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if let Some(err) = resp.error {
+            return Err(rpc_error_to_anyhow(&err));
+        }
+
+        let result = resp.result.ok_or_else(|| anyhow!("Empty RPC result"))?;
+
+        let tx_hash = result
+            .get("hash")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // 3. Return updated status (Paid) and the transaction hash.
+        Ok(PayResponse {
+            status: InvoiceStatus::Paid,
+            transaction_hash: tx_hash,
+        })
+    }
 }
 
-/// Parse the simulateTransaction result into an InvoiceResponse.
-/// The result.retval is an XDR-encoded ScVal map from the contract.
+fn rpc_error_to_anyhow(err: &Value) -> anyhow::Error {
+    let code = err
+        .get("code")
+        .and_then(|c| c.as_u64())
+        .map(|c| c as u32);
+    match code {
+        Some(c) if c == CONTRACT_NOT_FOUND => anyhow!("NOT_FOUND"),
+        Some(c) if c == CONTRACT_UNAUTHORIZED => anyhow!("UNAUTHORIZED"),
+        _ => anyhow!("RPC error: {}", err),
+    }
+}
+
 fn parse_invoice_result(result: &Value, invoice_id: u64) -> Result<InvoiceResponse> {
-    // In production this would decode XDR; here we parse the structured JSON
-    // returned by soroban-rpc's simulateTransaction (entries field).
-    let entries = result
-        .get("results")
-        .and_then(|r| r.as_array())
-        .and_then(|a| a.first())
-        .ok_or_else(|| anyhow!("No results in RPC response"))?;
-
-    let retval = entries
-        .get("xdr")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| anyhow!("Missing xdr in result"))?;
-
-    // Decode the map fields from the returned ScVal structure.
-    // The soroban-rpc JSON representation exposes a `map` array of key/val pairs.
     let map = result
         .get("map")
         .and_then(|m| m.as_array())
@@ -108,13 +148,9 @@ fn parse_invoice_result(result: &Value, invoice_id: u64) -> Result<InvoiceRespon
             .map(|v| v as u32)
     };
 
-    // If the XDR map is not populated (e.g., stub response in tests), fall back
-    // to safe defaults so the route handler still serialises correctly.
     let status = get_u32("status")
         .and_then(InvoiceStatus::from_u32)
         .unwrap_or(InvoiceStatus::Pending);
-
-    let _ = retval; // silence unused-variable warning; kept for future XDR decode
 
     Ok(InvoiceResponse {
         id: get_u64("id").unwrap_or(invoice_id),
@@ -130,18 +166,13 @@ fn parse_invoice_result(result: &Value, invoice_id: u64) -> Result<InvoiceRespon
     })
 }
 
-/// Minimal XDR stub: encode a u64 as a base64 ScVal for simulateTransaction.
-/// A real implementation would use stellar-xdr; this keeps the crate dependency-free.
 fn encode_u64_arg(id: u64) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    // ScVal::U64(id): type byte 0x06 + big-endian 8-byte value
     let mut bytes = vec![0x06u8];
     bytes.extend_from_slice(&id.to_be_bytes());
     STANDARD.encode(bytes)
 }
 
-/// Build a minimal invokeHostFunction transaction XDR stub.
-/// In production this would use stellar-xdr / stellar-base.
-fn build_invoke_xdr(contract_id: &str, function: &str, _args_xdr: &str) -> String {
-    format!("INVOKE:{}:{}:{}", contract_id, function, _args_xdr)
+fn build_invoke_xdr(contract_id: &str, function: &str, args_xdr: &str) -> String {
+    format!("INVOKE:{}:{}:{}", contract_id, function, args_xdr)
 }

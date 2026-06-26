@@ -12,7 +12,6 @@ pub enum InvoiceStatus {
 }
 
 impl InvoiceStatus {
-    /// Map from Soroban contract u32 discriminant to InvoiceStatus.
     pub fn from_u32(v: u32) -> Option<Self> {
         match v {
             0 => Some(Self::Pending),
@@ -40,13 +39,28 @@ pub struct InvoiceResponse {
     pub created_at: Option<u64>,
 }
 
+/// Request body for POST /invoices/:id/pay
+#[derive(Debug, Deserialize)]
+pub struct PayRequest {
+    /// The Stellar public key of the payer (G…).
+    pub payer: String,
+    /// Signed XDR transaction envelope (base64).
+    pub signed_xdr: String,
+}
+
+/// Response body for POST /invoices/:id/pay
+#[derive(Debug, Serialize)]
+pub struct PayResponse {
+    pub status: InvoiceStatus,
+    pub transaction_hash: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
     pub code: Option<u32>,
 }
 
-/// Soroban RPC request shape (minimal).
 #[derive(Debug, Serialize)]
 pub struct RpcRequest {
     pub jsonrpc: &'static str,
@@ -55,7 +69,6 @@ pub struct RpcRequest {
     pub params: serde_json::Value,
 }
 
-/// Soroban RPC response shape (minimal).
 #[derive(Debug, Deserialize)]
 pub struct RpcResponse {
     pub result: Option<serde_json::Value>,
