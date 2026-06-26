@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react"
-import type { Invoice } from "../types"
 import { useInvoice } from "../hooks/useInvoice"
 import { useWallet } from "../hooks/useWallet"
 import { StatusBadge } from "./StatusBadge"

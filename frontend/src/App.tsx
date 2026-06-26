@@ -4,7 +4,7 @@ import SettlementProposalForm from "./components/SettlementProposal/SettlementPr
 import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
 import SignerManagement from "./components/SignerManagement/SignerManagement";
 import ABIExplorer from "./components/ABIExplorer";
-import SettlementDetailPage from "./components/SettlementDetail/SettlementDetailPage";
+import { ThemeProvider, useTheme } from "./theme";
 
 function InvoicesPage() {
   return <p>Invoices list will appear here.</p>;
@@ -23,10 +23,30 @@ function SignersPage() {
 }
 
 function SettingsPage() {
-  return <p>Settings will appear here.</p>;
+  const { theme, toggleTheme } = useTheme();
+  const nextTheme = theme === "dark" ? "light" : "dark";
+
+  return (
+    <section className="settings-panel">
+      <div>
+        <h3 className="settings-panel__title">Appearance</h3>
+        <p className="settings-panel__description">
+          Current theme: {theme}. Your choice is remembered on this device.
+        </p>
+      </div>
+      <button
+        type="button"
+        className="theme-toggle theme-toggle--wide"
+        onClick={toggleTheme}
+        aria-label={`Switch to ${nextTheme} theme`}
+      >
+        <span>Use {nextTheme} theme</span>
+      </button>
+    </section>
+  );
 }
 
-export default function App() {
+function AppRoutes() {
   return (
     <Routes>
       <Route element={<DashboardLayout />}>
@@ -40,5 +60,13 @@ export default function App() {
         <Route path="abi" element={<ABIExplorer />} />
       </Route>
     </Routes>
+  );
+}
+
+export default function App() {
+  return (
+    <ThemeProvider>
+      <AppRoutes />
+    </ThemeProvider>
   );
 }
