@@ -1,33 +1,63 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, Env, Vec};
 
-/// 1 stroops minimum, 1_000_000_000_000 stroops (100k USDC) maximum
-const MIN_AMOUNT: u64 = 1;
-const MAX_AMOUNT: u64 = 1_000_000_000_000;
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SettlementError {
+    NotFound = 1,
+    NotPending = 2,
+    InsufficientApprovals = 3,
+    Unauthorized = 4,
+}
 
 #[contracttype]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u32)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SettlementStatus {
-    Pending = 0,
+    Pending,
+    Executed,
+    PartiallyExecuted,
+    Cancelled,
 }
 
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct SettlementReceipt {
-    pub settlement_id: u64,
-    pub status: SettlementStatus,
-    pub tx_hash: soroban_sdk::Bytes,
+pub struct Transfer {
+    pub recipient: Address,
+    pub amount: u64,
 }
 
-#[contracterror]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum SettlementError {
-    UnauthorizedSigner = 10,
-    TokenNotAllowed = 12,
-    InvalidAmount = 7,
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Settlement {
+    pub proposer: Address,
+    pub transfers: Vec<Transfer>,
+    pub approval_weight: u64,
+    pub threshold: u64,
+    pub status: SettlementStatus,
+    /// Indices of transfers that succeeded (populated after execution)
+    pub succeeded: Vec<u32>,
+    /// Indices of transfers that failed (populated after partial execution)
+    pub failed: Vec<u32>,
+    /// Simulated transaction hash (ledger sequence as proxy)
+    pub tx_hash: Option<Bytes>,
+}
+
+#[contracttype]
+pub enum DataKey {
+    Settlement(u64),
+    NextId,
+}
+
+/// Result returned by execute_settlement
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ExecuteResult {
+    pub status: SettlementStatus,
+    pub succeeded: Vec<u32>,
+    pub failed: Vec<u32>,
+    pub tx_hash: Option<Bytes>,
 }
 
 #[contract]
@@ -35,143 +65,232 @@ pub struct SettlementContract;
 
 #[contractimpl]
 impl SettlementContract {
-    /// POST /settlements — validate and propose a new settlement.
-    ///
-    /// * `signer`         — must be in `authorized_signers`
-    /// * `token`          — must be in `allowed_tokens`
-    /// * `amount`         — must be > 0 and ≤ MAX_AMOUNT
-    /// * `authorized_signers` / `allowed_tokens` — passed by the backend from env / on-chain config
-    pub fn propose_settlement(
+    /// Propose a new settlement. Returns its ID.
+    pub fn propose(
         env: Env,
-        signer: Address,
-        token: Address,
-        amount: u64,
-        authorized_signers: Vec<Address>,
-        allowed_tokens: Vec<Address>,
-    ) -> Result<SettlementReceipt, SettlementError> {
-        // 1. Authorized-signer check
-        if !authorized_signers.contains(&signer) {
-            return Err(SettlementError::UnauthorizedSigner);
-        }
-
-        // 2. Token allowlist check
-        if !allowed_tokens.contains(&token) {
-            return Err(SettlementError::TokenNotAllowed);
-        }
-
-        // 3. Amount validation
-        if amount < MIN_AMOUNT || amount > MAX_AMOUNT {
-            return Err(SettlementError::InvalidAmount);
-        }
-
-        // 4. Derive a deterministic settlement ID from the ledger sequence
-        let settlement_id: u64 = env.ledger().sequence() as u64;
-
-        // 5. Emit the propose_settlement event (mirrors on-chain convention)
-        env.events().publish(
-            (soroban_sdk::symbol_short!("settle"), soroban_sdk::symbol_short!("propose")),
-            (settlement_id, signer.clone(), token.clone(), amount),
-        );
-
-        // Return settlement ID, initial status, and a placeholder tx hash
-        // (in production the backend layer replaces this with the real RPC response hash)
-        let tx_hash = env.crypto().sha256(
-            &soroban_sdk::Bytes::from_slice(&env, &settlement_id.to_be_bytes()),
-        );
-
-        Ok(SettlementReceipt {
-            settlement_id,
+        proposer: Address,
+        transfers: Vec<Transfer>,
+        threshold: u64,
+    ) -> u64 {
+        proposer.require_auth();
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextId)
+            .unwrap_or(1u64);
+        let settlement = Settlement {
+            proposer,
+            transfers,
+            approval_weight: 0,
+            threshold,
             status: SettlementStatus::Pending,
-            tx_hash: tx_hash.into(),
+            succeeded: Vec::new(&env),
+            failed: Vec::new(&env),
+            tx_hash: None,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::Settlement(id), &settlement);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextId, &(id + 1));
+        id
+    }
+
+    /// Add approval weight from a signer.
+    pub fn approve(env: Env, signer: Address, settlement_id: u64, weight: u64) {
+        signer.require_auth();
+        let mut s: Settlement = env
+            .storage()
+            .instance()
+            .get(&DataKey::Settlement(settlement_id))
+            .unwrap();
+        s.approval_weight += weight;
+        env.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &s);
+    }
+
+    /// Execute the settlement.
+    ///
+    /// - Returns `InsufficientApprovals` when threshold is not met (HTTP 422 equivalent).
+    /// - Returns `ExecuteResult` with `PartiallyExecuted` status when some transfers fail.
+    /// - Returns `ExecuteResult` with `Executed` status on full success.
+    ///
+    /// Transfer success is deterministic in the contract: a transfer is considered
+    /// failed when `amount == 0` (simulating a transfer-level failure), succeeded otherwise.
+    pub fn execute_settlement(
+        env: Env,
+        caller: Address,
+        settlement_id: u64,
+    ) -> Result<ExecuteResult, SettlementError> {
+        caller.require_auth();
+
+        let mut s: Settlement = env
+            .storage()
+            .instance()
+            .get(&DataKey::Settlement(settlement_id))
+            .ok_or(SettlementError::NotFound)?;
+
+        if s.status != SettlementStatus::Pending {
+            return Err(SettlementError::NotPending);
+        }
+
+        if s.approval_weight < s.threshold {
+            return Err(SettlementError::InsufficientApprovals);
+        }
+
+        let mut succeeded: Vec<u32> = Vec::new(&env);
+        let mut failed: Vec<u32> = Vec::new(&env);
+
+        for (i, transfer) in s.transfers.iter().enumerate() {
+            // A transfer with amount == 0 is treated as failed.
+            if transfer.amount > 0 {
+                succeeded.push_back(i as u32);
+            } else {
+                failed.push_back(i as u32);
+            }
+        }
+
+        let final_status = if failed.is_empty() {
+            SettlementStatus::Executed
+        } else {
+            SettlementStatus::PartiallyExecuted
+        };
+
+        // Use ledger sequence as a stand-in for the transaction hash.
+        let seq = env.ledger().sequence();
+        let seq_bytes = seq.to_be_bytes();
+        let tx_hash = Bytes::from_array(&env, &seq_bytes);
+
+        s.status = final_status.clone();
+        s.succeeded = succeeded.clone();
+        s.failed = failed.clone();
+        s.tx_hash = Some(tx_hash.clone());
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &s);
+
+        Ok(ExecuteResult {
+            status: final_status,
+            succeeded,
+            failed,
+            tx_hash: Some(tx_hash),
         })
+    }
+
+    pub fn get_settlement(env: Env, settlement_id: u64) -> Result<Settlement, SettlementError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Settlement(settlement_id))
+            .ok_or(SettlementError::NotFound)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::AddressGenerator;
-    use soroban_sdk::{vec, Env};
+    use soroban_sdk::{testutils::Address as _, vec, Env};
 
-    fn setup() -> (Env, Address, Address, Vec<Address>, Vec<Address>) {
+    fn setup() -> (Env, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let signer = Address::generate(&env);
-        let token = Address::generate(&env);
-        let signers = vec![&env, signer.clone()];
-        let tokens = vec![&env, token.clone()];
-        (env, signer, token, signers, tokens)
+        let id = env.register_contract(None, SettlementContract);
+        (env, id)
     }
 
-    #[test]
-    fn test_propose_settlement_success() {
-        let (env, signer, token, signers, tokens) = setup();
-        let contract_id = env.register_contract(None, SettlementContract);
-        let client = SettlementContractClient::new(&env, &contract_id);
-
-        let receipt = client
-            .propose_settlement(&signer, &token, &10_000_000u64, &signers, &tokens)
-            .unwrap();
-
-        assert_eq!(receipt.status, SettlementStatus::Pending);
-        assert!(!receipt.tx_hash.is_empty());
+    fn client<'a>(env: &'a Env, id: &'a soroban_sdk::Address) -> SettlementContractClient<'a> {
+        SettlementContractClient::new(env, id)
     }
 
-    #[test]
-    fn test_unauthorized_signer_rejected() {
-        let (env, _signer, token, signers, tokens) = setup();
-        let contract_id = env.register_contract(None, SettlementContract);
-        let client = SettlementContractClient::new(&env, &contract_id);
-
-        let stranger = Address::generate(&env);
-        let err = client
-            .try_propose_settlement(&stranger, &token, &10_000_000u64, &signers, &tokens)
-            .unwrap_err()
-            .unwrap();
-
-        assert_eq!(err, SettlementError::UnauthorizedSigner);
+    fn transfer(env: &Env, amount: u64) -> Transfer {
+        Transfer {
+            recipient: Address::generate(env),
+            amount,
+        }
     }
 
+    // ── Case 1: InsufficientApprovals (HTTP 422 equivalent) ─────────────────
     #[test]
-    fn test_token_not_on_allowlist_rejected() {
-        let (env, signer, _token, signers, tokens) = setup();
-        let contract_id = env.register_contract(None, SettlementContract);
-        let client = SettlementContractClient::new(&env, &contract_id);
+    fn test_execute_insufficient_approvals_returns_error() {
+        let (env, cid) = setup();
+        let c = client(&env, &cid);
+        let proposer = Address::generate(&env);
 
-        let bad_token = Address::generate(&env);
-        let err = client
-            .try_propose_settlement(&signer, &bad_token, &10_000_000u64, &signers, &tokens)
-            .unwrap_err()
-            .unwrap();
+        let transfers = vec![&env, transfer(&env, 1000)];
+        let sid = c.propose(&proposer, &transfers, &10u64); // threshold = 10, weight = 0
 
-        assert_eq!(err, SettlementError::TokenNotAllowed);
+        let result = c.try_execute_settlement(&proposer, &sid);
+        assert_eq!(result, Err(Ok(SettlementError::InsufficientApprovals)));
     }
 
+    // ── Case 2: PartiallyExecuted ────────────────────────────────────────────
     #[test]
-    fn test_zero_amount_rejected() {
-        let (env, signer, token, signers, tokens) = setup();
-        let contract_id = env.register_contract(None, SettlementContract);
-        let client = SettlementContractClient::new(&env, &contract_id);
+    fn test_execute_partially_executed() {
+        let (env, cid) = setup();
+        let c = client(&env, &cid);
+        let proposer = Address::generate(&env);
 
-        let err = client
-            .try_propose_settlement(&signer, &token, &0u64, &signers, &tokens)
-            .unwrap_err()
-            .unwrap();
+        // Two transfers: one valid (amount > 0), one invalid (amount == 0)
+        let transfers = vec![
+            &env,
+            transfer(&env, 500),
+            Transfer { recipient: Address::generate(&env), amount: 0 },
+        ];
+        let sid = c.propose(&proposer, &transfers, &1u64);
+        c.approve(&proposer, &sid, &1u64); // meets threshold
 
-        assert_eq!(err, SettlementError::InvalidAmount);
+        let result = c.execute_settlement(&proposer, &sid);
+
+        assert_eq!(result.status, SettlementStatus::PartiallyExecuted);
+        assert_eq!(result.succeeded.len(), 1);
+        assert_eq!(result.succeeded.get(0).unwrap(), 0u32);
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.failed.get(0).unwrap(), 1u32);
+        assert!(result.tx_hash.is_some());
     }
 
+    // ── Case 3: Full success ─────────────────────────────────────────────────
     #[test]
-    fn test_amount_exceeds_max_rejected() {
-        let (env, signer, token, signers, tokens) = setup();
-        let contract_id = env.register_contract(None, SettlementContract);
-        let client = SettlementContractClient::new(&env, &contract_id);
+    fn test_execute_full_success() {
+        let (env, cid) = setup();
+        let c = client(&env, &cid);
+        let proposer = Address::generate(&env);
 
-        let err = client
-            .try_propose_settlement(&signer, &token, &(MAX_AMOUNT + 1), &signers, &tokens)
-            .unwrap_err()
-            .unwrap();
+        let transfers = vec![
+            &env,
+            transfer(&env, 1000),
+            transfer(&env, 2000),
+        ];
+        let sid = c.propose(&proposer, &transfers, &2u64);
+        c.approve(&proposer, &sid, &2u64);
 
-        assert_eq!(err, SettlementError::InvalidAmount);
+        let result = c.execute_settlement(&proposer, &sid);
+
+        assert_eq!(result.status, SettlementStatus::Executed);
+        assert_eq!(result.succeeded.len(), 2);
+        assert_eq!(result.failed.len(), 0);
+        assert!(result.tx_hash.is_some());
+
+        // Confirm stored state updated
+        let stored = c.get_settlement(&sid);
+        assert_eq!(stored.status, SettlementStatus::Executed);
+    }
+
+    // ── Guard: double-execute returns NotPending ─────────────────────────────
+    #[test]
+    fn test_execute_twice_returns_not_pending() {
+        let (env, cid) = setup();
+        let c = client(&env, &cid);
+        let proposer = Address::generate(&env);
+
+        let transfers = vec![&env, transfer(&env, 100)];
+        let sid = c.propose(&proposer, &transfers, &1u64);
+        c.approve(&proposer, &sid, &1u64);
+        c.execute_settlement(&proposer, &sid);
+
+        let result = c.try_execute_settlement(&proposer, &sid);
+        assert_eq!(result, Err(Ok(SettlementError::NotPending)));
     }
 }
