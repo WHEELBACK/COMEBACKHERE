@@ -1,13 +1,16 @@
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { InvoicePayment } from "./components/InvoicePayment"
 import { RefundRequest } from "./components/RefundRequest"
 import { ComplianceManager } from "./components/ComplianceManager"
-import { AdminAnalytics } from "./components/AdminAnalytics"
+import { WalletBar } from "./components/WalletBar"
 import { useInvoice } from "./hooks/useInvoice"
+import { useTheme } from "./hooks/useTheme"
 import { useWallet } from "./hooks/useWallet"
 import "./App.css"
 
-type Tab = "payment" | "refund" | "compliance" | "analytics"
+const EXPECTED_NETWORK = import.meta.env.VITE_NETWORK_PASSPHRASE as string ?? "Standalone Network ; February 2025"
+
+type Tab = "payment" | "refund" | "compliance"
 
 function RefundTab() {
   const { invoice, loading, error, loadInvoice, refund } = useInvoice()
@@ -80,26 +83,38 @@ function RefundTab() {
 
 export default function App() {
   const { address, connected, connect, connecting } = useWallet()
+  const { theme, toggleTheme } = useTheme()
   const [tab, setTab] = useState<Tab>("payment")
+  const nextTheme = theme === "dark" ? "light" : "dark"
 
   return (
     <div className="app">
       <header className="app-header">
         <h1>ComebackHere</h1>
-        <div className="wallet-bar">
-          {connected ? (
-            <span className="wallet-address">
-              Connected: {address?.slice(0, 6)}...{address?.slice(-4)}
-            </span>
-          ) : (
-            <button
-              className="btn btn--primary btn--sm"
-              onClick={connect}
-              disabled={connecting}
-            >
-              {connecting ? "Connecting..." : "Connect Wallet"}
-            </button>
-          )}
+        <div className="header-actions">
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={toggleTheme}
+            aria-label={`Switch to ${nextTheme} theme`}
+          >
+            <span>{theme === "dark" ? "Light" : "Dark"}</span>
+          </button>
+          <div className="wallet-bar">
+            {connected ? (
+              <span className="wallet-address">
+                Connected: {address?.slice(0, 6)}...{address?.slice(-4)}
+              </span>
+            ) : (
+              <button
+                className="btn btn--primary btn--sm"
+                onClick={connect}
+                disabled={connecting}
+              >
+                {connecting ? "Connecting..." : "Connect Wallet"}
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
