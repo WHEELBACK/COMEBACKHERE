@@ -5,6 +5,7 @@ import { useWallet } from "../hooks/useWallet"
 import { StatusBadge } from "./StatusBadge"
 import { PayConfirmationModal } from "./PayConfirmationModal"
 import { TransactionHistory } from "./TransactionHistory"
+import { InvoiceQRCode } from "./InvoiceQRCode"
 
 export function InvoicePayment() {
   const { invoice, loading, error, loadInvoice, pay } = useInvoice()
@@ -202,6 +203,10 @@ export function InvoicePayment() {
             )}
           </div>
         </div>
+      )}
+
+      {invoice && (
+        <InvoiceQRCode invoiceId={invoice.id} />
       )}
 
       {invoice && <TransactionHistory invoice={invoice} />}
