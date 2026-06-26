@@ -265,4 +265,16 @@ mod tests {
 
         client.allow_address(&new_admin, &addr);
     }
+
+    #[test]
+    fn test_pause_and_unpause() {
+        let (e, admin, client) = setup();
+
+        client.pause(&admin);
+        client.unpause(&admin);
+
+        let addr = Address::generate(&e);
+        client.allow_address(&admin, &addr);
+        assert!(client.is_allowed(&addr));
+    }
 }
