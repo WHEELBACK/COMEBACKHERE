@@ -4,7 +4,7 @@ import SettlementProposalForm from "./components/SettlementProposal/SettlementPr
 import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
 import SignerManagement from "./components/SignerManagement/SignerManagement";
 import ABIExplorer from "./components/ABIExplorer";
-import OnboardingWizard from "./components/OnboardingWizard/OnboardingWizard";
+import { ThemeProvider, useTheme } from "./theme";
 
 function InvoicesPage() {
   return <p>Invoices list will appear here.</p>;
@@ -23,15 +23,30 @@ function SignersPage() {
 }
 
 function SettingsPage() {
-  return <p>Settings will appear here.</p>;
+  const { theme, toggleTheme } = useTheme();
+  const nextTheme = theme === "dark" ? "light" : "dark";
+
+  return (
+    <section className="settings-panel">
+      <div>
+        <h3 className="settings-panel__title">Appearance</h3>
+        <p className="settings-panel__description">
+          Current theme: {theme}. Your choice is remembered on this device.
+        </p>
+      </div>
+      <button
+        type="button"
+        className="theme-toggle theme-toggle--wide"
+        onClick={toggleTheme}
+        aria-label={`Switch to ${nextTheme} theme`}
+      >
+        <span>Use {nextTheme} theme</span>
+      </button>
+    </section>
+  );
 }
 
-function OnboardingPage() {
-  const navigate = useNavigate();
-  return <OnboardingWizard onComplete={() => navigate("/invoices")} />;
-}
-
-export default function App() {
+function AppRoutes() {
   return (
     <Routes>
       <Route path="onboarding" element={<OnboardingPage />} />
@@ -45,5 +60,13 @@ export default function App() {
         <Route path="abi" element={<ABIExplorer />} />
       </Route>
     </Routes>
+  );
+}
+
+export default function App() {
+  return (
+    <ThemeProvider>
+      <AppRoutes />
+    </ThemeProvider>
   );
 }
