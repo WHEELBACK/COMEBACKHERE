@@ -1,0 +1,3 @@
+[workspace]
+members = ["invoice", "settlement"]
+resolver = "2"
