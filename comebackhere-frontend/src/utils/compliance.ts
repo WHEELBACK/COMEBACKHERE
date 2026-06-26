@@ -28,11 +28,15 @@ function getServer() {
   return new SorobanRpc.Server(SOROBAN_RPC)
 }
 
+function u64ToNumber(value: xdr.Uint64 | undefined): number {
+  return Number(value?.toString() ?? 0)
+}
+
 function parseAddressStatus(scVal: xdr.ScVal): ComplianceStatusResult {
   const vec = scVal.vec()
   const variant = vec?.[0]?.sym()?.toString() ?? "Cleared"
   if (variant === "AllowedUntil") {
-    const until = vec?.[1]?.u64()?.toNumber() ?? 0
+    const until = u64ToNumber(vec?.[1]?.u64())
     return { status: variant as ComplianceStatus, expiresAt: until }
   }
   return { status: variant as ComplianceStatus, expiresAt: null }

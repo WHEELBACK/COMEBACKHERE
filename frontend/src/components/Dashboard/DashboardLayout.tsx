@@ -1,6 +1,7 @@
 import { Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import StatsCard from "./StatsCard";
+import { useTheme } from "../../theme";
 import "./DashboardLayout.css";
 
 const stats = [
@@ -10,12 +11,23 @@ const stats = [
 ];
 
 export default function DashboardLayout() {
+  const { theme, toggleTheme } = useTheme();
+  const nextTheme = theme === "dark" ? "light" : "dark";
+
   return (
     <div className="dashboard">
       <Sidebar />
       <main className="dashboard-main">
         <header className="dashboard-header">
           <h2 className="dashboard-heading">Overview</h2>
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={toggleTheme}
+            aria-label={`Switch to ${nextTheme} theme`}
+          >
+            <span>{theme === "dark" ? "Light" : "Dark"}</span>
+          </button>
         </header>
         <section className="stats-grid">
           {stats.map((stat) => (

@@ -118,13 +118,13 @@
 }
 
 .outcome-badge--claimant {
-  background: #dcfce7;
-  color: #15803d;
+  background: var(--color-success-soft-bg);
+  color: var(--color-success-soft-text);
 }
 
 .outcome-badge--counterparty {
-  background: #fee2e2;
-  color: #b91c1c;
+  background: var(--color-danger-soft-bg);
+  color: var(--color-danger-soft-text);
 }
 
 .resolution-bar-wrap {
@@ -136,7 +136,7 @@
 .resolution-bar {
   width: 120px;
   height: 8px;
-  background: #e5e7eb;
+  background: var(--color-progress-bg);
   border-radius: 4px;
   overflow: hidden;
 }

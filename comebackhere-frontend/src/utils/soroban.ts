@@ -20,8 +20,16 @@ function getServer() {
   return new SorobanRpc.Server(SOROBAN_RPC)
 }
 
+function u64ToNumber(value: xdr.Uint64 | undefined): number {
+  return Number(value?.toString() ?? 0)
+}
+
 function scValToInvoice(scVal: xdr.ScVal): Invoice {
   const map = scVal.map()
+  if (!map) {
+    throw new Error("Invalid invoice response")
+  }
+
   const entries: Record<string, xdr.ScVal> = {}
   for (const entry of map) {
     const key = entry.key().sym().toString()
@@ -34,9 +42,9 @@ function scValToInvoice(scVal: xdr.ScVal): Invoice {
     payer: entries.payer?.address()?.toString() ?? "",
     amount_usdc: entries.amount_usdc?.i128()?.toString() ?? "0",
     gross_usdc: entries.gross_usdc?.i128()?.toString() ?? "0",
-    expires_at: entries.expires_at?.u64()?.toNumber() ?? 0,
+    expires_at: u64ToNumber(entries.expires_at?.u64()),
     status: scValToInvoiceStatus(entries.status),
-    paid_at: entries.paid_at?.u64()?.toNumber() ?? null,
+    paid_at: entries.paid_at?.u64() ? u64ToNumber(entries.paid_at.u64()) : null,
     metadata_hash: entries.metadata_hash?.bytes()?.toString() ?? null,
     payment_link_hash: entries.payment_link_hash?.bytes()?.toString() ?? null,
   }
