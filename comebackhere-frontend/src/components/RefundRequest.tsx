@@ -53,6 +53,8 @@ export function RefundRequest({
       {result && (
         <div
           className={`message message--${result.success ? "success" : "error"}`}
+          role="status"
+          aria-live="polite"
         >
           {result.success ? (
             <>
@@ -68,7 +70,7 @@ export function RefundRequest({
       )}
 
       {canRequestRefund && !result?.success && (
-        <button className="btn btn--danger" onClick={handleRefundClick}>
+        <button className="btn btn--danger" onClick={handleRefundClick} aria-label={`Request refund for invoice #${invoice.id}`}>
           Request Refund
         </button>
       )}

@@ -94,29 +94,35 @@ export function InvoicePayment() {
     <div className="payment-flow">
       <h1>Invoice Payment</h1>
 
-      <div className="invoice-lookup">
+      <div className="invoice-lookup" role="search" aria-label="Invoice lookup">
+        <label htmlFor="payment-invoice-id" className="sr-only">Invoice ID</label>
         <input
+          id="payment-invoice-id"
           type="number"
           placeholder="Enter Invoice ID"
           value={invoiceId}
           onChange={(e) => setInvoiceId(e.target.value)}
+          aria-label="Invoice ID for payment"
         />
         <button
           className="btn btn--primary"
           onClick={handleLoadInvoice}
           disabled={!invoiceId || loading}
+          aria-label={loading ? "Loading invoice" : "Load invoice"}
         >
           {loading ? "Loading..." : "Load Invoice"}
         </button>
       </div>
 
-      {loading && <p className="status-text">Loading invoice...</p>}
+      {loading && <p className="status-text" aria-live="polite">Loading invoice...</p>}
 
-      {error && <div className="message message--error">{error}</div>}
+      {error && <div className="message message--error" role="alert">{error}</div>}
 
       {result && (
         <div
           className={`message message--${result.success ? "success" : "error"}`}
+          role="status"
+          aria-live="polite"
         >
           {result.success ? (
             <>
@@ -177,19 +183,20 @@ export function InvoicePayment() {
             </div>
           </div>
 
-          <div className="invoice-card__actions">
+          <div className="invoice-card__actions" role="group" aria-label="Invoice actions">
             {!connected && (
               <button
                 className="btn btn--primary"
                 onClick={connect}
                 disabled={connecting}
+                aria-label="Connect wallet to pay invoice"
               >
                 {connecting ? "Connecting..." : "Connect Wallet"}
               </button>
             )}
 
             {connected && canPay && (
-              <button className="btn btn--primary" onClick={handlePayClick}>
+              <button className="btn btn--primary" onClick={handlePayClick} aria-label={`Pay invoice #${invoice.id}`}>
                 Pay Invoice
               </button>
             )}

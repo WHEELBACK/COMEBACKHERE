@@ -15,9 +15,9 @@ export function RefundConfirmationModal({
   submitting,
 }: RefundConfirmationModalProps) {
   return (
-    <div className="modal-overlay" onClick={onCancel}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Request Refund</h2>
+    <div className="modal-overlay" onClick={onCancel} role="presentation">
+      <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="refund-confirm-title">
+        <h2 id="refund-confirm-title">Request Refund</h2>
         <p className="modal-desc">
           You are about to request a refund for this paid invoice. This will
           transition the invoice to{" "}
@@ -46,11 +46,12 @@ export function RefundConfirmationModal({
           </div>
         </div>
 
-        <div className="modal-actions">
+        <div className="modal-actions" role="group" aria-label="Refund confirmation actions">
           <button
             className="btn btn--secondary"
             onClick={onCancel}
             disabled={submitting}
+            aria-label="Cancel refund request"
           >
             Cancel
           </button>
@@ -58,6 +59,7 @@ export function RefundConfirmationModal({
             className="btn btn--danger"
             onClick={onConfirm}
             disabled={submitting}
+            aria-label={submitting ? "Submitting refund request" : "Confirm refund request"}
           >
             {submitting ? "Submitting..." : "Confirm Refund Request"}
           </button>

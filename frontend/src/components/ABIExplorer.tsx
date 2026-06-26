@@ -87,19 +87,22 @@ export default function ABIExplorer() {
   }
 
   return (
-    <div style={{ padding: '20px' }}>
+    <div style={{ padding: '20px' }} role="region" aria-label="ABI Explorer">
       <h2>ABI Explorer</h2>
       <p>Deployed contract functions reference</p>
       {contracts.map(c => (
         <div key={c.contract} style={{ marginBottom: '16px', border: '1px solid #ccc', borderRadius: '4px' }}>
-          <div
+          <button
+            type="button"
             onClick={() => toggle(c.contract)}
-            style={{ padding: '12px', cursor: 'pointer', background: '#f9f9f9', fontWeight: 'bold' }}
+            aria-expanded={!!expanded[c.contract]}
+            aria-controls={`abi-panel-${c.contract}`}
+            style={{ padding: '12px', cursor: 'pointer', background: '#f9f9f9', fontWeight: 'bold', width: '100%', border: 'none', textAlign: 'left', fontSize: 'inherit' }}
           >
             {c.contract} (v{c.version}) — {c.functions.length} functions
-          </div>
+          </button>
           {expanded[c.contract] && (
-            <ul style={{ margin: 0, padding: '12px 24px' }}>
+            <ul id={`abi-panel-${c.contract}`} role="list" style={{ margin: 0, padding: '12px 24px' }}>
               {c.functions.map((fn, i) => (
                 <li key={i} style={{ fontFamily: 'monospace', fontSize: '14px', marginBottom: '4px' }}>
                   {fn}

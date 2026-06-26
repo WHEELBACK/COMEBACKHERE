@@ -53,10 +53,10 @@ export function SettlementApproval() {
   }
 
   return (
-    <div style={styles.container}>
+    <div style={styles.container} role="region" aria-label="Settlement approvals">
       <h1 style={styles.title}>Settlement Approvals</h1>
 
-      {actionError && <p style={{ color: 'red' }}>{actionError}</p>}
+      {actionError && <p style={{ color: 'red' }} role="alert">{actionError}</p>}
 
       {pendingSettlements.length === 0 ? (
         <p>No pending settlements.</p>
@@ -88,13 +88,14 @@ export function SettlementApproval() {
   )
 
   function renderProgress(current: number, required: number) {
+    const pct = Math.min(100, Math.round((current / required) * 100))
     return (
       <div style={styles.progressWrap}>
-        <div style={styles.progressBar}>
+        <div style={styles.progressBar} role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label={`${current} of ${required} approvals`}>
           <div
             style={{
               ...styles.progressFill,
-              width: `${Math.min(100, (current / required) * 100)}%`,
+              width: `${pct}%`,
               background: current >= required ? '#22c55e' : '#3b82f6',
             }}
           />

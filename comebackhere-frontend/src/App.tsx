@@ -21,17 +21,21 @@ function RefundTab() {
     <div className="refund-flow">
       <h2>Request a Refund</h2>
 
-      <div className="invoice-lookup">
+      <div className="invoice-lookup" role="search" aria-label="Invoice lookup">
+        <label htmlFor="refund-invoice-id" className="sr-only">Invoice ID</label>
         <input
+          id="refund-invoice-id"
           type="number"
           placeholder="Enter Invoice ID"
           value={invoiceId}
           onChange={(e) => setInvoiceId(e.target.value)}
+          aria-label="Invoice ID for refund lookup"
         />
         <button
           className="btn btn--primary"
           onClick={handleLoadInvoice}
           disabled={!invoiceId || loading}
+          aria-label={loading ? "Loading invoice" : "Load invoice for refund"}
         >
           {loading ? "Loading..." : "Load Invoice"}
         </button>
@@ -83,11 +87,11 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="app-header">
+      <header className="app-header" role="banner">
         <h1>ComebackHere</h1>
         <div className="wallet-bar">
           {connected ? (
-            <span className="wallet-address">
+            <span className="wallet-address" aria-label={`Wallet connected: ${address}`}>
               Connected: {address?.slice(0, 6)}...{address?.slice(-4)}
             </span>
           ) : (
@@ -95,6 +99,7 @@ export default function App() {
               className="btn btn--primary btn--sm"
               onClick={connect}
               disabled={connecting}
+              aria-label="Connect wallet"
             >
               {connecting ? "Connecting..." : "Connect Wallet"}
             </button>
@@ -102,20 +107,32 @@ export default function App() {
         </div>
       </header>
 
-      <nav className="tabs">
+      <nav className="tabs" role="tablist" aria-label="Main navigation">
         <button
+          role="tab"
+          aria-selected={tab === "payment"}
+          aria-controls="tabpanel-payment"
+          id="tab-payment"
           className={`tab ${tab === "payment" ? "tab--active" : ""}`}
           onClick={() => setTab("payment")}
         >
           Pay Invoice
         </button>
         <button
+          role="tab"
+          aria-selected={tab === "refund"}
+          aria-controls="tabpanel-refund"
+          id="tab-refund"
           className={`tab ${tab === "refund" ? "tab--active" : ""}`}
           onClick={() => setTab("refund")}
         >
           Request Refund
         </button>
         <button
+          role="tab"
+          aria-selected={tab === "compliance"}
+          aria-controls="tabpanel-compliance"
+          id="tab-compliance"
           className={`tab ${tab === "compliance" ? "tab--active" : ""}`}
           onClick={() => setTab("compliance")}
         >
@@ -123,7 +140,12 @@ export default function App() {
         </button>
       </nav>
 
-      <main className="app-main">
+      <main
+        className="app-main"
+        role="tabpanel"
+        id={`tabpanel-${tab}`}
+        aria-labelledby={`tab-${tab}`}
+      >
         {tab === "payment" ? (
           <InvoicePayment />
         ) : tab === "refund" ? (
