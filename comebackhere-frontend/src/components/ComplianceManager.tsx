@@ -8,6 +8,7 @@ import {
   ComplianceStatusResult,
   getAddressStatus,
 } from "../utils/compliance"
+import { CopyableText } from "./CopyableText"
 
 interface ManagedAddress {
   address: string
@@ -256,7 +257,7 @@ export function ComplianceManager() {
             ) : (
               managed.map((entry) => (
                 <tr key={entry.address}>
-                  <td className="address-cell">{entry.address}</td>
+                  <td className="address-cell"><CopyableText text={entry.address} label="Copy address" /></td>
                   <td>
                     <ComplianceStatusBadge status={entry.status} />
                   </td>

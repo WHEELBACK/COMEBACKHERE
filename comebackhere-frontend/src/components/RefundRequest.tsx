@@ -1,6 +1,7 @@
 import { useState } from "react"
 import type { Invoice, InvoiceStatus } from "../types"
 import { StatusBadge } from "./StatusBadge"
+import { CopyableText } from "./CopyableText"
 import { RefundConfirmationModal } from "./RefundConfirmationModal"
 
 interface RefundRequestProps {
@@ -61,7 +62,7 @@ export function RefundRequest({
               Refund requested successfully!
               <br />
               Transaction hash:{" "}
-              <code className="tx-hash">{result.hash}</code>
+              <code className="tx-hash"><CopyableText text={result.hash!} label="Copy transaction hash" /></code>
             </>
           ) : (
             <>Refund request failed: {result.errorMsg}</>

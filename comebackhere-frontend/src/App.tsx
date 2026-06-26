@@ -4,6 +4,7 @@ import { RefundRequest } from "./components/RefundRequest"
 import { ComplianceManager } from "./components/ComplianceManager"
 import { useInvoice } from "./hooks/useInvoice"
 import { useWallet } from "./hooks/useWallet"
+import { CopyableText } from "./components/CopyableText"
 import "./App.css"
 
 type Tab = "payment" | "refund" | "compliance"
@@ -46,7 +47,7 @@ function RefundTab() {
       {invoice && (
         <div className="invoice-card">
           <div className="invoice-card__header">
-            <h3>Invoice #{invoice.id}</h3>
+            <h3>Invoice #<CopyableText text={String(invoice.id)} label="Copy invoice ID" /></h3>
           </div>
           <div className="invoice-card__body">
             <div className="detail-row">
@@ -56,13 +57,13 @@ function RefundTab() {
             <div className="detail-row">
               <span className="detail-label">Merchant</span>
               <span className="detail-value detail-value--address">
-                {invoice.merchant}
+                <CopyableText text={invoice.merchant} label="Copy merchant address" />
               </span>
             </div>
             <div className="detail-row">
               <span className="detail-label">Payer</span>
               <span className="detail-value detail-value--address">
-                {invoice.payer}
+                <CopyableText text={invoice.payer} label="Copy payer address" />
               </span>
             </div>
             <div className="detail-row">

@@ -3,6 +3,7 @@ import type { Invoice } from "../types"
 import { useInvoice } from "../hooks/useInvoice"
 import { useWallet } from "../hooks/useWallet"
 import { StatusBadge } from "./StatusBadge"
+import { CopyableText } from "./CopyableText"
 import { PayConfirmationModal } from "./PayConfirmationModal"
 import { TransactionHistory } from "./TransactionHistory"
 
@@ -129,7 +130,7 @@ export function InvoicePayment() {
               Payment successful!
               <br />
               Transaction hash:{" "}
-              <code className="tx-hash">{result.hash}</code>
+              <code className="tx-hash"><CopyableText text={result.hash!} label="Copy transaction hash" /></code>
             </>
           ) : (
             <>Payment failed: {result.errorMsg}</>
@@ -140,7 +141,7 @@ export function InvoicePayment() {
       {invoice && (
         <div className="invoice-card">
           <div className="invoice-card__header">
-            <h2>Invoice #{invoice.id}</h2>
+            <h2>Invoice #<CopyableText text={String(invoice.id)} label="Copy invoice ID" /></h2>
             <StatusBadge status={invoice.status} />
           </div>
 
@@ -168,7 +169,7 @@ export function InvoicePayment() {
             <div className="detail-row">
               <span className="detail-label">Merchant</span>
               <span className="detail-value detail-value--address">
-                {invoice.merchant}
+                <CopyableText text={invoice.merchant} label="Copy merchant address" />
               </span>
             </div>
             <div className="detail-row">

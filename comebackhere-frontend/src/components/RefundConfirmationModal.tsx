@@ -1,5 +1,6 @@
 import type { Invoice } from "../types"
 import { StatusBadge } from "./StatusBadge"
+import { CopyableText } from "./CopyableText"
 
 interface RefundConfirmationModalProps {
   invoice: Invoice
@@ -28,7 +29,7 @@ export function RefundConfirmationModal({
         <div className="modal-details">
           <div className="detail-row">
             <span className="detail-label">Invoice ID</span>
-            <span className="detail-value">#{invoice.id}</span>
+            <span className="detail-value">#<CopyableText text={String(invoice.id)} label="Copy invoice ID" /></span>
           </div>
           <div className="detail-row">
             <span className="detail-label">Paid Amount (USDC)</span>
@@ -37,7 +38,7 @@ export function RefundConfirmationModal({
           <div className="detail-row">
             <span className="detail-label">Merchant</span>
             <span className="detail-value detail-value--address">
-              {invoice.merchant}
+              <CopyableText text={invoice.merchant} label="Copy merchant address" />
             </span>
           </div>
           <div className="detail-row">
