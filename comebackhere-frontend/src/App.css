@@ -447,3 +447,149 @@ h3 {
 .refund-flow h2 {
   margin-bottom: 20px;
 }
+
+/* Admin Analytics */
+.admin-analytics h1 {
+  margin-bottom: 20px;
+}
+
+.analytics-filters {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.analytics-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+}
+
+.analytics-filter input {
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+}
+
+.analytics-section {
+  margin-bottom: 28px;
+}
+
+.analytics-section h2 {
+  font-size: 1.1rem;
+  margin-bottom: 12px;
+}
+
+.analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.analytics-grid--2col {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.analytics-stat {
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  border-radius: var(--radius);
+  border-left: 4px solid var(--color-border);
+  background: var(--color-bg);
+}
+
+.analytics-stat--success {
+  border-left-color: var(--color-success);
+}
+
+.analytics-stat--warning {
+  border-left-color: #f59e0b;
+}
+
+.analytics-stat--danger {
+  border-left-color: var(--color-danger);
+}
+
+.analytics-stat--info {
+  border-left-color: var(--color-primary);
+}
+
+.analytics-stat__title {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-secondary);
+  margin-bottom: 4px;
+}
+
+.analytics-stat__value {
+  font-size: 1.6rem;
+  font-weight: 700;
+}
+
+.analytics-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.analytics-table th,
+.analytics-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.analytics-table th {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-secondary);
+}
+
+.analytics-table__value {
+  font-weight: 600;
+  font-family: monospace;
+}
+
+.analytics-bar-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.analytics-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.analytics-bar__label {
+  width: 80px;
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+}
+
+.analytics-bar__track {
+  flex: 1;
+  height: 24px;
+  background: var(--color-bg);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.analytics-bar__fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.analytics-bar__count {
+  width: 40px;
+  text-align: right;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
