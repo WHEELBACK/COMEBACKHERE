@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useSettlements } from '../hooks/useSettlements'
-import { SignerInfo } from '../types'
+import { useTheme } from '../theme'
+import { Settlement, SignerInfo } from '../types'
 
 const SIGNERS: SignerInfo[] = [
   { address: import.meta.env.VITE_SIGNER_1 ?? '', weight: 1 },
@@ -23,8 +24,10 @@ function formatAmount(raw: string): string {
 
 export function SettlementApproval() {
   const { settlements, loading, error, approveSettlement } = useSettlements()
+  const { theme, toggleTheme } = useTheme()
   const [approving, setApproving] = useState<Record<string, boolean>>({})
   const [actionError, setActionError] = useState<string | null>(null)
+  const nextTheme = theme === 'dark' ? 'light' : 'dark'
 
   const handleApprove = async (settlementId: number, signer: string) => {
     const key = `${settlementId}-${signer}`
@@ -49,14 +52,24 @@ export function SettlementApproval() {
   }
 
   if (error && settlements.length === 0) {
-    return <div style={styles.container}><p style={{ color: 'red' }}>Error: {error}</p></div>
+    return <div style={styles.container}><p style={styles.errorText}>Error: {error}</p></div>
   }
 
   return (
     <div style={styles.container}>
-      <h1 style={styles.title}>Settlement Approvals</h1>
+      <header style={styles.header}>
+        <h1 style={styles.title}>Settlement Approvals</h1>
+        <button
+          type="button"
+          style={styles.themeToggle}
+          onClick={toggleTheme}
+          aria-label={`Switch to ${nextTheme} theme`}
+        >
+          {theme === 'dark' ? 'Light' : 'Dark'} theme
+        </button>
+      </header>
 
-      {actionError && <p style={{ color: 'red' }}>{actionError}</p>}
+      {actionError && <p style={styles.errorText}>{actionError}</p>}
 
       {pendingSettlements.length === 0 ? (
         <p>No pending settlements.</p>
@@ -95,7 +108,8 @@ export function SettlementApproval() {
             style={{
               ...styles.progressFill,
               width: `${Math.min(100, (current / required) * 100)}%`,
-              background: current >= required ? '#22c55e' : '#3b82f6',
+              background:
+                current >= required ? 'var(--color-success)' : 'var(--color-primary)',
             }}
           />
         </div>
@@ -147,28 +161,52 @@ const styles: Record<string, React.CSSProperties> = {
     margin: '0 auto',
     padding: '2rem 1rem',
     fontFamily: 'system-ui, sans-serif',
+    color: 'var(--color-text)',
+  },
+  header: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 16,
+    flexWrap: 'wrap',
+    marginBottom: '1.5rem',
   },
   title: {
     fontSize: '1.5rem',
     fontWeight: 600,
-    marginBottom: '1.5rem',
+    marginBottom: 0,
+  },
+  themeToggle: {
+    padding: '0.5rem 0.75rem',
+    border: '1px solid var(--color-border)',
+    borderRadius: 8,
+    background: 'var(--color-card-bg)',
+    color: 'var(--color-text)',
+    fontSize: '0.875rem',
+    fontWeight: 600,
+    cursor: 'pointer',
   },
   table: {
     width: '100%',
     borderCollapse: 'collapse',
+    background: 'var(--color-card-bg)',
+    boxShadow: 'var(--shadow)',
   },
   th: {
     textAlign: 'left',
     padding: '0.5rem',
-    borderBottom: '2px solid #e5e7eb',
+    borderBottom: '2px solid var(--color-border)',
     fontWeight: 600,
     fontSize: '0.875rem',
-    color: '#374151',
+    color: 'var(--color-text-muted)',
   },
   td: {
     padding: '0.5rem',
-    borderBottom: '1px solid #e5e7eb',
+    borderBottom: '1px solid var(--color-border)',
     fontSize: '0.875rem',
+  },
+  errorText: {
+    color: 'var(--color-danger)',
   },
   progressWrap: {
     display: 'flex',
@@ -178,7 +216,7 @@ const styles: Record<string, React.CSSProperties> = {
   progressBar: {
     width: 80,
     height: 8,
-    background: '#e5e7eb',
+    background: 'var(--color-progress-bg)',
     borderRadius: 4,
     overflow: 'hidden',
   },
@@ -189,15 +227,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   progressText: {
     fontSize: '0.75rem',
-    color: '#6b7280',
+    color: 'var(--color-text-muted)',
     whiteSpace: 'nowrap',
   },
   approveBtn: {
     padding: '4px 8px',
     fontSize: '0.75rem',
-    border: '1px solid #3b82f6',
+    border: '1px solid var(--color-primary)',
     borderRadius: 4,
-    background: '#3b82f6',
+    background: 'var(--color-primary)',
     color: '#fff',
     cursor: 'pointer',
   },

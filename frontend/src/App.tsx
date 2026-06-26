@@ -4,8 +4,7 @@ import SettlementProposalForm from "./components/SettlementProposal/SettlementPr
 import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
 import SignerManagement from "./components/SignerManagement/SignerManagement";
 import ABIExplorer from "./components/ABIExplorer";
-import { ErrorBoundary } from "./components/ErrorBoundary";
-import "./components/ErrorBoundary.css";
+import { ThemeProvider, useTheme } from "./theme";
 
 function InvoicesPage() {
   return (
@@ -40,14 +39,30 @@ function SignersPage() {
 }
 
 function SettingsPage() {
+  const { theme, toggleTheme } = useTheme();
+  const nextTheme = theme === "dark" ? "light" : "dark";
+
   return (
-    <ErrorBoundary fallbackTitle="Failed to load settings">
-      <p>Settings will appear here.</p>
-    </ErrorBoundary>
+    <section className="settings-panel">
+      <div>
+        <h3 className="settings-panel__title">Appearance</h3>
+        <p className="settings-panel__description">
+          Current theme: {theme}. Your choice is remembered on this device.
+        </p>
+      </div>
+      <button
+        type="button"
+        className="theme-toggle theme-toggle--wide"
+        onClick={toggleTheme}
+        aria-label={`Switch to ${nextTheme} theme`}
+      >
+        <span>Use {nextTheme} theme</span>
+      </button>
+    </section>
   );
 }
 
-export default function App() {
+function AppRoutes() {
   return (
     <Routes>
       <Route element={<DashboardLayout />}>
@@ -60,5 +75,13 @@ export default function App() {
         <Route path="abi" element={<ErrorBoundary fallbackTitle="Failed to load ABI explorer"><ABIExplorer /></ErrorBoundary>} />
       </Route>
     </Routes>
+  );
+}
+
+export default function App() {
+  return (
+    <ThemeProvider>
+      <AppRoutes />
+    </ThemeProvider>
   );
 }
