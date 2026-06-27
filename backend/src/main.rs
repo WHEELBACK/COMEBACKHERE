@@ -5,8 +5,10 @@ mod types;
 use axum::{routing::{get, post}, Router};
 use std::sync::Arc;
 
+use routes::cancel::cancel_invoice;
 use routes::invoices::get_invoice;
 use routes::pay::pay_invoice;
+use routes::refund::refund_invoice;
 use soroban::SorobanClient;
 
 #[tokio::main]
@@ -21,6 +23,8 @@ async fn main() {
     let app = Router::new()
         .route("/invoices/:id", get(get_invoice))
         .route("/invoices/:id/pay", post(pay_invoice))
+        .route("/invoices/:id/cancel", post(cancel_invoice))
+        .route("/invoices/:id/refund", post(refund_invoice))
         .with_state(client);
 
     let addr = "0.0.0.0:3001";

@@ -279,6 +279,12 @@ pub enum DataKey {
 }
 
 #[cfg(test)]
+mod integration_settlement_multisig;
+
+#[cfg(test)]
+mod integration_dispute_lifecycle;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, Env};
@@ -388,5 +394,48 @@ mod tests {
         // limit=200 should be capped to 100, returning all 5
         let result = c.get_pending_settlements(&None, &Some(200u32));
         assert_eq!(result.len(), 5);
+    }
+
+    #[test]
+    fn test_pause_blocks_propose_settlement() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        c.initialize(
+            &soroban_sdk::vec![&e, (signer.clone(), 1u64)],
+            &1,
+            &admin,
+        );
+
+        c.pause(&admin);
+
+        let result = c.try_propose_settlement(&signer, &token, &1000u64, &merchant);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unpause_restores_propose_settlement() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        c.initialize(
+            &soroban_sdk::vec![&e, (signer.clone(), 1u64)],
+            &1,
+            &admin,
+        );
+
+        c.pause(&admin);
+        let result = c.try_propose_settlement(&signer, &token, &1000u64, &merchant);
+        assert!(result.is_err());
+
+        c.unpause(&admin);
+        let sid = c.propose_settlement(&signer, &token, &1000u64, &merchant);
+        assert_eq!(sid, 1);
     }
 }

@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import DashboardLayout from "./components/Dashboard/DashboardLayout";
 import SettlementProposalForm from "./components/SettlementProposal/SettlementProposalForm";
 import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
@@ -8,19 +8,35 @@ import GraceWindowSettings from "./components/GraceWindowSettings/GraceWindowSet
 import { ThemeProvider, useTheme } from "./theme";
 
 function InvoicesPage() {
-  return <p>Invoices list will appear here.</p>;
+  return (
+    <ErrorBoundary fallbackTitle="Failed to load invoices">
+      <p>Invoices list will appear here.</p>
+    </ErrorBoundary>
+  );
 }
 
 function SettlementsPage() {
-  return <SettlementProposalForm />;
+  return (
+    <ErrorBoundary fallbackTitle="Failed to load settlements">
+      <SettlementProposalForm />
+    </ErrorBoundary>
+  );
 }
 
 function DisputesPage() {
-  return <DisputeVotingPanel />;
+  return (
+    <ErrorBoundary fallbackTitle="Failed to load disputes">
+      <DisputeVotingPanel />
+    </ErrorBoundary>
+  );
 }
 
 function SignersPage() {
-  return <SignerManagement />;
+  return (
+    <ErrorBoundary fallbackTitle="Failed to load signer management">
+      <SignerManagement />
+    </ErrorBoundary>
+  );
 }
 
 function SettingsPage() {
@@ -53,14 +69,16 @@ function SettingsPage() {
 function AppRoutes() {
   return (
     <Routes>
+      <Route path="onboarding" element={<OnboardingPage />} />
       <Route element={<DashboardLayout />}>
         <Route index element={<Navigate to="/invoices" replace />} />
         <Route path="invoices" element={<InvoicesPage />} />
         <Route path="settlements" element={<SettlementsPage />} />
+        <Route path="settlements/:id" element={<SettlementDetailPage />} />
         <Route path="disputes" element={<DisputesPage />} />
         <Route path="signers" element={<SignersPage />} />
         <Route path="settings" element={<SettingsPage />} />
-        <Route path="abi" element={<ABIExplorer />} />
+        <Route path="abi" element={<ErrorBoundary fallbackTitle="Failed to load ABI explorer"><ABIExplorer /></ErrorBoundary>} />
       </Route>
     </Routes>
   );

@@ -22,7 +22,7 @@ function ResolutionBar({ current, threshold }: { current: number; threshold: num
   const pct = Math.min(100, Math.round((current / threshold) * 100))
   return (
     <div className="resolution-bar-wrap">
-      <div className="resolution-bar">
+      <div className="resolution-bar" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label={`${current} of ${threshold} resolution votes`}>
         <div className="resolution-bar__fill" style={{ width: `${pct}%` }} />
       </div>
       <span className="resolution-bar__label">{current} / {threshold}</span>
@@ -70,11 +70,12 @@ function DisputeCard({ dispute, onVote }: { dispute: Dispute; onVote: (id: numbe
       </div>
 
       {!resolved && (
-        <div className="dispute-card__actions">
+        <div className="dispute-card__actions" role="group" aria-label={`Vote on settlement #${dispute.settlement_id}`}>
           <button
             className="vote-btn vote-btn--claimant"
             disabled={hasVoted || voting}
             onClick={() => handleVote('ResolvedClaimant')}
+            aria-label={`Vote in favor of claimant for settlement #${dispute.settlement_id}`}
           >
             Vote Claimant
           </button>
@@ -82,14 +83,15 @@ function DisputeCard({ dispute, onVote }: { dispute: Dispute; onVote: (id: numbe
             className="vote-btn vote-btn--counterparty"
             disabled={hasVoted || voting}
             onClick={() => handleVote('ResolvedCounterparty')}
+            aria-label={`Vote in favor of counterparty for settlement #${dispute.settlement_id}`}
           >
             Vote Counterparty
           </button>
         </div>
       )}
 
-      {hasVoted && !resolved && <p className="dispute-card__voted">You have voted.</p>}
-      {err && <p className="dispute-card__error">{err}</p>}
+      {hasVoted && !resolved && <p className="dispute-card__voted" aria-live="polite">You have voted.</p>}
+      {err && <p className="dispute-card__error" role="alert">{err}</p>}
     </div>
   )
 }
