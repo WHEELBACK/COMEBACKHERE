@@ -2,6 +2,8 @@ import { useState } from "react"
 import { InvoicePayment } from "./components/InvoicePayment"
 import { RefundRequest } from "./components/RefundRequest"
 import { ComplianceManager } from "./components/ComplianceManager"
+import { BatchExpireInvoices } from "./components/BatchExpireInvoices"
+import { EscrowRelease } from "./components/EscrowRelease"
 import { WalletBar } from "./components/WalletBar"
 import { useInvoice } from "./hooks/useInvoice"
 import { useTheme } from "./hooks/useTheme"
@@ -12,7 +14,7 @@ import "./components/ErrorBoundary.css"
 
 const EXPECTED_NETWORK = import.meta.env.VITE_NETWORK_PASSPHRASE as string ?? "Standalone Network ; February 2025"
 
-type Tab = "payment" | "refund" | "compliance"
+type Tab = "payment" | "refund" | "compliance" | "batch-expire" | "escrow"
 
 function RefundTab() {
   const { invoice, loading, error, loadInvoice, refund } = useInvoice()
@@ -147,23 +149,31 @@ export default function App() {
           Compliance
         </button>
         <button
-          className={`tab ${tab === "analytics" ? "tab--active" : ""}`}
-          onClick={() => setTab("analytics")}
+          className={`tab ${tab === "batch-expire" ? "tab--active" : ""}`}
+          onClick={() => setTab("batch-expire")}
         >
-          Analytics
+          Batch Expire
+        </button>
+        <button
+          className={`tab ${tab === "escrow" ? "tab--active" : ""}`}
+          onClick={() => setTab("escrow")}
+        >
+          Escrow Release
         </button>
       </nav>
 
       <main className="app-main">
-        <ErrorBoundary fallbackTitle="This section encountered an error">
-          {tab === "payment" ? (
-            <InvoicePayment />
-          ) : tab === "refund" ? (
-            <RefundTab />
-          ) : (
-            <ComplianceManager />
-          )}
-        </ErrorBoundary>
+        {tab === "payment" ? (
+          <InvoicePayment />
+        ) : tab === "refund" ? (
+          <RefundTab />
+        ) : tab === "compliance" ? (
+          <ComplianceManager />
+        ) : tab === "batch-expire" ? (
+          <BatchExpireInvoices walletAddress={address} />
+        ) : (
+          <EscrowRelease />
+        )}
       </main>
     </div>
   )

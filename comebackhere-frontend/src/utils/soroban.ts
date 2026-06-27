@@ -158,7 +158,48 @@ export async function requestRefund(
   }
 }
 
-export async function cancelInvoice(
+export async function batchExpireInvoices(
+  contractId: string,
+  invoiceIds: number[],
+  publicKey: string
+): Promise<PaymentResult> {
+  const server = getServer()
+  const contract = new Contract(contractId)
+
+  const args = [
+    xdr.ScVal.scvVec(invoiceIds.map((id) => nativeToScVal(id, { type: "u64" }))),
+  ]
+
+  try {
+    const account = await server.getAccount(publicKey)
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: getNetworkPassphrase(),
+    })
+      .addOperation(contract.call("batch_expire", ...args))
+      .setTimeout(30)
+      .build()
+
+    const simulated = await server.simulateTransaction(tx)
+    const { SorobanRpc } = window as any
+
+    const prepare = SorobanRpc.assembleTransaction(tx, simulated)
+    const signed = await (window as any).freighterApi.signTransaction(
+      prepare.toXDR(),
+      { networkPassphrase: getNetworkPassphrase() }
+    )
+
+    const txHash = await server.sendTransaction(signed)
+    return { success: true, transaction_hash: txHash.hash }
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err?.message ?? err?.toString() ?? "Batch expire failed",
+    }
+  }
+}
+
+export async function releaseEscrow(
   contractId: string,
   invoiceId: number,
   publicKey: string
@@ -177,7 +218,7 @@ export async function cancelInvoice(
       fee: BASE_FEE,
       networkPassphrase: getNetworkPassphrase(),
     })
-      .addOperation(contract.call("cancel_invoiced", ...args))
+      .addOperation(contract.call("release_escrow", ...args))
       .setTimeout(30)
       .build()
 
@@ -193,14 +234,9 @@ export async function cancelInvoice(
     const txHash = await server.sendTransaction(signed)
     return { success: true, transaction_hash: txHash.hash }
   } catch (err: any) {
-    // ContractError::Unauthorized = 1
-    const msg: string = err?.message ?? err?.toString() ?? ""
-    const isUnauthorized = msg.includes("1") || msg.toLowerCase().includes("unauthorized")
     return {
       success: false,
-      error: isUnauthorized
-        ? "Unauthorized: only the merchant or customer can cancel this invoice."
-        : msg || "Cancellation failed",
+      error: err?.message ?? err?.toString() ?? "Release escrow failed",
     }
   }
 }

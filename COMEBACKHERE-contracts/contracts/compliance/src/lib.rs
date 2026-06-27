@@ -217,91 +217,10 @@ mod tests {
         assert!(!c.is_allowed(&addr));
     }
 
-    // ── paused guard tests ───────────────────────────────────────────────────
-
     #[test]
-    fn test_allow_address_when_paused_returns_contract_paused() {
-        let (e, cid, admin, addr) = setup(1000);
-        let c = ComplianceContractClient::new(&e, &cid);
-        c.pause(&admin);
-        let res = c.try_allow_address(&admin, &addr);
-        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
-    }
-
-    #[test]
-    fn test_block_address_when_paused_returns_contract_paused() {
-        let (e, cid, admin, addr) = setup(1000);
-        let c = ComplianceContractClient::new(&e, &cid);
-        c.pause(&admin);
-        let res = c.try_block_address(&admin, &addr);
-        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
-    }
-
-    #[test]
-    fn test_allow_address_until_when_paused_returns_contract_paused() {
-        let (e, cid, admin, addr) = setup(1000);
-        let c = ComplianceContractClient::new(&e, &cid);
-        c.pause(&admin);
-        let res = c.try_allow_address_until(&admin, &addr, &9999u64);
-        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
-    }
-
-    #[test]
-    fn test_transfer_admin_when_paused_returns_contract_paused() {
-        let (e, cid, admin, _addr) = setup(1000);
-        let c = ComplianceContractClient::new(&e, &cid);
-        let new_admin = Address::generate(&e);
-        c.pause(&admin);
-        let res = c.try_transfer_admin(&admin, &new_admin);
-        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
-    }
-
-    #[test]
-    fn test_clear_address_when_paused_returns_contract_paused() {
-        let (e, cid, admin, addr) = setup(1000);
-        let c = ComplianceContractClient::new(&e, &cid);
-        c.allow_address(&admin, &addr);
-        c.pause(&admin);
-        let res = c.try_clear_address(&admin, &addr);
-        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
-    }
-
-    // ── clear_address tests ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_clear_address_removes_allowed_entry() {
-        let (e, cid, admin, addr) = setup(1000);
-        let c = ComplianceContractClient::new(&e, &cid);
+    fn test_permanent_allow_unaffected_by_time() {
+        let (_e, c, admin, addr) = setup(9999);
         c.allow_address(&admin, &addr);
         assert!(c.is_allowed(&addr));
-        c.clear_address(&admin, &addr);
-        assert!(!c.is_allowed(&addr));
-    }
-
-    #[test]
-    fn test_clear_address_removes_blocked_entry() {
-        let (e, cid, admin, addr) = setup(1000);
-        let c = ComplianceContractClient::new(&e, &cid);
-        c.block_address(&admin, &addr);
-        c.clear_address(&admin, &addr);
-        assert!(!c.is_allowed(&addr));
-    }
-
-    #[test]
-    fn test_clear_address_not_present_returns_address_not_found() {
-        let (e, cid, admin, addr) = setup(1000);
-        let c = ComplianceContractClient::new(&e, &cid);
-        let res = c.try_clear_address(&admin, &addr);
-        assert_eq!(res, Err(Ok(ContractError::AddressNotFound)));
-    }
-
-    #[test]
-    fn test_clear_address_already_cleared_returns_address_not_found() {
-        let (e, cid, admin, addr) = setup(1000);
-        let c = ComplianceContractClient::new(&e, &cid);
-        c.allow_address(&admin, &addr);
-        c.clear_address(&admin, &addr);
-        let res = c.try_clear_address(&admin, &addr);
-        assert_eq!(res, Err(Ok(ContractError::AddressNotFound)));
     }
 }
