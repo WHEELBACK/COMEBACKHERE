@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "express": "^4.18.2",
+    "mongodb": "^6.12.0",
     "stellar-sdk": "^12.1.0"
   },
   "devDependencies": {
