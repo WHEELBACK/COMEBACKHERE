@@ -9,6 +9,7 @@ pub enum ContractError {
     Unauthorized = 1,
     ContractPaused = 2,
     AlreadyInitialized = 3,
+    AddressNotFound = 4,
 }
 
 #[contracttype]
@@ -28,6 +29,18 @@ pub enum DataKey {
 
 #[contract]
 pub struct ComplianceContract;
+
+fn is_paused(e: &Env) -> bool {
+    e.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+}
+
+fn check_not_paused(e: &Env) -> Result<(), ContractError> {
+    if is_paused(e) {
+        Err(ContractError::ContractPaused)
+    } else {
+        Ok(())
+    }
+}
 
 #[contractimpl]
 impl ComplianceContract {
@@ -56,51 +69,80 @@ impl ComplianceContract {
             .unwrap_or(AddressStatus::Cleared)
     }
 
-    pub fn allow_address(e: Env, admin: Address, addr: Address) {
+    pub fn allow_address(e: Env, admin: Address, addr: Address) -> Result<(), ContractError> {
+        check_not_paused(&e)?;
         admin.require_auth();
         e.storage()
             .instance()
-            .set(&DataKey::Status(addr), &AddressStatus::Allowed);
+            .set(&DataKey::Status(addr.clone()), &AddressStatus::Allowed);
         e.events()
             .publish((Symbol::new(&e, "address_allowed"),), addr);
+        Ok(())
     }
 
-    pub fn block_address(e: Env, admin: Address, addr: Address) {
+    pub fn block_address(e: Env, admin: Address, addr: Address) -> Result<(), ContractError> {
+        check_not_paused(&e)?;
         admin.require_auth();
         e.storage()
             .instance()
-            .set(&DataKey::Status(addr), &AddressStatus::Blocked);
+            .set(&DataKey::Status(addr.clone()), &AddressStatus::Blocked);
         e.events()
             .publish((Symbol::new(&e, "address_blocked"),), addr);
+        Ok(())
     }
 
-    pub fn allow_address_until(e: Env, admin: Address, addr: Address, until: u64) {
+    pub fn allow_address_until(
+        e: Env,
+        admin: Address,
+        addr: Address,
+        until: u64,
+    ) -> Result<(), ContractError> {
+        check_not_paused(&e)?;
         admin.require_auth();
         e.storage()
             .instance()
-            .set(&DataKey::Status(addr), &AddressStatus::AllowedUntil(until));
+            .set(&DataKey::Status(addr.clone()), &AddressStatus::AllowedUntil(until));
         e.events().publish(
             (Symbol::new(&e, "address_allowed_until"),),
             (addr, until),
         );
+        Ok(())
     }
 
-    pub fn transfer_admin(e: Env, admin: Address, new_admin: Address) {
+    pub fn transfer_admin(
+        e: Env,
+        admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
+        check_not_paused(&e)?;
         admin.require_auth();
         e.storage().instance().set(&DataKey::Admin, &new_admin);
+        Ok(())
     }
 
-    pub fn accept_admin(e: Env, new_admin: Address) {
+    pub fn accept_admin(_e: Env, new_admin: Address) {
         new_admin.require_auth();
     }
 
-    pub fn clear_address(e: Env, admin: Address, addr: Address) {
+    /// Removes the storage entry for `addr` from the specified list.
+    /// Returns `AddressNotFound` if the address has no active status (already cleared or never set).
+    pub fn clear_address(e: Env, admin: Address, addr: Address) -> Result<(), ContractError> {
+        check_not_paused(&e)?;
         admin.require_auth();
+        let status: AddressStatus = e
+            .storage()
+            .instance()
+            .get(&DataKey::Status(addr.clone()))
+            .unwrap_or(AddressStatus::Cleared);
+        if matches!(status, AddressStatus::Cleared) {
+            return Err(ContractError::AddressNotFound);
+        }
         e.storage()
             .instance()
-            .set(&DataKey::Status(addr), &AddressStatus::Cleared);
+            .remove(&DataKey::Status(addr.clone()));
         e.events()
             .publish((Symbol::new(&e, "address_cleared"),), addr);
+        Ok(())
     }
 
     pub fn pause(e: Env, admin: Address) {
@@ -120,36 +162,128 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::Env;
 
-    fn setup(ts: u64) -> (Env, ComplianceContractClient, Address, Address) {
+    fn setup(ts: u64) -> (Env, Address, Address, Address) {
         let e = Env::default();
         e.mock_all_auths();
         let contract_id = e.register_contract(None, ComplianceContract);
-        let c = ComplianceContractClient::new(&e, &contract_id);
         let admin = Address::generate(&e);
         let addr = Address::generate(&e);
-        c.initialize(&admin);
-        e.ledger().set_timestamp(ts);
-        (e, c, admin, addr)
+        ComplianceContractClient::new(&e, &contract_id).initialize(&admin);
+        e.ledger().with_mut(|li| li.timestamp = ts);
+        (e, contract_id, admin, addr)
     }
+
+    // ── existing expiry tests ────────────────────────────────────────────────
 
     #[test]
     fn test_is_allowed_not_expired() {
-        let (_e, c, admin, addr) = setup(1000);
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
         c.allow_address_until(&admin, &addr, &2000u64);
         assert!(c.is_allowed(&addr));
     }
 
     #[test]
     fn test_is_allowed_exactly_at_expiry_returns_false() {
-        let (_e, c, admin, addr) = setup(1000);
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
         c.allow_address_until(&admin, &addr, &1000u64);
         assert!(!c.is_allowed(&addr));
     }
 
     #[test]
     fn test_is_allowed_past_expiry_returns_false() {
-        let (_e, c, admin, addr) = setup(1001);
+        let (e, cid, admin, addr) = setup(1001);
+        let c = ComplianceContractClient::new(&e, &cid);
         c.allow_address_until(&admin, &addr, &1000u64);
         assert!(!c.is_allowed(&addr));
+    }
+
+    // ── paused guard tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_allow_address_when_paused_returns_contract_paused() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.pause(&admin);
+        let res = c.try_allow_address(&admin, &addr);
+        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_block_address_when_paused_returns_contract_paused() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.pause(&admin);
+        let res = c.try_block_address(&admin, &addr);
+        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_allow_address_until_when_paused_returns_contract_paused() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.pause(&admin);
+        let res = c.try_allow_address_until(&admin, &addr, &9999u64);
+        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_transfer_admin_when_paused_returns_contract_paused() {
+        let (e, cid, admin, _addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        let new_admin = Address::generate(&e);
+        c.pause(&admin);
+        let res = c.try_transfer_admin(&admin, &new_admin);
+        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_clear_address_when_paused_returns_contract_paused() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.allow_address(&admin, &addr);
+        c.pause(&admin);
+        let res = c.try_clear_address(&admin, &addr);
+        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    // ── clear_address tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_clear_address_removes_allowed_entry() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.allow_address(&admin, &addr);
+        assert!(c.is_allowed(&addr));
+        c.clear_address(&admin, &addr);
+        assert!(!c.is_allowed(&addr));
+    }
+
+    #[test]
+    fn test_clear_address_removes_blocked_entry() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.block_address(&admin, &addr);
+        c.clear_address(&admin, &addr);
+        assert!(!c.is_allowed(&addr));
+    }
+
+    #[test]
+    fn test_clear_address_not_present_returns_address_not_found() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        let res = c.try_clear_address(&admin, &addr);
+        assert_eq!(res, Err(Ok(ContractError::AddressNotFound)));
+    }
+
+    #[test]
+    fn test_clear_address_already_cleared_returns_address_not_found() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.allow_address(&admin, &addr);
+        c.clear_address(&admin, &addr);
+        let res = c.try_clear_address(&admin, &addr);
+        assert_eq!(res, Err(Ok(ContractError::AddressNotFound)));
     }
 }
