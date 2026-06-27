@@ -1,3 +1,6 @@
 [workspace]
-members = ["invoice", "settlement"]
+members = [
+    "invoice",
+    "settlement",
+]
 resolver = "2"
