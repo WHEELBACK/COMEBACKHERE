@@ -23,6 +23,8 @@ async fn main() {
         .route("/health/rpc", get(get_rpc_health))
         .route("/invoices/:id", get(get_invoice))
         .route("/invoices/:id/pay", post(pay_invoice))
+        .route("/invoices/:id/cancel", post(cancel_invoice))
+        .route("/invoices/:id/refund", post(refund_invoice))
         .with_state(client);
 
     let addr = "0.0.0.0:3001";

@@ -24,6 +24,7 @@ pub enum DataKey {
     Admin,
     Paused,
     Status(Address),
+    PendingAdmin,
 }
 
 #[contract]
@@ -85,13 +86,45 @@ impl ComplianceContract {
         );
     }
 
-    pub fn transfer_admin(e: Env, admin: Address, new_admin: Address) {
+    pub fn transfer_admin(e: Env, admin: Address, new_admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
-        e.storage().instance().set(&DataKey::Admin, &new_admin);
+        let stored_admin: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap();
+        if admin != stored_admin {
+            return Err(ContractError::Unauthorized);
+        }
+        e.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        e.events().publish(
+            (Symbol::new(&e, "transfer_admin"),),
+            (&admin, &new_admin),
+        );
+        Ok(())
     }
 
-    pub fn accept_admin(e: Env, new_admin: Address) {
+    pub fn accept_admin(e: Env, new_admin: Address) -> Result<(), ContractError> {
         new_admin.require_auth();
+        let pending: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(ContractError::Unauthorized)?;
+        if new_admin != pending {
+            return Err(ContractError::Unauthorized);
+        }
+        e.storage().instance().set(&DataKey::Admin, &new_admin);
+        e.storage()
+            .instance()
+            .remove(&DataKey::PendingAdmin);
+        e.events().publish(
+            (Symbol::new(&e, "accept_admin"),),
+            &new_admin,
+        );
+        Ok(())
     }
 
     pub fn clear_address(e: Env, admin: Address, addr: Address) {
