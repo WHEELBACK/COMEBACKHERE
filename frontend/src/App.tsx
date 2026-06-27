@@ -54,6 +54,7 @@ function AppRoutes() {
         <Route index element={<Navigate to="/invoices" replace />} />
         <Route path="invoices" element={<InvoicesPage />} />
         <Route path="settlements" element={<SettlementsPage />} />
+        <Route path="settlements/:id" element={<SettlementDetailPage />} />
         <Route path="disputes" element={<DisputesPage />} />
         <Route path="signers" element={<SignersPage />} />
         <Route path="settings" element={<SettingsPage />} />

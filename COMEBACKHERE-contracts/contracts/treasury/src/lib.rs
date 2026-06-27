@@ -252,6 +252,12 @@ pub enum DataKey {
 }
 
 #[cfg(test)]
+mod integration_settlement_multisig;
+
+#[cfg(test)]
+mod integration_dispute_lifecycle;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, Env};
