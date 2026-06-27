@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 use crate::types::{InvoiceResponse, InvoiceStatus, PayResponse, RpcRequest, RpcResponse};
 
@@ -10,15 +11,20 @@ const CONTRACT_UNAUTHORIZED: u32 = 1;
 pub struct SorobanClient {
     pub rpc_url: String,
     pub contract_id: String,
+    pub horizon_url: String,
     http: Client,
 }
 
 impl SorobanClient {
-    pub fn new(rpc_url: String, contract_id: String) -> Self {
+    pub fn new(rpc_url: String, contract_id: String, horizon_url: String) -> Self {
         Self {
             rpc_url,
             contract_id,
-            http: Client::new(),
+            horizon_url,
+            http: Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("reqwest client should be created"),
         }
     }
 
@@ -49,6 +55,43 @@ impl SorobanClient {
 
         let result = resp.result.ok_or_else(|| anyhow!("Empty RPC result"))?;
         parse_invoice_result(&result, invoice_id)
+    }
+
+    pub async fn check_rpc_health(&self) -> Result<()> {
+        let req = RpcRequest {
+            jsonrpc: "2.0",
+            id: 3,
+            method: "getLatestLedger",
+            params: json!([]),
+        };
+
+        let resp: RpcResponse = self
+            .http
+            .post(&self.rpc_url)
+            .json(&req)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if let Some(err) = resp.error {
+            return Err(rpc_error_to_anyhow(&err));
+        }
+
+        resp.result
+            .ok_or_else(|| anyhow!("Empty RPC result"))
+            .map(|_| ())
+    }
+
+    pub async fn check_horizon_health(&self) -> Result<()> {
+        let health_url = format!("{}/health", self.horizon_url.trim_end_matches('/'));
+        let response = self.http.get(&health_url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Horizon health check failed with status {}", response.status()));
+        }
+
+        Ok(())
     }
 
     /// Submit a signed mark_paid transaction to Soroban.
