@@ -25,6 +25,7 @@ pub enum DataKey {
     Admin,
     Paused,
     Status(Address),
+    PendingAdmin,
 }
 
 #[contract]
@@ -122,6 +123,23 @@ impl ComplianceContract {
 
     pub fn accept_admin(_e: Env, new_admin: Address) {
         new_admin.require_auth();
+        let pending: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(ContractError::Unauthorized)?;
+        if new_admin != pending {
+            return Err(ContractError::Unauthorized);
+        }
+        e.storage().instance().set(&DataKey::Admin, &new_admin);
+        e.storage()
+            .instance()
+            .remove(&DataKey::PendingAdmin);
+        e.events().publish(
+            (Symbol::new(&e, "accept_admin"),),
+            &new_admin,
+        );
+        Ok(())
     }
 
     /// Removes the storage entry for `addr` from the specified list.

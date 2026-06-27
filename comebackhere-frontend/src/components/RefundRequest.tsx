@@ -1,6 +1,7 @@
 import { useState } from "react"
 import type { Invoice, InvoiceStatus } from "../types"
 import { StatusBadge } from "./StatusBadge"
+import { CopyableText } from "./CopyableText"
 import { RefundConfirmationModal } from "./RefundConfirmationModal"
 
 interface RefundRequestProps {
@@ -53,13 +54,15 @@ export function RefundRequest({
       {result && (
         <div
           className={`message message--${result.success ? "success" : "error"}`}
+          role="status"
+          aria-live="polite"
         >
           {result.success ? (
             <>
               Refund requested successfully!
               <br />
               Transaction hash:{" "}
-              <code className="tx-hash">{result.hash}</code>
+              <code className="tx-hash"><CopyableText text={result.hash!} label="Copy transaction hash" /></code>
             </>
           ) : (
             <>Refund request failed: {result.errorMsg}</>
@@ -68,7 +71,7 @@ export function RefundRequest({
       )}
 
       {canRequestRefund && !result?.success && (
-        <button className="btn btn--danger" onClick={handleRefundClick}>
+        <button className="btn btn--danger" onClick={handleRefundClick} aria-label={`Request refund for invoice #${invoice.id}`}>
           Request Refund
         </button>
       )}

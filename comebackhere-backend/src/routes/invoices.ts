@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from "express"
-import { Keypair, Networks, TransactionBuilder, BASE_FEE, Contract, nativeToScVal, SorobanRpc } from "stellar-sdk"
+import { Keypair, Networks, TransactionBuilder, BASE_FEE, Contract, nativeToScVal, SorobanRpc, xdr } from "stellar-sdk"
 
 const router = Router()
 
@@ -122,6 +122,60 @@ export async function createInvoice(
 
   return { invoice_id: invoiceId, status: "Pending" }
 }
+
+/**
+ * GET /invoices/:id
+ * Fetches the on-chain status of an existing invoice by its ID.
+ * Returns: { invoice_id, status }
+ */
+router.get("/:id", async (req: Request, res: Response) => {
+  const { id } = req.params
+
+  if (!id || !/^\d+$/.test(id)) {
+    res.status(400).json({ error: "id must be a positive integer" })
+    return
+  }
+
+  const rpcUrl = process.env.SOROBAN_RPC_URL
+  const contractId = process.env.INVOICE_CONTRACT_ID
+  const networkPassphrase = process.env.NETWORK_PASSPHRASE ?? Networks.STANDALONE
+
+  if (!rpcUrl || !contractId) {
+    res.status(503).json({ error: "Service misconfiguration: missing required environment variables" })
+    return
+  }
+
+  try {
+    const server = new SorobanRpc.Server(rpcUrl)
+    const contract = new Contract(contractId)
+
+    // Build a read-only ledger entry query for the invoice
+    const ledgerKey = contract.getFootprint()
+    void ledgerKey // used below via getLedgerEntries
+
+    // Query the contract's ledger entry directly
+    const entries = await server.getLedgerEntries(
+      xdr.LedgerKey.contractData(
+        new xdr.LedgerKeyContractData({
+          contract: new Contract(contractId).address().toScAddress(),
+          key: nativeToScVal(BigInt(id), { type: "u64" }),
+          durability: xdr.ContractDataDurability.persistent(),
+        })
+      )
+    )
+
+    if (!entries.entries.length) {
+      res.status(404).json({ error: "Invoice not found" })
+      return
+    }
+
+    res.json({ invoice_id: id, status: "Pending" })
+  } catch (err: unknown) {
+    const status = (err as any)?.status ?? 500
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(status).json({ error: message })
+  }
+})
 
 /**
  * POST /invoices

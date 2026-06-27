@@ -55,10 +55,61 @@ pub struct PayResponse {
     pub transaction_hash: String,
 }
 
+/// Request body for POST /invoices/:id/cancel
+#[derive(Debug, Deserialize)]
+pub struct CancelRequest {
+    /// The Stellar public key of the merchant (G…).
+    pub merchant: String,
+    /// Signed XDR transaction envelope (base64).
+    pub signed_xdr: String,
+}
+
+/// Response body for POST /invoices/:id/cancel
+#[derive(Debug, Serialize)]
+pub struct CancelResponse {
+    pub status: InvoiceStatus,
+    pub transaction_hash: String,
+}
+
+/// Request body for POST /invoices/:id/refund
+#[derive(Debug, Deserialize)]
+pub struct RefundRequest {
+    /// The Stellar public key of the payer/customer (G…).
+    pub payer: String,
+    /// Signed XDR transaction envelope (base64).
+    pub signed_xdr: String,
+}
+
+/// Response body for POST /invoices/:id/refund
+#[derive(Debug, Serialize)]
+pub struct RefundResponse {
+    pub status: InvoiceStatus,
+    pub transaction_hash: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
     pub code: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    Healthy,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependencyHealth {
+    pub status: HealthStatus,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RpcHealthResponse {
+    pub status: HealthStatus,
+    pub dependencies: std::collections::BTreeMap<String, DependencyHealth>,
 }
 
 #[derive(Debug, Serialize)]
