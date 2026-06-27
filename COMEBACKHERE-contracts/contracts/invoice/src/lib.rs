@@ -427,4 +427,79 @@ mod tests {
         assert_eq!(invoice_a.merchant, merchant_a);
         assert_eq!(invoice_b.merchant, merchant_b);
     }
+
+    #[test]
+    fn test_pause_blocks_create_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        env.ledger().set_timestamp(1000);
+
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        client.pause(&admin);
+
+        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_unpause_restores_create_invoice() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        env.ledger().set_timestamp(1000);
+
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        client.pause(&admin);
+        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
+
+        client.unpause(&admin);
+        let invoice_id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &2);
+        assert_eq!(invoice_id, 1);
+    }
+
+    #[test]
+    fn test_pause_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        let result = client.try_pause(&non_admin);
+        assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_unpause_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+
+        let contract_id = env.register_contract(None, InvoiceContract);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        client.pause(&admin);
+
+        let result = client.try_unpause(&non_admin);
+        assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+    }
 }

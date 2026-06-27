@@ -137,6 +137,12 @@ export default function App() {
         >
           Compliance
         </button>
+        <button
+          className={`tab ${tab === "analytics" ? "tab--active" : ""}`}
+          onClick={() => setTab("analytics")}
+        >
+          Analytics
+        </button>
       </nav>
 
       <main className="app-main">
@@ -144,8 +150,10 @@ export default function App() {
           <InvoicePayment />
         ) : tab === "refund" ? (
           <RefundTab />
-        ) : (
+        ) : tab === "compliance" ? (
           <ComplianceManager />
+        ) : (
+          <AdminAnalytics />
         )}
       </main>
     </div>
