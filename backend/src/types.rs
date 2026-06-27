@@ -55,6 +55,38 @@ pub struct PayResponse {
     pub transaction_hash: String,
 }
 
+/// Request body for POST /invoices/:id/cancel
+#[derive(Debug, Deserialize)]
+pub struct CancelRequest {
+    /// The Stellar public key of the merchant (G…).
+    pub merchant: String,
+    /// Signed XDR transaction envelope (base64).
+    pub signed_xdr: String,
+}
+
+/// Response body for POST /invoices/:id/cancel
+#[derive(Debug, Serialize)]
+pub struct CancelResponse {
+    pub status: InvoiceStatus,
+    pub transaction_hash: String,
+}
+
+/// Request body for POST /invoices/:id/refund
+#[derive(Debug, Deserialize)]
+pub struct RefundRequest {
+    /// The Stellar public key of the payer/customer (G…).
+    pub payer: String,
+    /// Signed XDR transaction envelope (base64).
+    pub signed_xdr: String,
+}
+
+/// Response body for POST /invoices/:id/refund
+#[derive(Debug, Serialize)]
+pub struct RefundResponse {
+    pub status: InvoiceStatus,
+    pub transaction_hash: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
