@@ -31,6 +31,7 @@ pub struct Settlement {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApproveResult {
     pub approval_weight: u64,
     pub threshold: u64,
