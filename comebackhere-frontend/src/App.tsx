@@ -8,6 +8,7 @@ import { useTheme } from "./hooks/useTheme"
 import { useWallet } from "./hooks/useWallet"
 import { CopyableText } from "./components/CopyableText"
 import "./App.css"
+import "./components/ErrorBoundary.css"
 
 const EXPECTED_NETWORK = import.meta.env.VITE_NETWORK_PASSPHRASE as string ?? "Standalone Network ; February 2025"
 
@@ -153,21 +154,16 @@ export default function App() {
         </button>
       </nav>
 
-      <main
-        className="app-main"
-        role="tabpanel"
-        id={`tabpanel-${tab}`}
-        aria-labelledby={`tab-${tab}`}
-      >
-        {tab === "payment" ? (
-          <InvoicePayment />
-        ) : tab === "refund" ? (
-          <RefundTab />
-        ) : tab === "compliance" ? (
-          <ComplianceManager />
-        ) : (
-          <AdminAnalytics />
-        )}
+      <main className="app-main">
+        <ErrorBoundary fallbackTitle="This section encountered an error">
+          {tab === "payment" ? (
+            <InvoicePayment />
+          ) : tab === "refund" ? (
+            <RefundTab />
+          ) : (
+            <ComplianceManager />
+          )}
+        </ErrorBoundary>
       </main>
     </div>
   )

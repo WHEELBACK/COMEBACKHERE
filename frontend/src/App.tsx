@@ -7,19 +7,35 @@ import ABIExplorer from "./components/ABIExplorer";
 import { ThemeProvider, useTheme } from "./theme";
 
 function InvoicesPage() {
-  return <p>Invoices list will appear here.</p>;
+  return (
+    <ErrorBoundary fallbackTitle="Failed to load invoices">
+      <p>Invoices list will appear here.</p>
+    </ErrorBoundary>
+  );
 }
 
 function SettlementsPage() {
-  return <SettlementProposalForm />;
+  return (
+    <ErrorBoundary fallbackTitle="Failed to load settlements">
+      <SettlementProposalForm />
+    </ErrorBoundary>
+  );
 }
 
 function DisputesPage() {
-  return <DisputeVotingPanel />;
+  return (
+    <ErrorBoundary fallbackTitle="Failed to load disputes">
+      <DisputeVotingPanel />
+    </ErrorBoundary>
+  );
 }
 
 function SignersPage() {
-  return <SignerManagement />;
+  return (
+    <ErrorBoundary fallbackTitle="Failed to load signer management">
+      <SignerManagement />
+    </ErrorBoundary>
+  );
 }
 
 function SettingsPage() {
@@ -58,7 +74,7 @@ function AppRoutes() {
         <Route path="disputes" element={<DisputesPage />} />
         <Route path="signers" element={<SignersPage />} />
         <Route path="settings" element={<SettingsPage />} />
-        <Route path="abi" element={<ABIExplorer />} />
+        <Route path="abi" element={<ErrorBoundary fallbackTitle="Failed to load ABI explorer"><ABIExplorer /></ErrorBoundary>} />
       </Route>
     </Routes>
   );
