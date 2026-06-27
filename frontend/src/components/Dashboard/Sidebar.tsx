@@ -19,12 +19,12 @@ const iconMap: Record<string, string> = {
 
 export default function Sidebar() {
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" role="complementary" aria-label="Sidebar navigation">
       <div className="sidebar-header">
         <h1 className="sidebar-logo">COMEBACKHERE</h1>
         <p className="sidebar-subtitle">Merchant Dashboard</p>
       </div>
-      <nav className="sidebar-nav">
+      <nav className="sidebar-nav" aria-label="Dashboard navigation">
         {links.map((link) => (
           <NavLink
             key={link.to}

@@ -3,6 +3,7 @@
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, Symbol, Vec};
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SettlementStatus {
     Pending,
     Executed,
@@ -21,6 +22,41 @@ pub struct Settlement {
     pub proposer: Address,
 }
 
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum TreasuryError {
+    ContractPaused = 1,
+    NotPending = 2,
+    InsufficientApprovals = 3,
+    TokenNotAllowed = 4,
+    Unauthorized = 5,
+    InvalidThreshold = 6,
+}
+
+#[contracttype]
+pub enum DataKey {
+    Admin,
+    Paused,
+    Signer(Address),
+    Settlement(u64),
+    NextSettlementId,
+    Threshold,
+    TokenAllowlist,
+}
+
+fn is_paused(e: &Env) -> bool {
+    e.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+}
+
+fn check_not_paused(e: &Env) -> Result<(), TreasuryError> {
+    if is_paused(e) {
+        Err(TreasuryError::ContractPaused)
+    } else {
+        Ok(())
+    }
+}
+
 #[contract]
 pub struct TreasuryContract;
 
@@ -33,13 +69,24 @@ impl TreasuryContract {
         e.storage().instance().set(&DataKey::Paused, &false);
         e.storage().instance().set(&DataKey::NextSettlementId, &1u64);
         for (signer, weight) in signers.iter() {
-            e.storage().instance().set(&DataKey::Signer(signer.clone()), &weight);
+            e.storage()
+                .instance()
+                .set(&DataKey::Signer(signer.clone()), &weight);
         }
     }
 
-    pub fn set_signer(e: Env, admin: Address, signer: Address, weight: u64) {
-        admin.require_auth();
-        e.storage().instance().set(&DataKey::Signer(signer), &weight);
+    pub fn set_signer(
+        e: Env,
+        admin: Address,
+        signer: Address,
+        weight: u64,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+        e.storage()
+            .instance()
+            .set(&DataKey::Signer(signer), &weight);
+        Ok(())
     }
 
     pub fn propose_settlement(
@@ -48,44 +95,54 @@ impl TreasuryContract {
         token: Address,
         amount: u64,
         merchant: Address,
-    ) -> u64 {
+    ) -> Result<u64, TreasuryError> {
+        check_not_paused(&e)?;
         signer.require_auth();
 
-        if e.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
-            panic_with_error!(&e, TreasuryError::ContractPaused);
-        }
-
-        let allowlist: Vec<Address> = e.storage().instance().get(&DataKey::TokenAllowlist).unwrap_or_else(|| Vec::new(&e));
+        let allowlist: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAllowlist)
+            .unwrap_or_else(|| Vec::new(&e));
         if !allowlist.is_empty() && !allowlist.contains(&token) {
-            panic_with_error!(&e, TreasuryError::TokenNotAllowed);
+            return Err(TreasuryError::TokenNotAllowed);
         }
 
-        let settlement_id = e
+        let settlement_id: u64 = e
             .storage()
             .instance()
             .get(&DataKey::NextSettlementId)
             .unwrap_or(1u64);
 
         let settlement = Settlement {
-            token: token.clone(),
+            token,
             amount,
-            merchant: merchant.clone(),
+            merchant,
             status: SettlementStatus::Pending,
             approval_weight: 0u64,
-            proposer: signer.clone(),
+            proposer: signer,
         };
 
-        e.storage().instance().set(&DataKey::Settlement(settlement_id), &settlement);
-        e.storage().instance().set(&DataKey::NextSettlementId, &(settlement_id + 1));
+        e.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &settlement);
+        e.storage()
+            .instance()
+            .set(&DataKey::NextSettlementId, &(settlement_id + 1));
 
-        settlement_id
+        Ok(settlement_id)
     }
 
-    pub fn approve_settlement(e: Env, signer: Address, settlement_id: u64) {
+    pub fn approve_settlement(
+        e: Env,
+        signer: Address,
+        settlement_id: u64,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
         signer.require_auth();
         let mut settlement = Self::get_settlement_internal(&e, settlement_id);
         if settlement.status != SettlementStatus::Pending {
-            panic_with_error!(&e, TreasuryError::NotPending);
+            return Err(TreasuryError::NotPending);
         }
         let weight: u64 = e
             .storage()
@@ -93,19 +150,37 @@ impl TreasuryContract {
             .get(&DataKey::Signer(signer.clone()))
             .unwrap_or(0u64);
         settlement.approval_weight += weight;
-        e.storage().instance().set(&DataKey::Settlement(settlement_id), &settlement);
+        e.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &settlement);
+        Ok(())
     }
 
-    pub fn execute_settlement(e: Env, signer: Address, settlement_id: u64, token_contract: Address) {
+    pub fn execute_settlement(
+        e: Env,
+        signer: Address,
+        settlement_id: u64,
+        _token_contract: Address,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
         signer.require_auth();
-        let settlement = Self::get_settlement_internal(&e, settlement_id);
+        let mut settlement = Self::get_settlement_internal(&e, settlement_id);
         if settlement.status != SettlementStatus::Pending {
-            panic_with_error!(&e, TreasuryError::NotPending);
+            return Err(TreasuryError::NotPending);
         }
-        let threshold: u64 = e.storage().instance().get(&DataKey::Threshold).unwrap_or(0u64);
+        let threshold: u64 = e
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(0u64);
         if settlement.approval_weight < threshold {
-            panic_with_error!(&e, TreasuryError::InsufficientApprovals);
+            return Err(TreasuryError::InsufficientApprovals);
         }
+        settlement.status = SettlementStatus::Executed;
+        e.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &settlement);
+        Ok(())
     }
 
     pub fn get_pending_settlements(
@@ -146,80 +221,138 @@ impl TreasuryContract {
         result
     }
 
-    fn check_admin(e: &Env, admin: &Address) {
+    fn check_admin(e: &Env, admin: &Address) -> Result<(), TreasuryError> {
         admin.require_auth();
-        let stored_admin: Address = e
+        let stored_admin: Address = e.storage().instance().get(&DataKey::Admin).unwrap();
+        if stored_admin != *admin {
+            return Err(TreasuryError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    pub fn pause(e: Env, admin: Address) -> Result<(), TreasuryError> {
+        Self::check_admin(&e, &admin)?;
+        e.storage().instance().set(&DataKey::Paused, &true);
+        Ok(())
+    }
+
+    pub fn unpause(e: Env, admin: Address) -> Result<(), TreasuryError> {
+        Self::check_admin(&e, &admin)?;
+        e.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    pub fn update_threshold(
+        e: Env,
+        admin: Address,
+        new_threshold: u32,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+        if new_threshold == 0 {
+            return Err(TreasuryError::InvalidThreshold);
+        }
+        let old_threshold: u64 = e
             .storage()
             .instance()
-            .get(&DataKey::Admin)
-            .unwrap();
-        if stored_admin != *admin {
-            panic_with_error!(&e, TreasuryError::Unauthorized);
-        }
-    }
-
-    pub fn pause(e: Env, admin: Address) {
-        admin.require_auth();
-        e.storage().instance().set(&DataKey::Paused, &true);
-    }
-
-    pub fn unpause(e: Env, admin: Address) {
-        admin.require_auth();
-        e.storage().instance().set(&DataKey::Paused, &false);
-    }
-
-    pub fn update_threshold(e: Env, admin: Address, new_threshold: u32) {
-        Self::check_admin(&e, &admin);
-        if new_threshold == 0 {
-            panic_with_error!(&e, TreasuryError::InvalidThreshold);
-        }
-        let old_threshold: u64 = e.storage().instance().get(&DataKey::Threshold).unwrap_or(0u64);
+            .get(&DataKey::Threshold)
+            .unwrap_or(0u64);
         let threshold = new_threshold as u64;
         e.storage().instance().set(&DataKey::Threshold, &threshold);
         e.events().publish(
             (Symbol::new(&e, "threshold_updated"),),
             (old_threshold, threshold),
         );
+        Ok(())
     }
 
-    pub fn raise_dispute(e: Env, signer: Address, settlement_id: u64, reason: u32) {
+    pub fn raise_dispute(
+        e: Env,
+        signer: Address,
+        settlement_id: u64,
+        _reason: u32,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
         signer.require_auth();
         let mut settlement = Self::get_settlement_internal(&e, settlement_id);
         settlement.status = SettlementStatus::OnHold;
-        e.storage().instance().set(&DataKey::Settlement(settlement_id), &settlement);
+        e.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &settlement);
+        Ok(())
     }
 
-    pub fn resolve_dispute(e: Env, signer: Address, settlement_id: u64, resolve_in_favor: bool) {
+    pub fn resolve_dispute(
+        e: Env,
+        signer: Address,
+        _settlement_id: u64,
+        _resolve_in_favor: bool,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
         signer.require_auth();
+        Ok(())
     }
 
-    pub fn deposit(e: Env, from: Address, amount: u64) {
+    pub fn deposit(e: Env, from: Address, _amount: u64) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
         from.require_auth();
+        Ok(())
     }
 
-    pub fn withdraw(e: Env, admin: Address, to: Address, amount: u64) {
-        admin.require_auth();
+    pub fn withdraw(
+        e: Env,
+        admin: Address,
+        _to: Address,
+        _amount: u64,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+        Ok(())
     }
 
-    pub fn add_token_to_allowlist(e: Env, admin: Address, token: Address) {
-        admin.require_auth();
-        let mut allowlist: Vec<Address> = e.storage().instance().get(&DataKey::TokenAllowlist).unwrap_or_else(|| Vec::new(&e));
+    pub fn add_token_to_allowlist(
+        e: Env,
+        admin: Address,
+        token: Address,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+        let mut allowlist: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAllowlist)
+            .unwrap_or_else(|| Vec::new(&e));
         if !allowlist.contains(&token) {
             allowlist.push_back(token);
         }
-        e.storage().instance().set(&DataKey::TokenAllowlist, &allowlist);
+        e.storage()
+            .instance()
+            .set(&DataKey::TokenAllowlist, &allowlist);
+        Ok(())
     }
 
-    pub fn remove_token_from_allowlist(e: Env, admin: Address, token: Address) {
-        admin.require_auth();
-        let allowlist: Vec<Address> = e.storage().instance().get(&DataKey::TokenAllowlist).unwrap_or_else(|| Vec::new(&e));
+    pub fn remove_token_from_allowlist(
+        e: Env,
+        admin: Address,
+        token: Address,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+        let allowlist: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAllowlist)
+            .unwrap_or_else(|| Vec::new(&e));
         let mut updated = Vec::new(&e);
         for t in allowlist.iter() {
             if t != token {
                 updated.push_back(t);
             }
         }
-        e.storage().instance().set(&DataKey::TokenAllowlist, &updated);
+        e.storage()
+            .instance()
+            .set(&DataKey::TokenAllowlist, &updated);
+        Ok(())
     }
 
     fn get_settlement_internal(e: &Env, settlement_id: u64) -> Settlement {
@@ -230,26 +363,11 @@ impl TreasuryContract {
     }
 }
 
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum TreasuryError {
-    ContractPaused = 1,
-    NotPending = 2,
-    InsufficientApprovals = 3,
-    TokenNotAllowed = 4,
-}
+#[cfg(test)]
+mod integration_settlement_multisig;
 
-#[contracttype]
-pub enum DataKey {
-    Admin,
-    Paused,
-    Signer(Address),
-    Settlement(u64),
-    NextSettlementId,
-    Threshold,
-    TokenAllowlist,
-}
+#[cfg(test)]
+mod integration_dispute_lifecycle;
 
 #[cfg(test)]
 mod tests {
@@ -263,9 +381,11 @@ mod tests {
         (e, contract_id)
     }
 
-    fn client(e: &Env, id: &soroban_sdk::Address) -> TreasuryContractClient {
+    fn client<'a>(e: &'a Env, id: &'a soroban_sdk::Address) -> TreasuryContractClient<'a> {
         TreasuryContractClient::new(e, id)
     }
+
+    // ── existing pagination tests ────────────────────────────────────────────
 
     #[test]
     fn test_empty_returns_empty() {
@@ -311,7 +431,6 @@ mod tests {
         );
         let s1 = c.propose_settlement(&signer, &token, &1000u64, &merchant);
         let s2 = c.propose_settlement(&signer, &token, &2000u64, &merchant);
-        // execute s1 so it is no longer Pending
         c.approve_settlement(&signer, &s1);
         c.execute_settlement(&signer, &s1, &token);
         let result = c.get_pending_settlements(&None, &None);
@@ -335,7 +454,6 @@ mod tests {
         for _ in 0..5 {
             c.propose_settlement(&signer, &token, &100u64, &merchant);
         }
-        // offset=2, limit=2 → ids 3 and 4
         let page = c.get_pending_settlements(&Some(2u32), &Some(2u32));
         assert_eq!(page.len(), 2);
         assert_eq!(page.get(0).unwrap(), 3u64);
@@ -358,8 +476,171 @@ mod tests {
         for _ in 0..5 {
             c.propose_settlement(&signer, &token, &100u64, &merchant);
         }
-        // limit=200 should be capped to 100, returning all 5
         let result = c.get_pending_settlements(&None, &Some(200u32));
         assert_eq!(result.len(), 5);
+    }
+
+    // ── paused guard tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_propose_when_paused_returns_contract_paused() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
+        c.pause(&admin);
+        let res = c.try_propose_settlement(&signer, &token, &100u64, &merchant);
+        assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_approve_when_paused_returns_contract_paused() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
+        let sid = c.propose_settlement(&signer, &token, &100u64, &merchant);
+        c.pause(&admin);
+        let res = c.try_approve_settlement(&signer, &sid);
+        assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_execute_when_paused_returns_contract_paused() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
+        let sid = c.propose_settlement(&signer, &token, &100u64, &merchant);
+        c.approve_settlement(&signer, &sid);
+        c.pause(&admin);
+        let res = c.try_execute_settlement(&signer, &sid, &token);
+        assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_set_signer_when_paused_returns_contract_paused() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.pause(&admin);
+        let res = c.try_set_signer(&admin, &signer, &1u64);
+        assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_update_threshold_when_paused_returns_contract_paused() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.pause(&admin);
+        let res = c.try_update_threshold(&admin, &2u32);
+        assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    // ── threshold and approval_weight tests ──────────────────────────────────
+
+    #[test]
+    fn test_partial_approval_below_threshold_does_not_execute() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        // threshold=3, signer weight=1 → approval_weight after approve = 1 < 3
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &3, &admin);
+        let sid = c.propose_settlement(&signer, &token, &500u64, &merchant);
+        c.approve_settlement(&signer, &sid);
+        // execute should fail with InsufficientApprovals
+        let res = c.try_execute_settlement(&signer, &sid, &token);
+        assert_eq!(res, Err(Ok(TreasuryError::InsufficientApprovals)));
+        // settlement must still be Pending
+        let pending = c.get_pending_settlements(&None, &None);
+        assert!(pending.contains(&sid));
+    }
+
+    #[test]
+    fn test_exact_threshold_executes_settlement() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        // threshold=2, signer weight=2 → exact match
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 2u64)], &2, &admin);
+        let sid = c.propose_settlement(&signer, &token, &500u64, &merchant);
+        c.approve_settlement(&signer, &sid);
+        c.execute_settlement(&signer, &sid, &token);
+        // settlement no longer pending
+        let pending = c.get_pending_settlements(&None, &None);
+        assert!(!pending.contains(&sid));
+    }
+
+    #[test]
+    fn test_over_threshold_single_approval_executes() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        // threshold=1, signer weight=5 → weight > threshold
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 5u64)], &1, &admin);
+        let sid = c.propose_settlement(&signer, &token, &500u64, &merchant);
+        c.approve_settlement(&signer, &sid);
+        c.execute_settlement(&signer, &sid, &token);
+        let pending = c.get_pending_settlements(&None, &None);
+        assert!(!pending.contains(&sid));
+    }
+
+    #[test]
+    fn test_zero_threshold_update_rejected() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        let res = c.try_update_threshold(&admin, &0u32);
+        assert_eq!(res, Err(Ok(TreasuryError::InvalidThreshold)));
+    }
+
+    #[test]
+    fn test_multi_signer_weight_accumulates_to_threshold() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let s2 = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        // threshold=3, s1 weight=1, s2 weight=2
+        c.initialize(
+            &soroban_sdk::vec![&e, (s1.clone(), 1u64), (s2.clone(), 2u64)],
+            &3,
+            &admin,
+        );
+        let sid = c.propose_settlement(&s1, &token, &500u64, &merchant);
+        // s1 approves: weight=1 < 3, can't execute yet
+        c.approve_settlement(&s1, &sid);
+        let res = c.try_execute_settlement(&s1, &sid, &token);
+        assert_eq!(res, Err(Ok(TreasuryError::InsufficientApprovals)));
+        // s2 approves: weight=3 == 3, can execute
+        c.approve_settlement(&s2, &sid);
+        c.execute_settlement(&s1, &sid, &token);
+        let pending = c.get_pending_settlements(&None, &None);
+        assert!(!pending.contains(&sid));
     }
 }

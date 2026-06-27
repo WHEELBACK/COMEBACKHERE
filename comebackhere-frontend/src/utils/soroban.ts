@@ -157,3 +157,50 @@ export async function requestRefund(
     }
   }
 }
+
+export async function cancelInvoice(
+  contractId: string,
+  invoiceId: number,
+  publicKey: string
+): Promise<PaymentResult> {
+  const server = getServer()
+  const contract = new Contract(contractId)
+
+  const args = [
+    nativeToScVal(invoiceId, { type: "u64" }),
+    nativeToScVal(publicKey, { type: "address" }),
+  ]
+
+  try {
+    const account = await server.getAccount(publicKey)
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: getNetworkPassphrase(),
+    })
+      .addOperation(contract.call("cancel_invoiced", ...args))
+      .setTimeout(30)
+      .build()
+
+    const simulated = await server.simulateTransaction(tx)
+    const { SorobanRpc } = window as any
+
+    const prepare = SorobanRpc.assembleTransaction(tx, simulated)
+    const signed = await (window as any).freighterApi.signTransaction(
+      prepare.toXDR(),
+      { networkPassphrase: getNetworkPassphrase() }
+    )
+
+    const txHash = await server.sendTransaction(signed)
+    return { success: true, transaction_hash: txHash.hash }
+  } catch (err: any) {
+    // ContractError::Unauthorized = 1
+    const msg: string = err?.message ?? err?.toString() ?? ""
+    const isUnauthorized = msg.includes("1") || msg.toLowerCase().includes("unauthorized")
+    return {
+      success: false,
+      error: isUnauthorized
+        ? "Unauthorized: only the merchant or customer can cancel this invoice."
+        : msg || "Cancellation failed",
+    }
+  }
+}

@@ -18,8 +18,8 @@ export default function DashboardLayout() {
   return (
     <div className="dashboard">
       <Sidebar />
-      <main className="dashboard-main">
-        <header className="dashboard-header">
+      <main className="dashboard-main" role="main">
+        <header className="dashboard-header" role="banner">
           <h2 className="dashboard-heading">Overview</h2>
           <div className="dashboard-header__controls">
             <NetworkSelector />
@@ -33,7 +33,7 @@ export default function DashboardLayout() {
             </button>
           </div>
         </header>
-        <section className="stats-grid">
+        <section className="stats-grid" aria-label="Dashboard statistics">
           {stats.map((stat) => (
             <StatsCard
               key={stat.title}
