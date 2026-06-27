@@ -122,18 +122,18 @@ export function TransactionHistory({ invoice }: { invoice: Invoice }) {
   }
 
   return (
-    <div className="history-panel">
+    <div className="history-panel" role="region" aria-label="Transaction history">
       <div className="history-panel__header">
         <h3>Transaction History</h3>
-        <p className="status-text">
+        <p className="status-text" aria-live="polite">
           Showing {filteredEvents.length} event{filteredEvents.length === 1 ? "" : "s"}
         </p>
       </div>
 
-      <div className="history-filters">
+      <div className="history-filters" role="search" aria-label="Filter transaction history">
         <label className="history-filter">
           <span>Event type</span>
-          <select value={eventType} onChange={(e) => { setEventType(e.target.value as "all" | TransactionEventType); setPage(1) }}>
+          <select value={eventType} onChange={(e) => { setEventType(e.target.value as "all" | TransactionEventType); setPage(1) }} aria-label="Filter by event type">
             <option value="all">All events</option>
             {Object.entries(EVENT_LABELS).map(([value, label]) => (
               <option key={value} value={value}>
@@ -171,7 +171,7 @@ export function TransactionHistory({ invoice }: { invoice: Invoice }) {
           />
         </label>
 
-        <button className="btn btn--secondary btn--sm" onClick={resetFilters}>
+        <button className="btn btn--secondary btn--sm" onClick={resetFilters} aria-label="Reset all filters">
           Reset
         </button>
       </div>
@@ -195,25 +195,27 @@ export function TransactionHistory({ invoice }: { invoice: Invoice }) {
             ))}
           </ul>
 
-          <div className="history-pagination">
+          <nav className="history-pagination" role="navigation" aria-label="Transaction history pagination">
             <button
               className="btn btn--secondary btn--sm"
               onClick={() => setPage((value) => Math.max(1, value - 1))}
               disabled={page === 1}
+              aria-label="Previous page"
             >
               Previous
             </button>
-            <span className="status-text">
+            <span className="status-text" aria-current="page">
               Page {page} of {pageCount}
             </span>
             <button
               className="btn btn--secondary btn--sm"
               onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
               disabled={page === pageCount}
+              aria-label="Next page"
             >
               Next
             </button>
-          </div>
+          </nav>
         </>
       )}
     </div>

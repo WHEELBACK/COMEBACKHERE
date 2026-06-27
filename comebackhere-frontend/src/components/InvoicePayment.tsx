@@ -2,8 +2,10 @@ import { useState, useEffect } from "react"
 import { useInvoice } from "../hooks/useInvoice"
 import { useWallet } from "../hooks/useWallet"
 import { StatusBadge } from "./StatusBadge"
+import { CopyableText } from "./CopyableText"
 import { PayConfirmationModal } from "./PayConfirmationModal"
 import { TransactionHistory } from "./TransactionHistory"
+import { InvoiceQRCode } from "./InvoiceQRCode"
 
 export function InvoicePayment() {
   const { invoice, loading, error, loadInvoice, pay } = useInvoice()
@@ -93,36 +95,42 @@ export function InvoicePayment() {
     <div className="payment-flow">
       <h1>Invoice Payment</h1>
 
-      <div className="invoice-lookup">
+      <div className="invoice-lookup" role="search" aria-label="Invoice lookup">
+        <label htmlFor="payment-invoice-id" className="sr-only">Invoice ID</label>
         <input
+          id="payment-invoice-id"
           type="number"
           placeholder="Enter Invoice ID"
           value={invoiceId}
           onChange={(e) => setInvoiceId(e.target.value)}
+          aria-label="Invoice ID for payment"
         />
         <button
           className="btn btn--primary"
           onClick={handleLoadInvoice}
           disabled={!invoiceId || loading}
+          aria-label={loading ? "Loading invoice" : "Load invoice"}
         >
           {loading ? "Loading..." : "Load Invoice"}
         </button>
       </div>
 
-      {loading && <p className="status-text">Loading invoice...</p>}
+      {loading && <p className="status-text" aria-live="polite">Loading invoice...</p>}
 
-      {error && <div className="message message--error">{error}</div>}
+      {error && <div className="message message--error" role="alert">{error}</div>}
 
       {result && (
         <div
           className={`message message--${result.success ? "success" : "error"}`}
+          role="status"
+          aria-live="polite"
         >
           {result.success ? (
             <>
               Payment successful!
               <br />
               Transaction hash:{" "}
-              <code className="tx-hash">{result.hash}</code>
+              <code className="tx-hash"><CopyableText text={result.hash!} label="Copy transaction hash" /></code>
             </>
           ) : (
             <>Payment failed: {result.errorMsg}</>
@@ -133,7 +141,7 @@ export function InvoicePayment() {
       {invoice && (
         <div className="invoice-card">
           <div className="invoice-card__header">
-            <h2>Invoice #{invoice.id}</h2>
+            <h2>Invoice #<CopyableText text={String(invoice.id)} label="Copy invoice ID" /></h2>
             <StatusBadge status={invoice.status} />
           </div>
 
@@ -161,7 +169,7 @@ export function InvoicePayment() {
             <div className="detail-row">
               <span className="detail-label">Merchant</span>
               <span className="detail-value detail-value--address">
-                {invoice.merchant}
+                <CopyableText text={invoice.merchant} label="Copy merchant address" />
               </span>
             </div>
             <div className="detail-row">
@@ -176,19 +184,20 @@ export function InvoicePayment() {
             </div>
           </div>
 
-          <div className="invoice-card__actions">
+          <div className="invoice-card__actions" role="group" aria-label="Invoice actions">
             {!connected && (
               <button
                 className="btn btn--primary"
                 onClick={connect}
                 disabled={connecting}
+                aria-label="Connect wallet to pay invoice"
               >
                 {connecting ? "Connecting..." : "Connect Wallet"}
               </button>
             )}
 
             {connected && canPay && (
-              <button className="btn btn--primary" onClick={handlePayClick}>
+              <button className="btn btn--primary" onClick={handlePayClick} aria-label={`Pay invoice #${invoice.id}`}>
                 Pay Invoice
               </button>
             )}
@@ -201,6 +210,10 @@ export function InvoicePayment() {
             )}
           </div>
         </div>
+      )}
+
+      {invoice && (
+        <InvoiceQRCode invoiceId={invoice.id} />
       )}
 
       {invoice && <TransactionHistory invoice={invoice} />}
