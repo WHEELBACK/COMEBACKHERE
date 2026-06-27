@@ -1,24 +1,34 @@
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::time::Duration;
 
-use crate::types::{InvoiceResponse, InvoiceStatus, PayResponse, RpcRequest, RpcResponse};
+use crate::types::{
+    CancelResponse, InvoiceResponse, InvoiceStatus, PayResponse, RefundResponse, RpcRequest,
+    RpcResponse,
+};
 
 const CONTRACT_NOT_FOUND: u32 = 6;
 const CONTRACT_UNAUTHORIZED: u32 = 1;
+const CONTRACT_NOT_PAID: u32 = 10;
 
 pub struct SorobanClient {
     pub rpc_url: String,
     pub contract_id: String,
+    pub horizon_url: String,
     http: Client,
 }
 
 impl SorobanClient {
-    pub fn new(rpc_url: String, contract_id: String) -> Self {
+    pub fn new(rpc_url: String, contract_id: String, horizon_url: String) -> Self {
         Self {
             rpc_url,
             contract_id,
-            http: Client::new(),
+            horizon_url,
+            http: Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("reqwest client should be created"),
         }
     }
 
@@ -49,6 +59,43 @@ impl SorobanClient {
 
         let result = resp.result.ok_or_else(|| anyhow!("Empty RPC result"))?;
         parse_invoice_result(&result, invoice_id)
+    }
+
+    pub async fn check_rpc_health(&self) -> Result<()> {
+        let req = RpcRequest {
+            jsonrpc: "2.0",
+            id: 3,
+            method: "getLatestLedger",
+            params: json!([]),
+        };
+
+        let resp: RpcResponse = self
+            .http
+            .post(&self.rpc_url)
+            .json(&req)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if let Some(err) = resp.error {
+            return Err(rpc_error_to_anyhow(&err));
+        }
+
+        resp.result
+            .ok_or_else(|| anyhow!("Empty RPC result"))
+            .map(|_| ())
+    }
+
+    pub async fn check_horizon_health(&self) -> Result<()> {
+        let health_url = format!("{}/health", self.horizon_url.trim_end_matches('/'));
+        let response = self.http.get(&health_url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Horizon health check failed with status {}", response.status()));
+        }
+
+        Ok(())
     }
 
     /// Submit a signed mark_paid transaction to Soroban.
@@ -106,6 +153,117 @@ impl SorobanClient {
             transaction_hash: tx_hash,
         })
     }
+
+    /// Submit a signed cancel_invoice transaction to Soroban.
+    ///
+    /// Only the invoice merchant is permitted to cancel a Pending invoice.
+    ///
+    /// Errors:
+    /// - "UNAUTHORIZED" when the contract returns ContractError::Unauthorized(1)
+    /// - "NOT_FOUND"    when the contract returns ContractError::InvoiceNotFound(4)
+    pub async fn cancel_invoice(
+        &self,
+        invoice_id: u64,
+        merchant: &str,
+        signed_xdr: &str,
+    ) -> Result<CancelResponse> {
+        // 1. Verify the caller is the merchant recorded on the invoice.
+        let invoice = self.get_invoice(invoice_id).await?;
+        if invoice.merchant != merchant {
+            return Err(anyhow!("UNAUTHORIZED"));
+        }
+
+        // 2. Forward the pre-signed cancel transaction.
+        let req = RpcRequest {
+            jsonrpc: "2.0",
+            id: 3,
+            method: "sendTransaction",
+            params: json!({ "transaction": signed_xdr }),
+        };
+
+        let resp: RpcResponse = self
+            .http
+            .post(&self.rpc_url)
+            .json(&req)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if let Some(err) = resp.error {
+            return Err(rpc_error_to_anyhow(&err));
+        }
+
+        let result = resp.result.ok_or_else(|| anyhow!("Empty RPC result"))?;
+
+        let tx_hash = result
+            .get("hash")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(CancelResponse {
+            status: InvoiceStatus::Cancelled,
+            transaction_hash: tx_hash,
+        })
+    }
+
+    /// Submit a signed request_refund transaction to Soroban.
+    ///
+    /// Only the invoice payer (customer) may request a refund, and only on a Paid invoice.
+    ///
+    /// Errors:
+    /// - "NOT_PAID"     when the contract returns ContractError::RefundNotRequested(10)
+    /// - "UNAUTHORIZED" when the contract returns ContractError::Unauthorized(1)
+    /// - "NOT_FOUND"    when the contract returns ContractError::InvoiceNotFound(4)
+    pub async fn refund_invoice(
+        &self,
+        invoice_id: u64,
+        payer: &str,
+        signed_xdr: &str,
+    ) -> Result<RefundResponse> {
+        // 1. Verify the caller is the payer recorded on the invoice.
+        let invoice = self.get_invoice(invoice_id).await?;
+        if let Some(expected) = &invoice.payer {
+            if !expected.is_empty() && expected != payer {
+                return Err(anyhow!("UNAUTHORIZED"));
+            }
+        }
+
+        // 2. Forward the pre-signed refund transaction.
+        let req = RpcRequest {
+            jsonrpc: "2.0",
+            id: 4,
+            method: "sendTransaction",
+            params: json!({ "transaction": signed_xdr }),
+        };
+
+        let resp: RpcResponse = self
+            .http
+            .post(&self.rpc_url)
+            .json(&req)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        if let Some(err) = resp.error {
+            return Err(rpc_error_to_anyhow(&err));
+        }
+
+        let result = resp.result.ok_or_else(|| anyhow!("Empty RPC result"))?;
+
+        let tx_hash = result
+            .get("hash")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(RefundResponse {
+            status: InvoiceStatus::RefundRequested,
+            transaction_hash: tx_hash,
+        })
+    }
 }
 
 fn rpc_error_to_anyhow(err: &Value) -> anyhow::Error {
@@ -116,6 +274,7 @@ fn rpc_error_to_anyhow(err: &Value) -> anyhow::Error {
     match code {
         Some(c) if c == CONTRACT_NOT_FOUND => anyhow!("NOT_FOUND"),
         Some(c) if c == CONTRACT_UNAUTHORIZED => anyhow!("UNAUTHORIZED"),
+        Some(c) if c == CONTRACT_NOT_PAID => anyhow!("NOT_PAID"),
         _ => anyhow!("RPC error: {}", err),
     }
 }
