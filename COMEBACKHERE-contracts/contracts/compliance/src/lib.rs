@@ -152,4 +152,11 @@ mod tests {
         c.allow_address_until(&admin, &addr, &1000u64);
         assert!(!c.is_allowed(&addr));
     }
+
+    #[test]
+    fn test_permanent_allow_unaffected_by_time() {
+        let (_e, c, admin, addr) = setup(9999);
+        c.allow_address(&admin, &addr);
+        assert!(c.is_allowed(&addr));
+    }
 }
