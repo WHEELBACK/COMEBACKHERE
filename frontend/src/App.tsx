@@ -4,14 +4,19 @@ import SettlementProposalForm from "./components/SettlementProposal/SettlementPr
 import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
 import SignerManagement from "./components/SignerManagement/SignerManagement";
 import ABIExplorer from "./components/ABIExplorer";
-import GraceWindowSettings from "./components/GraceWindowSettings/GraceWindowSettings";
+import InvoiceSearchFilter from "./components/InvoiceSearchFilter";
 import { ThemeProvider, useTheme } from "./theme";
+import { Invoice } from "./types";
+
+// Placeholder data — replace with real API hook when the invoices endpoint is ready
+const MOCK_INVOICES: Invoice[] = [];
 
 function InvoicesPage() {
   return (
-    <ErrorBoundary fallbackTitle="Failed to load invoices">
-      <p>Invoices list will appear here.</p>
-    </ErrorBoundary>
+    <section>
+      <h3 style={{ marginBottom: 16 }}>Invoices</h3>
+      <InvoiceSearchFilter invoices={MOCK_INVOICES} />
+    </section>
   );
 }
 
