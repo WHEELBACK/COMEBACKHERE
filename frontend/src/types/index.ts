@@ -17,3 +17,23 @@ export interface SettlementApprovalProps {
   signerAddress: string
   threshold: number
 }
+
+export type InvoiceStatus =
+  | 'Pending'
+  | 'Paid'
+  | 'Expired'
+  | 'Cancelled'
+  | 'RefundRequested'
+  | 'Released'
+
+export interface Invoice {
+  id: string
+  merchant: string
+  payer: string
+  amount_usdc: string
+  gross_usdc: string
+  expires_at: number
+  status: InvoiceStatus
+  paid_at: number | null
+  created_at: number | null
+}

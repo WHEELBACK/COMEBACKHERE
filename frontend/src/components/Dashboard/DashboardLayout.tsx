@@ -1,6 +1,7 @@
 import { Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import StatsCard from "./StatsCard";
+import NetworkSelector from "./NetworkSelector";
 import { useTheme } from "../../theme";
 import "./DashboardLayout.css";
 
@@ -20,14 +21,17 @@ export default function DashboardLayout() {
       <main className="dashboard-main">
         <header className="dashboard-header">
           <h2 className="dashboard-heading">Overview</h2>
-          <button
-            type="button"
-            className="theme-toggle"
-            onClick={toggleTheme}
-            aria-label={`Switch to ${nextTheme} theme`}
-          >
-            <span>{theme === "dark" ? "Light" : "Dark"}</span>
-          </button>
+          <div className="dashboard-header__controls">
+            <NetworkSelector />
+            <button
+              type="button"
+              className="theme-toggle"
+              onClick={toggleTheme}
+              aria-label={`Switch to ${nextTheme} theme`}
+            >
+              <span>{theme === "dark" ? "Light" : "Dark"}</span>
+            </button>
+          </div>
         </header>
         <section className="stats-grid">
           {stats.map((stat) => (
