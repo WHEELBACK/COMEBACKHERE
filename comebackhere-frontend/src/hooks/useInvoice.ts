@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react"
 import type { Invoice, PaymentResult } from "../types"
-import { fetchInvoice, payInvoice, requestRefund } from "../utils/soroban"
+import { fetchInvoice, payInvoice, requestRefund, cancelInvoice } from "../utils/soroban"
 
 const CONTRACT_ID = import.meta.env.VITE_INVOICE_CONTRACT_ID as string
 
@@ -11,6 +11,7 @@ interface UseInvoiceReturn {
   loadInvoice: (id: number) => Promise<void>
   pay: (publicKey: string) => Promise<PaymentResult>
   refund: (publicKey: string) => Promise<PaymentResult>
+  cancel: (publicKey: string) => Promise<PaymentResult>
 }
 
 export function useInvoice(): UseInvoiceReturn {
@@ -63,5 +64,19 @@ export function useInvoice(): UseInvoiceReturn {
     [invoice, loadInvoice]
   )
 
-  return { invoice, loading, error, loadInvoice, pay, refund }
+  const cancel = useCallback(
+    async (publicKey: string): Promise<PaymentResult> => {
+      if (!invoice) {
+        return { success: false, error: "No invoice loaded" }
+      }
+      const result = await cancelInvoice(CONTRACT_ID, Number(invoice.id), publicKey)
+      if (result.success) {
+        await loadInvoice(Number(invoice.id))
+      }
+      return result
+    },
+    [invoice, loadInvoice]
+  )
+
+  return { invoice, loading, error, loadInvoice, pay, refund, cancel }
 }

@@ -3,13 +3,15 @@ import { useInvoice } from "../hooks/useInvoice"
 import { useWallet } from "../hooks/useWallet"
 import { StatusBadge } from "./StatusBadge"
 import { PayConfirmationModal } from "./PayConfirmationModal"
+import { CancelConfirmationModal } from "./CancelConfirmationModal"
 import { TransactionHistory } from "./TransactionHistory"
 
 export function InvoicePayment() {
-  const { invoice, loading, error, loadInvoice, pay } = useInvoice()
+  const { invoice, loading, error, loadInvoice, pay, cancel } = useInvoice()
   const { address, connected, connecting, connect } = useWallet()
   const [invoiceId, setInvoiceId] = useState("")
   const [showConfirm, setShowConfirm] = useState(false)
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [timeLeft, setTimeLeft] = useState<{
     days: number
@@ -86,8 +88,34 @@ export function InvoicePayment() {
     })
   }
 
+  const handleCancelClick = () => {
+    setResult(null)
+    setShowCancelConfirm(true)
+  }
+
+  const handleConfirmCancel = async () => {
+    if (!address) return
+    setSubmitting(true)
+    const res = await cancel(address)
+    setSubmitting(false)
+    setShowCancelConfirm(false)
+    setResult({
+      success: res.success,
+      hash: res.transaction_hash,
+      errorMsg: res.error,
+    })
+  }
+
   const canPay =
     connected && invoice?.status === "Pending"
+
+  const isMerchant =
+    connected &&
+    address != null &&
+    invoice?.merchant != null &&
+    address.toLowerCase() === invoice.merchant.toLowerCase()
+
+  const canCancel = isMerchant && invoice?.status === "Pending"
 
   return (
     <div className="payment-flow">
@@ -119,13 +147,13 @@ export function InvoicePayment() {
         >
           {result.success ? (
             <>
-              Payment successful!
+              {invoice?.status === "Cancelled" ? "Invoice cancelled successfully!" : "Payment successful!"}
               <br />
               Transaction hash:{" "}
               <code className="tx-hash">{result.hash}</code>
             </>
           ) : (
-            <>Payment failed: {result.errorMsg}</>
+            <>Operation failed: {result.errorMsg}</>
           )}
         </div>
       )}
@@ -193,6 +221,12 @@ export function InvoicePayment() {
               </button>
             )}
 
+            {canCancel && (
+              <button className="btn btn--danger" onClick={handleCancelClick}>
+                Cancel Invoice
+              </button>
+            )}
+
             {connected && invoice.status !== "Pending" && (
               <p className="status-text">
                 This invoice is not available for payment
@@ -210,6 +244,15 @@ export function InvoicePayment() {
           invoice={invoice}
           onConfirm={handleConfirmPayment}
           onCancel={() => setShowConfirm(false)}
+          submitting={submitting}
+        />
+      )}
+
+      {showCancelConfirm && invoice && (
+        <CancelConfirmationModal
+          invoice={invoice}
+          onConfirm={handleConfirmCancel}
+          onCancel={() => setShowCancelConfirm(false)}
           submitting={submitting}
         />
       )}
