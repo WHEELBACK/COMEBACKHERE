@@ -93,6 +93,25 @@ pub struct ErrorResponse {
     pub code: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    Healthy,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependencyHealth {
+    pub status: HealthStatus,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RpcHealthResponse {
+    pub status: HealthStatus,
+    pub dependencies: std::collections::BTreeMap<String, DependencyHealth>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RpcRequest {
     pub jsonrpc: &'static str,

@@ -5,10 +5,7 @@ mod types;
 use axum::{routing::{get, post}, Router};
 use std::sync::Arc;
 
-use routes::cancel::cancel_invoice;
-use routes::invoices::get_invoice;
-use routes::pay::pay_invoice;
-use routes::refund::refund_invoice;
+use routes::{health::get_rpc_health, invoices::get_invoice, pay::pay_invoice};
 use soroban::SorobanClient;
 
 #[tokio::main]
@@ -17,10 +14,13 @@ async fn main() {
         .unwrap_or_else(|_| "http://localhost:8000/soroban/rpc".to_string());
     let contract_id = std::env::var("INVOICE_CONTRACT_ID")
         .unwrap_or_else(|_| "CONTRACT_ID_PLACEHOLDER".to_string());
+    let horizon_url = std::env::var("HORIZON_API_URL")
+        .unwrap_or_else(|_| "https://horizon.stellar.org".to_string());
 
-    let client = Arc::new(SorobanClient::new(rpc_url, contract_id));
+    let client = Arc::new(SorobanClient::new(rpc_url, contract_id, horizon_url));
 
     let app = Router::new()
+        .route("/health/rpc", get(get_rpc_health))
         .route("/invoices/:id", get(get_invoice))
         .route("/invoices/:id/pay", post(pay_invoice))
         .route("/invoices/:id/cancel", post(cancel_invoice))

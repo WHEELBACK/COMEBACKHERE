@@ -65,6 +65,7 @@ mod tests {
         let client = SorobanClient::new(
             "http://127.0.0.1:19999/soroban/rpc".to_string(),
             "CONTRACT_ID".to_string(),
+            "https://horizon.stellar.org".to_string(),
         );
         let app = make_app(client);
         let server = TestServer::new(app).unwrap();
@@ -79,6 +80,7 @@ mod tests {
         let client = SorobanClient::new(
             "http://127.0.0.1:19999/soroban/rpc".to_string(),
             "CONTRACT_ID".to_string(),
+            "https://horizon.stellar.org".to_string(),
         );
         let app = make_app(client);
         let server = TestServer::new(app).unwrap();
