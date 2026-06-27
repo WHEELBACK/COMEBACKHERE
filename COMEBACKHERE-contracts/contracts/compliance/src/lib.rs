@@ -24,6 +24,7 @@ pub enum DataKey {
     Admin,
     Paused,
     Status(Address),
+    PendingAdmin,
 }
 
 #[contract]
@@ -85,13 +86,45 @@ impl ComplianceContract {
         );
     }
 
-    pub fn transfer_admin(e: Env, admin: Address, new_admin: Address) {
+    pub fn transfer_admin(e: Env, admin: Address, new_admin: Address) -> Result<(), ContractError> {
         admin.require_auth();
-        e.storage().instance().set(&DataKey::Admin, &new_admin);
+        let stored_admin: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap();
+        if admin != stored_admin {
+            return Err(ContractError::Unauthorized);
+        }
+        e.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        e.events().publish(
+            (Symbol::new(&e, "transfer_admin"),),
+            (&admin, &new_admin),
+        );
+        Ok(())
     }
 
-    pub fn accept_admin(e: Env, new_admin: Address) {
+    pub fn accept_admin(e: Env, new_admin: Address) -> Result<(), ContractError> {
         new_admin.require_auth();
+        let pending: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(ContractError::Unauthorized)?;
+        if new_admin != pending {
+            return Err(ContractError::Unauthorized);
+        }
+        e.storage().instance().set(&DataKey::Admin, &new_admin);
+        e.storage()
+            .instance()
+            .remove(&DataKey::PendingAdmin);
+        e.events().publish(
+            (Symbol::new(&e, "accept_admin"),),
+            &new_admin,
+        );
+        Ok(())
     }
 
     pub fn clear_address(e: Env, admin: Address, addr: Address) {
@@ -111,5 +144,45 @@ impl ComplianceContract {
     pub fn unpause(e: Env, admin: Address) {
         admin.require_auth();
         e.storage().instance().set(&DataKey::Paused, &false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::Env;
+
+    fn setup(ts: u64) -> (Env, ComplianceContractClient, Address, Address) {
+        let e = Env::default();
+        e.mock_all_auths();
+        let contract_id = e.register_contract(None, ComplianceContract);
+        let c = ComplianceContractClient::new(&e, &contract_id);
+        let admin = Address::generate(&e);
+        let addr = Address::generate(&e);
+        c.initialize(&admin);
+        e.ledger().set_timestamp(ts);
+        (e, c, admin, addr)
+    }
+
+    #[test]
+    fn test_is_allowed_not_expired() {
+        let (_e, c, admin, addr) = setup(1000);
+        c.allow_address_until(&admin, &addr, &2000u64);
+        assert!(c.is_allowed(&addr));
+    }
+
+    #[test]
+    fn test_is_allowed_exactly_at_expiry_returns_false() {
+        let (_e, c, admin, addr) = setup(1000);
+        c.allow_address_until(&admin, &addr, &1000u64);
+        assert!(!c.is_allowed(&addr));
+    }
+
+    #[test]
+    fn test_is_allowed_past_expiry_returns_false() {
+        let (_e, c, admin, addr) = setup(1001);
+        c.allow_address_until(&admin, &addr, &1000u64);
+        assert!(!c.is_allowed(&addr));
     }
 }
