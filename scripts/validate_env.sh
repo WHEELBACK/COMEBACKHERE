@@ -119,7 +119,12 @@ if ! require_any_var "Set SOROBAN_RPC_URL (or RPC_URL) to your Soroban RPC endpo
   :
 fi
 
-if ! require_var "SOROBAN_NETWORK_PASSPHRASE" "Set SOROBAN_NETWORK_PASSPHRASE to the network passphrase for the target network."; then
+# Allow legacy/README env variable name for network passphrase.
+if [[ -z "${SOROBAN_NETWORK_PASSPHRASE:-}" && -n "${NETWORK_PASSPHRASE:-}" ]]; then
+  export SOROBAN_NETWORK_PASSPHRASE="$NETWORK_PASSPHRASE"
+fi
+
+if ! require_any_var "Set SOROBAN_NETWORK_PASSPHRASE (or NETWORK_PASSPHRASE) to the network passphrase for the target network." "SOROBAN_NETWORK_PASSPHRASE" "NETWORK_PASSPHRASE"; then
   :
 fi
 
