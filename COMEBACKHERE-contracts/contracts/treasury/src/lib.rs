@@ -242,6 +242,13 @@ impl TreasuryContract {
         Ok(())
     }
 
+    pub fn get_threshold(e: Env) -> u64 {
+        e.storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(0u64)
+    }
+
     pub fn update_threshold(
         e: Env,
         admin: Address,

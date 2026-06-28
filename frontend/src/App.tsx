@@ -5,6 +5,7 @@ import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
 import SignerManagement from "./components/SignerManagement/SignerManagement";
 import ABIExplorer from "./components/ABIExplorer";
 import InvoiceSearchFilter from "./components/InvoiceSearchFilter";
+import ThresholdConfig from "./components/ThresholdConfig/ThresholdConfig";
 import { ThemeProvider, useTheme } from "./theme";
 import { Invoice } from "./types";
 
@@ -51,6 +52,7 @@ function SettingsPage() {
   return (
     <>
       <GraceWindowSettings />
+      <ThresholdConfig />
       <section className="settings-panel">
         <div>
           <h3 className="settings-panel__title">Appearance</h3>

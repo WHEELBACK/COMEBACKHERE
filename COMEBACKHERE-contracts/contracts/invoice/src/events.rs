@@ -41,3 +41,10 @@ pub fn contract_unpaused(env: &Env) {
     env.events()
         .publish((Symbol::new(env, "contract_unpaused"),), ());
 }
+
+pub fn dispute_raised(env: &Env, invoice_id: &u64, settlement_id: &u64, claimant: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "dispute_raised"),),
+        (*invoice_id, *settlement_id, claimant),
+    );
+}
