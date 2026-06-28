@@ -4,6 +4,8 @@ import "./Sidebar.css";
 const links = [
   { to: "/invoices", label: "Invoices", icon: "receipt" },
   { to: "/settlements", label: "Settlements", icon: "account_balance" },
+  { to: "/on-hold", label: "On-Hold", icon: "hold" },
+  { to: "/treasury", label: "Treasury", icon: "treasury" },
   { to: "/disputes", label: "Disputes", icon: "gavel" },
   { to: "/signers", label: "Signers", icon: "signers" },
   { to: "/settings", label: "Settings", icon: "settings" },
@@ -12,6 +14,8 @@ const links = [
 const iconMap: Record<string, string> = {
   receipt: "\u{1F4CB}",
   account_balance: "\u{1F3E6}",
+  hold: "\u{23F8}\u{FE0F}",
+  treasury: "\u{1F4B0}",
   gavel: "\u{2696}\u{FE0F}",
   signers: "\u{1F511}",
   settings: "\u{2699}\u{FE0F}",

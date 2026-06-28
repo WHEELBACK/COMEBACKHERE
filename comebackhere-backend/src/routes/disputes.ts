@@ -3,6 +3,96 @@ import { Keypair } from "stellar-sdk"
 
 const router = Router()
 
+// In-memory vote store (keyed by dispute id)
+// Shape: { [disputeId]: { votes: Map<signer, vote>, claimant_weight: number, counterparty_weight: number, outcome: string | null } }
+interface DisputeVoteState {
+  votes: Map<string, string>
+  claimant_weight: number
+  counterparty_weight: number
+  outcome: string | null
+}
+const disputeVotes = new Map<string, DisputeVoteState>()
+
+const VOTE_THRESHOLD = Number(process.env.DISPUTE_VOTE_THRESHOLD ?? 2)
+
+type VoteValue = "ResolvedClaimant" | "ResolvedCounterparty"
+
+/**
+ * POST /disputes/:id/vote
+ * Body: { signer_address: string, vote: "ResolvedClaimant" | "ResolvedCounterparty", weight?: number }
+ */
+router.post("/:id/vote", async (req: Request, res: Response) => {
+  const disputeId = req.params.id
+  const { signer_address, vote, weight = 1 } = req.body as {
+    signer_address?: string
+    vote?: string
+    weight?: number
+  }
+
+  if (!signer_address) {
+    res.status(400).json({ error: "signer_address is required" })
+    return
+  }
+  if (!isValidStellarAddress(signer_address)) {
+    res.status(400).json({ error: "signer_address must be a valid Stellar public key" })
+    return
+  }
+  if (vote !== "ResolvedClaimant" && vote !== "ResolvedCounterparty") {
+    res.status(400).json({ error: "vote must be 'ResolvedClaimant' or 'ResolvedCounterparty'" })
+    return
+  }
+  if (typeof weight !== "number" || weight < 1) {
+    res.status(400).json({ error: "weight must be a positive integer" })
+    return
+  }
+
+  const state: DisputeVoteState = disputeVotes.get(disputeId) ?? {
+    votes: new Map(),
+    claimant_weight: 0,
+    counterparty_weight: 0,
+    outcome: null,
+  }
+
+  if (state.outcome !== null) {
+    res.status(409).json({ error: "Dispute already resolved", outcome: state.outcome })
+    return
+  }
+
+  if (state.votes.has(signer_address)) {
+    res.status(409).json({ error: "Signer has already voted on this dispute" })
+    return
+  }
+
+  state.votes.set(signer_address, vote)
+  if (vote === "ResolvedClaimant") {
+    state.claimant_weight += weight
+  } else {
+    state.counterparty_weight += weight
+  }
+
+  const threshold = VOTE_THRESHOLD
+  const resolution_weight = state.claimant_weight + state.counterparty_weight
+
+  if (state.claimant_weight >= threshold) {
+    state.outcome = "ResolvedClaimant"
+  } else if (state.counterparty_weight >= threshold) {
+    state.outcome = "ResolvedCounterparty"
+  }
+
+  disputeVotes.set(disputeId, state)
+
+  res.status(200).json({
+    dispute_id: disputeId,
+    signer_address,
+    vote,
+    claimant_weight: state.claimant_weight,
+    counterparty_weight: state.counterparty_weight,
+    resolution_weight,
+    threshold,
+    outcome: state.outcome,
+  })
+})
+
 export interface CreateDisputeBody {
   /** Stellar public key of the party raising the dispute (claimant). */
   claimant_address: string

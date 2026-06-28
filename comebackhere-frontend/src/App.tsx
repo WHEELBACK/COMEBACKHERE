@@ -4,7 +4,7 @@ import { RefundRequest } from "./components/RefundRequest"
 import { ComplianceManager } from "./components/ComplianceManager"
 import { BatchExpireInvoices } from "./components/BatchExpireInvoices"
 import { EscrowRelease } from "./components/EscrowRelease"
-import { WalletBar } from "./components/WalletBar"
+import { TreasuryManager } from "./components/TreasuryManager"
 import { useInvoice } from "./hooks/useInvoice"
 import { useTheme } from "./hooks/useTheme"
 import { useWallet } from "./hooks/useWallet"
@@ -12,9 +12,7 @@ import { CopyableText } from "./components/CopyableText"
 import "./App.css"
 import "./components/ErrorBoundary.css"
 
-const EXPECTED_NETWORK = import.meta.env.VITE_NETWORK_PASSPHRASE as string ?? "Standalone Network ; February 2025"
-
-type Tab = "payment" | "refund" | "compliance" | "batch-expire" | "escrow"
+type Tab = "payment" | "refund" | "compliance" | "batch-expire" | "escrow" | "treasury"
 
 function RefundTab() {
   const { invoice, loading, error, loadInvoice, refund } = useInvoice()
@@ -91,9 +89,8 @@ function RefundTab() {
 
 export default function App() {
   const { address, connected, connect, connecting } = useWallet()
-  const { theme, toggleTheme } = useTheme()
+  useTheme()
   const [tab, setTab] = useState<Tab>("payment")
-  const nextTheme = theme === "dark" ? "light" : "dark"
 
   return (
     <div className="app">
@@ -160,6 +157,12 @@ export default function App() {
         >
           Escrow Release
         </button>
+        <button
+          className={`tab ${tab === "treasury" ? "tab--active" : ""}`}
+          onClick={() => setTab("treasury")}
+        >
+          Treasury
+        </button>
       </nav>
 
       <main className="app-main">
@@ -171,6 +174,8 @@ export default function App() {
           <ComplianceManager />
         ) : tab === "batch-expire" ? (
           <BatchExpireInvoices walletAddress={address} />
+        ) : tab === "treasury" ? (
+          <TreasuryManager />
         ) : (
           <EscrowRelease />
         )}
