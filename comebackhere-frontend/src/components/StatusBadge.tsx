@@ -15,6 +15,6 @@ const statusColors: Record<string, string> = {
 
 export function StatusBadge({ status }: StatusBadgeProps) {
   return (
-    <span className={statusColors[status] ?? "badge"}>{status}</span>
+    <span className={statusColors[status] ?? "badge"} role="status" aria-label={`Invoice status: ${status}`}>{status}</span>
   )
 }

@@ -1,6 +1,16 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, Env, Vec};
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum SettlementError {
+    NotFound = 1,
+    NotPending = 2,
+    InsufficientApprovals = 3,
+    Unauthorized = 4,
+}
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +31,7 @@ pub struct Settlement {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApproveResult {
     pub approval_weight: u64,
     pub threshold: u64,
