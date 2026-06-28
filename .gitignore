@@ -1,39 +1,45 @@
-# Environment secrets
+# Environment files
 .env
 .env.local
 .env.mainnet
 .env.testnet
-
-# Deployment artifacts (environment-specific, generated on deploy)
-artifacts/addresses.json
-
-# Dependencies
-node_modules/
-
-# Coverage reports
-coverage/
+.env.*.local
 
 # Build output
 dist/
 build/
 out/
 
-# Compiled WASM artefacts
-*.wasm
-
-# Rust / Cargo build artifacts
+# Dependencies
+node_modules/
 target/
 
-# ABI / test snapshots (regenerated via `make update-abi-snapshots`)
-**/*.snap
+# Generated artifacts
+artifacts/addresses.json
+coverage/
 
-# TypeScript incremental build info
-*.tsbuildinfo
+# Test snapshots & reports
+**/__snapshots__/
+**/*.snap
+test-results/
+playwright-report/
+coverage/
+.nyc_output/
 
 # Logs
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# OS metadata
+# Editor / OS
 .DS_Store
 Thumbs.db
+.vscode/settings.json
+.idea/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Vite cache
+.vite/

@@ -240,4 +240,145 @@ router.post("/execute-settlement", async (req: Request, res: Response) => {
   }
 })
 
+/**
+ * GET /api/treasury/on-hold-settlements
+ * Returns all settlements currently in OnHold status.
+ */
+router.get("/on-hold-settlements", async (_req: Request, res: Response) => {
+  try {
+    const database = await connectMongo()
+    const settlements = getSettlementsCollection(database)
+    const records = await settlements
+      .find({ status: "OnHold" })
+      .sort({ id: 1 })
+      .toArray()
+
+    res.json(
+      records.map((s) => ({
+        id: s.id,
+        merchant_address: s.merchant_address,
+        amount: s.amount,
+        approvals: s.approvals,
+        approval_weight: s.approval_weight,
+        status: s.status,
+        hold_reason: s.hold_reason,
+      })),
+    )
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
+  }
+})
+
+/**
+ * POST /api/treasury/release-hold
+ * Body: { settlement_id: number }
+ * Transitions a settlement from OnHold back to Pending.
+ */
+router.post("/release-hold", async (req: Request, res: Response) => {
+  const settlementId = req.body?.settlement_id
+  if (typeof settlementId !== "number" || !Number.isInteger(settlementId) || settlementId <= 0) {
+    res.status(400).json({ error: "settlement_id must be a positive integer" })
+    return
+  }
+
+  try {
+    const database = await connectMongo()
+    const settlements = getSettlementsCollection(database)
+    const record = await settlements.findOneAndUpdate(
+      { id: settlementId, status: "OnHold" },
+      { $set: { status: "Pending", hold_reason: null, updated_at: new Date() } },
+      { returnDocument: "after" },
+    )
+
+    if (!record) {
+      res.status(404).json({ error: `Settlement #${settlementId} not found or not on hold` })
+      return
+    }
+
+    res.json({
+      id: record.id,
+      merchant_address: record.merchant_address,
+      amount: record.amount,
+      approvals: record.approvals,
+      approval_weight: record.approval_weight,
+      status: record.status,
+      hold_reason: record.hold_reason,
+    })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
+  }
+})
+
+/**
+ * POST /api/treasury/escalate-hold
+ * Body: { settlement_id: number }
+ * Escalates a held settlement (transitions to AdminHold reason).
+ */
+router.post("/escalate-hold", async (req: Request, res: Response) => {
+  const settlementId = req.body?.settlement_id
+  if (typeof settlementId !== "number" || !Number.isInteger(settlementId) || settlementId <= 0) {
+    res.status(400).json({ error: "settlement_id must be a positive integer" })
+    return
+  }
+
+  try {
+    const database = await connectMongo()
+    const settlements = getSettlementsCollection(database)
+    const record = await settlements.findOneAndUpdate(
+      { id: settlementId, status: "OnHold" },
+      { $set: { hold_reason: "AdminHold", updated_at: new Date() } },
+      { returnDocument: "after" },
+    )
+
+    if (!record) {
+      res.status(404).json({ error: `Settlement #${settlementId} not found or not on hold` })
+      return
+    }
+
+    res.json({
+      id: record.id,
+      merchant_address: record.merchant_address,
+      amount: record.amount,
+      approvals: record.approvals,
+      approval_weight: record.approval_weight,
+      status: record.status,
+      hold_reason: record.hold_reason,
+    })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
+  }
+})
+
+/**
+ * GET /api/treasury/balances
+ * Returns token balances held by the treasury contract.
+ */
+router.get("/balances", async (_req: Request, res: Response) => {
+  const env = requireEnv(res)
+  if (!env) return
+
+  try {
+    const client = buildSorobanClient(env.rpcUrl)
+    const keypair = Keypair.fromSecret(env.signerSecret)
+    const sourceAccount = keypair.publicKey()
+
+    const balance = await getTokenBalance(
+      client,
+      env.usdcContractId,
+      env.treasuryContractId,
+      sourceAccount,
+      env.networkPassphrase,
+    )
+
+    res.json([{ token: env.usdcContractId, balance: balance.toString() }])
+  } catch (err: unknown) {
+    const status = (err as { status?: number })?.status ?? 500
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(status).json({ error: message })
+  }
+})
+
 export default router

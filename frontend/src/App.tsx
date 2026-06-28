@@ -5,7 +5,12 @@ import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
 import SignerManagement from "./components/SignerManagement/SignerManagement";
 import ABIExplorer from "./components/ABIExplorer";
 import InvoiceSearchFilter from "./components/InvoiceSearchFilter";
-import ThresholdConfig from "./components/ThresholdConfig/ThresholdConfig";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import OnboardingWizard from "./components/OnboardingWizard/OnboardingWizard";
+import GraceWindowSettings from "./components/GraceWindowSettings/GraceWindowSettings";
+import SettlementDetail from "./components/SettlementDetail/SettlementDetail";
+import OnHoldSettlements from "./components/OnHoldSettlements/OnHoldSettlements";
+import TreasuryManagerPage from "./components/TreasuryManagerPage/TreasuryManagerPage";
 import { ThemeProvider, useTheme } from "./theme";
 import { Invoice } from "./types";
 
@@ -29,6 +34,18 @@ function SettlementsPage() {
   );
 }
 
+function SettlementDetailPage() {
+  return (
+    <ErrorBoundary fallbackTitle="Failed to load settlement detail">
+      <SettlementDetail
+        settlement={{ id: 0, merchant_address: "", amount: "0", approvals: [], approval_weight: 0, status: "Pending", hold_reason: null }}
+        threshold={2}
+        signers={[]}
+      />
+    </ErrorBoundary>
+  );
+}
+
 function DisputesPage() {
   return (
     <ErrorBoundary fallbackTitle="Failed to load disputes">
@@ -41,6 +58,22 @@ function SignersPage() {
   return (
     <ErrorBoundary fallbackTitle="Failed to load signer management">
       <SignerManagement />
+    </ErrorBoundary>
+  );
+}
+
+function OnHoldPage() {
+  return (
+    <ErrorBoundary fallbackTitle="Failed to load on-hold settlements">
+      <OnHoldSettlements />
+    </ErrorBoundary>
+  );
+}
+
+function TreasuryPage() {
+  return (
+    <ErrorBoundary fallbackTitle="Failed to load treasury">
+      <TreasuryManagerPage />
     </ErrorBoundary>
   );
 }
@@ -73,6 +106,11 @@ function SettingsPage() {
   );
 }
 
+function OnboardingPage() {
+  const navigate = useNavigate();
+  return <OnboardingWizard onComplete={() => navigate("/invoices")} />;
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -82,6 +120,8 @@ function AppRoutes() {
         <Route path="invoices" element={<InvoicesPage />} />
         <Route path="settlements" element={<SettlementsPage />} />
         <Route path="settlements/:id" element={<SettlementDetailPage />} />
+        <Route path="on-hold" element={<OnHoldPage />} />
+        <Route path="treasury" element={<TreasuryPage />} />
         <Route path="disputes" element={<DisputesPage />} />
         <Route path="signers" element={<SignersPage />} />
         <Route path="settings" element={<SettingsPage />} />
