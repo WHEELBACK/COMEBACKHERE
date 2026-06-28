@@ -3,7 +3,7 @@
 mod events;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, Symbol, Vec,
 };
 
 #[contracterror]
@@ -22,6 +22,7 @@ pub enum ContractError {
     AlreadyRefundRequested = 11,
     GraceWindowNotExpired = 12,
     DuplicateNonce = 13,
+    TreasuryNotConfigured = 14,
 }
 
 #[contracttype]
@@ -56,6 +57,7 @@ pub enum DataKey {
     InvoiceCount,
     GraceWindow,
     Nonce(Address, u64),
+    TreasuryContract,
 }
 
 fn admin(env: &Env) -> Address {
@@ -299,6 +301,61 @@ impl InvoiceContract {
         Ok(())
     }
 
+    /// Configure the treasury contract address (admin only).
+    pub fn set_treasury(env: Env, caller: Address, treasury: Address) -> Result<(), ContractError> {
+        check_admin(&env, &caller)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::TreasuryContract, &treasury);
+        Ok(())
+    }
+
+    pub fn get_treasury(env: Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TreasuryContract)
+    }
+
+    /// Raise a dispute on an invoice, cross-contract calling treasury place_on_hold.
+    /// Emits a dispute_raised event on success.
+    pub fn raise_dispute(
+        env: Env,
+        invoice_id: u64,
+        settlement_id: u64,
+        claimant: Address,
+        reason: u32,
+    ) -> Result<(), ContractError> {
+        check_not_paused(&env)?;
+        claimant.require_auth();
+
+        // Ensure invoice exists.
+        env.storage()
+            .persistent()
+            .get::<DataKey, Invoice>(&DataKey::Invoice(invoice_id))
+            .ok_or(ContractError::InvoiceNotFound)?;
+
+        let treasury: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TreasuryContract)
+            .ok_or(ContractError::TreasuryNotConfigured)?;
+
+        // Cross-contract: treasury.raise_dispute(claimant, settlement_id, reason)
+        let _: () = env.invoke_contract(
+            &treasury,
+            &Symbol::new(&env, "raise_dispute"),
+            soroban_sdk::vec![
+                &env,
+                claimant.clone().into_val(&env),
+                settlement_id.into_val(&env),
+                reason.into_val(&env),
+            ],
+        );
+
+        events::dispute_raised(&env, &invoice_id, &settlement_id, &claimant);
+        Ok(())
+    }
+
     pub fn pause(env: Env, caller: Address) -> Result<(), ContractError> {
         check_admin(&env, &caller)?;
         env.storage()
@@ -475,5 +532,144 @@ mod tests {
 
         let result = client.try_unpause(&non_admin);
         assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+    }
+
+    // ── raise_dispute integration tests ─────────────────────────────────────
+
+    mod treasury_stub {
+        use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
+
+        #[contracterror]
+        #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+        pub enum StubError {
+            Paused = 1,
+        }
+
+        #[contracttype]
+        pub enum StubKey {
+            Held(u64),
+        }
+
+        #[contract]
+        pub struct TreasuryStub;
+
+        #[contractimpl]
+        impl TreasuryStub {
+            pub fn raise_dispute(
+                e: Env,
+                _signer: Address,
+                settlement_id: u64,
+                _reason: u32,
+            ) -> Result<(), StubError> {
+                e.storage()
+                    .instance()
+                    .set(&StubKey::Held(settlement_id), &true);
+                Ok(())
+            }
+
+            pub fn was_held(e: Env, settlement_id: u64) -> bool {
+                e.storage()
+                    .instance()
+                    .get(&StubKey::Held(settlement_id))
+                    .unwrap_or(false)
+            }
+        }
+    }
+
+    use treasury_stub::{TreasuryStub, TreasuryStubClient};
+
+    fn setup_with_treasury(ts: u64) -> (Env, Address, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let invoice_cid = env.register_contract(None, InvoiceContract);
+        let treasury_cid = env.register_contract(None, TreasuryStub);
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+        invoice_client.initialize(&admin);
+        invoice_client.set_treasury(&admin, &treasury_cid);
+        env.ledger().with_mut(|li| li.timestamp = ts);
+        (env, invoice_cid, treasury_cid, admin, Address::generate(&env))
+    }
+
+    #[test]
+    fn test_raise_dispute_places_settlement_on_hold() {
+        let (env, invoice_cid, treasury_cid, _admin, claimant) = setup_with_treasury(1000);
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+        let treasury_client = TreasuryStubClient::new(&env, &treasury_cid);
+
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        let invoice_id =
+            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1);
+
+        invoice_client.raise_dispute(&invoice_id, &1u64, &claimant, &1u32);
+
+        assert!(treasury_client.was_held(&1u64), "settlement should be on hold");
+    }
+
+    #[test]
+    fn test_raise_dispute_emits_event() {
+        let (env, invoice_cid, _treasury_cid, _admin, claimant) = setup_with_treasury(1000);
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        let invoice_id =
+            invoice_client.create_invoice(&merchant, &customer, &500i128, &token, &9999, &1);
+
+        invoice_client.raise_dispute(&invoice_id, &2u64, &claimant, &1u32);
+
+        // invoice_created + dispute_raised = at least 2 events
+        let all_events = env.events().all();
+        assert!(all_events.len() >= 2, "dispute_raised event should be emitted");
+    }
+
+    #[test]
+    fn test_raise_dispute_invoice_not_found_fails() {
+        let (env, invoice_cid, _treasury_cid, _admin, claimant) = setup_with_treasury(1000);
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+
+        let result = invoice_client.try_raise_dispute(&999u64, &1u64, &claimant, &1u32);
+        assert_eq!(result, Err(Ok(ContractError::InvoiceNotFound)));
+    }
+
+    #[test]
+    fn test_raise_dispute_without_treasury_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let invoice_cid = env.register_contract(None, InvoiceContract);
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+        invoice_client.initialize(&admin);
+        env.ledger().with_mut(|li| li.timestamp = 1000);
+
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        let claimant = Address::generate(&env);
+        let invoice_id =
+            invoice_client.create_invoice(&merchant, &customer, &100i128, &token, &9999, &1);
+
+        let result = invoice_client.try_raise_dispute(&invoice_id, &1u64, &claimant, &1u32);
+        assert_eq!(result, Err(Ok(ContractError::TreasuryNotConfigured)));
+    }
+
+    #[test]
+    fn test_raise_dispute_when_paused_fails() {
+        let (env, invoice_cid, _treasury_cid, admin, claimant) = setup_with_treasury(1000);
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        let invoice_id =
+            invoice_client.create_invoice(&merchant, &customer, &100i128, &token, &9999, &1);
+
+        invoice_client.pause(&admin);
+
+        let result = invoice_client.try_raise_dispute(&invoice_id, &1u64, &claimant, &1u32);
+        assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
     }
 }
