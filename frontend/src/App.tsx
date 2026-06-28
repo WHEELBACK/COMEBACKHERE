@@ -85,6 +85,7 @@ function SettingsPage() {
   return (
     <>
       <GraceWindowSettings />
+      <ThresholdConfig />
       <section className="settings-panel">
         <div>
           <h3 className="settings-panel__title">Appearance</h3>
