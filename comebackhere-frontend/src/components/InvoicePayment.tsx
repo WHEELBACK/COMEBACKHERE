@@ -4,6 +4,7 @@ import { useWallet } from "../hooks/useWallet"
 import { StatusBadge } from "./StatusBadge"
 import { PayConfirmationModal } from "./PayConfirmationModal"
 import { TransactionHistory } from "./TransactionHistory"
+import { InvoiceListSkeleton } from "./Skeleton"
 
 export function InvoicePayment() {
   const { invoice, loading, error, loadInvoice, pay } = useInvoice()
@@ -109,7 +110,7 @@ export function InvoicePayment() {
         </button>
       </div>
 
-      {loading && <p className="status-text">Loading invoice...</p>}
+      {loading && !invoice && <InvoiceListSkeleton rows={1} />}
 
       {error && <div className="message message--error">{error}</div>}
 

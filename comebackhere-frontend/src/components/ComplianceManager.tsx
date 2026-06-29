@@ -7,6 +7,7 @@ import {
   ComplianceStatus,
   ComplianceStatusResult,
   getAddressStatus,
+  getSignerAddress,
 } from "../utils/compliance"
 
 interface ManagedAddress {
@@ -80,35 +81,30 @@ export function ComplianceManager() {
         expiresAt: result.expiresAt,
       })
       setMessage("Loaded current compliance status.")
-    } catch (err: any) {
-      setError(err?.message ?? "Failed to fetch address status")
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to fetch address status")
     } finally {
       setLoading(false)
     }
   }
 
   const submitAction = async (
-    action: () => Promise<{ success: boolean; error?: string; hash?: string }>,
+    action: (publicKey: string) => Promise<{ success: boolean; error?: string; hash?: string }>,
     successText: string
   ) => {
     setError(null)
     setMessage(null)
     setActionSubmitting(true)
     try {
-      const publicKey = (window as any).freighterApi
-        ? await (window as any).freighterApi.getAddress().then((res: any) => res.address)
-        : null
-      if (!publicKey) {
-        throw new Error("Connect your wallet to sign compliance updates.")
-      }
-      const result = await action()
+      const publicKey = await getSignerAddress()
+      const result = await action(publicKey)
       if (!result.success) {
         throw new Error(result.error ?? "Action failed")
       }
       setMessage(`${successText} Transaction hash: ${result.hash}`)
       await handleFetchStatus()
-    } catch (err: any) {
-      setError(err?.message ?? "Action failed")
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Action failed")
     } finally {
       setActionSubmitting(false)
     }
@@ -120,12 +116,10 @@ export function ComplianceManager() {
       return
     }
     await submitAction(
-      async () => {
-        if (expiryTimestamp) {
-          return allowAddressUntil(address.trim(), expiryTimestamp, await (window as any).freighterApi.getAddress().then((res: any) => res.address))
-        }
-        return allowAddress(address.trim(), await (window as any).freighterApi.getAddress().then((res: any) => res.address))
-      },
+      (publicKey) =>
+        expiryTimestamp
+          ? allowAddressUntil(address.trim(), expiryTimestamp, publicKey)
+          : allowAddress(address.trim(), publicKey),
       expiryTimestamp ? "Allowed address until expiry." : "Address allowed."
     )
   }
@@ -136,7 +130,7 @@ export function ComplianceManager() {
       return
     }
     await submitAction(
-      async () => blockAddress(address.trim(), await (window as any).freighterApi.getAddress().then((res: any) => res.address)),
+      (publicKey) => blockAddress(address.trim(), publicKey),
       "Address blocked."
     )
   }
@@ -147,7 +141,7 @@ export function ComplianceManager() {
       return
     }
     await submitAction(
-      async () => clearAddress(address.trim(), await (window as any).freighterApi.getAddress().then((res: any) => res.address)),
+      (publicKey) => clearAddress(address.trim(), publicKey),
       "Address cleared."
     )
   }

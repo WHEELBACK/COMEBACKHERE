@@ -1,9 +1,19 @@
 import { test, expect, Page } from "@playwright/test"
 
+interface FreighterApi {
+  getAddress: () => Promise<{ address: string }>
+  signTransaction: (xdr: string) => Promise<string>
+  isConnected: () => Promise<{ isConnected: boolean }>
+}
+
+interface WindowWithFreighter extends Window {
+  freighterApi?: FreighterApi
+}
+
 // Stub the Freighter wallet API so tests can run without a real extension.
 async function stubFreighterWallet(page: Page, address: string) {
   await page.addInitScript((addr: string) => {
-    (window as any).freighterApi = {
+    (window as WindowWithFreighter).freighterApi = {
       getAddress: async () => ({ address: addr }),
       signTransaction: async (xdr: string) => xdr,
       isConnected: async () => ({ isConnected: true }),
@@ -91,7 +101,7 @@ test.describe("Invoice payment flow", () => {
   test("connect wallet button is visible when wallet is not connected", async ({ page }) => {
     // Override to simulate disconnected wallet
     await page.addInitScript(() => {
-      delete (window as any).freighterApi
+      delete (window as WindowWithFreighter).freighterApi
     })
     await page.reload()
     // Load an invoice first so the wallet button appears

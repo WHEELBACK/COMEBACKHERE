@@ -1,6 +1,8 @@
+import { useState, useEffect } from "react";
 import { Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import StatsCard from "./StatsCard";
+import { DashboardStatsSkeleton } from "../Skeleton";
 import { useTheme } from "../../theme";
 import "./DashboardLayout.css";
 
@@ -12,7 +14,13 @@ const stats = [
 
 export default function DashboardLayout() {
   const { theme, toggleTheme } = useTheme();
+  const [statsLoading, setStatsLoading] = useState(true);
   const nextTheme = theme === "dark" ? "light" : "dark";
+
+  useEffect(() => {
+    const t = setTimeout(() => setStatsLoading(false), 1000);
+    return () => clearTimeout(t);
+  }, []);
 
   return (
     <div className="dashboard">
@@ -30,14 +38,18 @@ export default function DashboardLayout() {
           </button>
         </header>
         <section className="stats-grid">
-          {stats.map((stat) => (
-            <StatsCard
-              key={stat.title}
-              title={stat.title}
-              value={stat.value}
-              variant={stat.variant}
-            />
-          ))}
+          {statsLoading ? (
+            <DashboardStatsSkeleton />
+          ) : (
+            stats.map((stat) => (
+              <StatsCard
+                key={stat.title}
+                title={stat.title}
+                value={stat.value}
+                variant={stat.variant}
+              />
+            ))
+          )}
         </section>
         <section className="dashboard-content">
           <Outlet />
