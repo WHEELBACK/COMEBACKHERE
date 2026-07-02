@@ -1,23 +1,35 @@
 import {
   Contract,
+  Transaction,
   TransactionBuilder,
   Networks,
   BASE_FEE,
   xdr,
   nativeToScVal,
+  Server,
+  assembleTransaction,
+  SorobanRpc,
 } from "soroban-client"
 import type { Invoice, InvoiceStatus, PaymentResult } from "../types"
 
 const SOROBAN_RPC = import.meta.env.VITE_SOROBAN_RPC as string
 const NETWORK_PASSPHRASE = import.meta.env.VITE_NETWORK_PASSPHRASE as string
 
+interface FreighterApi {
+  getAddress: () => Promise<{ address: string }>
+  signTransaction: (xdr: string, opts: { networkPassphrase: string }) => Promise<string>
+}
+
+interface WindowWithFreighter extends Window {
+  freighterApi?: FreighterApi
+}
+
 export function getNetworkPassphrase(): string {
   return NETWORK_PASSPHRASE || Networks.STANDALONE
 }
 
-function getServer() {
-  const { SorobanRpc } = window as any
-  return new SorobanRpc.Server(SOROBAN_RPC)
+function getServer(): Server {
+  return new Server(SOROBAN_RPC)
 }
 
 function u64ToNumber(value: xdr.Uint64 | undefined): number {
@@ -26,16 +38,11 @@ function u64ToNumber(value: xdr.Uint64 | undefined): number {
 
 function scValToInvoice(scVal: xdr.ScVal): Invoice {
   const map = scVal.map()
-  if (!map) {
-    throw new Error("Invalid invoice response")
-  }
-
+  if (!map) throw new Error("Invalid invoice response")
   const entries: Record<string, xdr.ScVal> = {}
   for (const entry of map) {
-    const key = entry.key().sym().toString()
-    entries[key] = entry.val()
+    entries[entry.key().sym().toString()] = entry.val()
   }
-
   return {
     id: entries.id?.u32()?.toString() ?? "",
     merchant: entries.merchant?.address()?.toString() ?? "",
@@ -43,118 +50,68 @@ function scValToInvoice(scVal: xdr.ScVal): Invoice {
     amount_usdc: entries.amount_usdc?.i128()?.toString() ?? "0",
     gross_usdc: entries.gross_usdc?.i128()?.toString() ?? "0",
     expires_at: u64ToNumber(entries.expires_at?.u64()),
-    status: scValToInvoiceStatus(entries.status),
+    status: (entries.status?.vec()?.[0]?.sym()?.toString() ?? "Pending") as InvoiceStatus,
     paid_at: entries.paid_at?.u64() ? u64ToNumber(entries.paid_at.u64()) : null,
     metadata_hash: entries.metadata_hash?.bytes()?.toString() ?? null,
     payment_link_hash: entries.payment_link_hash?.bytes()?.toString() ?? null,
   }
 }
 
-function scValToInvoiceStatus(scVal: xdr.ScVal): InvoiceStatus {
-  const variant = scVal.vec()?.[0]?.sym()?.toString() ?? "Pending"
-  return variant as InvoiceStatus
-}
-
-export async function fetchInvoice(
-  contractId: string,
-  invoiceId: number
-): Promise<Invoice> {
+export async function fetchInvoice(contractId: string, invoiceId: number): Promise<Invoice> {
   const server = getServer()
   const contract = new Contract(contractId)
-
-  const args = [nativeToScVal(invoiceId, { type: "u32" })]
   const result = await server.simulateTransaction(
     new TransactionBuilder(await server.getAccount(contractId), {
       fee: BASE_FEE,
       networkPassphrase: getNetworkPassphrase(),
     })
-      .addOperation(contract.call("get_invoice", ...args))
+      .addOperation(contract.call("get_invoice", nativeToScVal(invoiceId, { type: "u32" })))
       .setTimeout(30)
       .build()
   )
-
-  if (!result.result || !result.result.retval) {
+  if (SorobanRpc.isSimulationError(result) || !result.result?.retval) {
     throw new Error("Invoice not found")
   }
-
   return scValToInvoice(result.result.retval)
 }
 
-export async function payInvoice(
-  contractId: string,
-  invoiceId: number,
-  publicKey: string
-): Promise<PaymentResult> {
+async function buildAndSend(server: Server, tx: Transaction, freighter: FreighterApi): Promise<string> {
+  const sim = await server.simulateTransaction(tx)
+  const prepared = assembleTransaction(tx, getNetworkPassphrase(), sim).build()
+  const signedXdr = await freighter.signTransaction(prepared.toXDR(), { networkPassphrase: getNetworkPassphrase() })
+  const res = await server.sendTransaction(TransactionBuilder.fromXDR(signedXdr, getNetworkPassphrase()) as Transaction)
+  return res.hash
+}
+
+export async function payInvoice(contractId: string, invoiceId: number, publicKey: string): Promise<PaymentResult> {
   const server = getServer()
-  const contract = new Contract(contractId)
-
-  const args = [nativeToScVal(invoiceId, { type: "u32" })]
-
+  const freighter = (window as WindowWithFreighter).freighterApi
+  if (!freighter) return { success: false, error: "Freighter wallet not detected" }
   try {
-    const account = await server.getAccount(publicKey)
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: getNetworkPassphrase(),
+    const tx = new TransactionBuilder(await server.getAccount(publicKey), {
+      fee: BASE_FEE, networkPassphrase: getNetworkPassphrase(),
     })
-      .addOperation(contract.call("mark_paid", ...args))
-      .setTimeout(30)
-      .build()
-
-    const simulated = await server.simulateTransaction(tx)
-    const { SorobanRpc } = window as any
-
-    const prepare = SorobanRpc.assembleTransaction(tx, simulated)
-    const signed = await (window as any).freighterApi.signTransaction(
-      prepare.toXDR(),
-      { networkPassphrase: getNetworkPassphrase() }
-    )
-
-    const txHash = await server.sendTransaction(signed)
-    return { success: true, transaction_hash: txHash.hash }
-  } catch (err: any) {
-    return {
-      success: false,
-      error: err?.message ?? err?.toString() ?? "Payment failed",
-    }
+      .addOperation(new Contract(contractId).call("mark_paid", nativeToScVal(invoiceId, { type: "u32" })))
+      .setTimeout(30).build() as Transaction
+    return { success: true, transaction_hash: await buildAndSend(server, tx, freighter) }
+  } catch (err: unknown) {
+    return { success: false, error: err instanceof Error ? err.message : "Payment failed" }
   }
 }
 
-export async function requestRefund(
-  contractId: string,
-  invoiceId: number,
-  publicKey: string
-): Promise<PaymentResult> {
+export async function requestRefund(contractId: string, invoiceId: number, publicKey: string): Promise<PaymentResult> {
   const server = getServer()
-  const contract = new Contract(contractId)
-
-  const args = [nativeToScVal(invoiceId, { type: "u32" })]
-
+  const freighter = (window as WindowWithFreighter).freighterApi
+  if (!freighter) return { success: false, error: "Freighter wallet not detected" }
   try {
-    const account = await server.getAccount(publicKey)
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: getNetworkPassphrase(),
+    const tx = new TransactionBuilder(await server.getAccount(publicKey), {
+      fee: BASE_FEE, networkPassphrase: getNetworkPassphrase(),
     })
-      .addOperation(contract.call("request_refund", ...args))
-      .setTimeout(30)
-      .build()
-
-    const simulated = await server.simulateTransaction(tx)
-    const { SorobanRpc } = window as any
-
-    const prepare = SorobanRpc.assembleTransaction(tx, simulated)
-    const signed = await (window as any).freighterApi.signTransaction(
-      prepare.toXDR(),
-      { networkPassphrase: getNetworkPassphrase() }
-    )
-
-    const txHash = await server.sendTransaction(signed)
-    return { success: true, transaction_hash: txHash.hash }
-  } catch (err: any) {
-    return {
-      success: false,
-      error: err?.message ?? err?.toString() ?? "Refund request failed",
-    }
+      .addOperation(new Contract(contractId).call("request_refund", nativeToScVal(invoiceId, { type: "u32" })))
+      .setTimeout(30).build() as Transaction
+    return { success: true, transaction_hash: await buildAndSend(server, tx, freighter) }
+  } catch (err: unknown) {
+    return { success: false, error: err instanceof Error ? err.message : "Refund request failed" }
   }
 }
 

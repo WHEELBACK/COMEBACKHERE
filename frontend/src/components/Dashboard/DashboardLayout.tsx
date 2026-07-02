@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import StatsCard from "./StatsCard";
@@ -13,7 +14,13 @@ const stats = [
 
 export default function DashboardLayout() {
   const { theme, toggleTheme } = useTheme();
+  const [statsLoading, setStatsLoading] = useState(true);
   const nextTheme = theme === "dark" ? "light" : "dark";
+
+  useEffect(() => {
+    const t = setTimeout(() => setStatsLoading(false), 1000);
+    return () => clearTimeout(t);
+  }, []);
 
   return (
     <div className="dashboard">

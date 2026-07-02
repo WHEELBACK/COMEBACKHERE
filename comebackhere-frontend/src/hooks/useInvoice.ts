@@ -25,8 +25,8 @@ export function useInvoice(): UseInvoiceReturn {
     try {
       const result = await fetchInvoice(CONTRACT_ID, id)
       setInvoice(result)
-    } catch (err: any) {
-      setError(err?.message ?? "Failed to load invoice")
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load invoice")
     } finally {
       setLoading(false)
     }

@@ -1,5 +1,13 @@
 import { useState, useEffect, useCallback } from "react"
 
+interface FreighterApi {
+  getAddress: () => Promise<{ address: string }>
+}
+
+interface WindowWithFreighter extends Window {
+  freighterApi?: FreighterApi
+}
+
 interface WalletState {
   address: string | null
   connected: boolean
@@ -15,10 +23,10 @@ export function useWallet() {
 
   useEffect(() => {
     const checkConnection = async () => {
-      if ((window as any).freighterApi) {
+      if ((window as WindowWithFreighter).freighterApi) {
         try {
           const { address } =
-            await (window as any).freighterApi.getAddress()
+            await (window as WindowWithFreighter).freighterApi!.getAddress()
           setWallet({
             address,
             connected: true,
@@ -39,9 +47,9 @@ export function useWallet() {
   const connect = useCallback(async () => {
     setWallet((prev) => ({ ...prev, connecting: true }))
     try {
-      if ((window as any).freighterApi) {
+      if ((window as WindowWithFreighter).freighterApi) {
         const { address } =
-          await (window as any).freighterApi.getAddress()
+          await (window as WindowWithFreighter).freighterApi!.getAddress()
         setWallet({
           address,
           connected: true,
@@ -50,7 +58,7 @@ export function useWallet() {
       } else {
         throw new Error("Freighter wallet not detected")
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       setWallet({
         address: null,
         connected: false,
