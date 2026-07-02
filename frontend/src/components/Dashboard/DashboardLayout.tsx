@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import StatsCard from "./StatsCard";
-import { DashboardStatsSkeleton } from "../Skeleton";
+import NetworkSelector from "./NetworkSelector";
 import { useTheme } from "../../theme";
 import "./DashboardLayout.css";
 
@@ -25,31 +25,30 @@ export default function DashboardLayout() {
   return (
     <div className="dashboard">
       <Sidebar />
-      <main className="dashboard-main">
-        <header className="dashboard-header">
+      <main className="dashboard-main" role="main">
+        <header className="dashboard-header" role="banner">
           <h2 className="dashboard-heading">Overview</h2>
-          <button
-            type="button"
-            className="theme-toggle"
-            onClick={toggleTheme}
-            aria-label={`Switch to ${nextTheme} theme`}
-          >
-            <span>{theme === "dark" ? "Light" : "Dark"}</span>
-          </button>
+          <div className="dashboard-header__controls">
+            <NetworkSelector />
+            <button
+              type="button"
+              className="theme-toggle"
+              onClick={toggleTheme}
+              aria-label={`Switch to ${nextTheme} theme`}
+            >
+              <span>{theme === "dark" ? "Light" : "Dark"}</span>
+            </button>
+          </div>
         </header>
-        <section className="stats-grid">
-          {statsLoading ? (
-            <DashboardStatsSkeleton />
-          ) : (
-            stats.map((stat) => (
-              <StatsCard
-                key={stat.title}
-                title={stat.title}
-                value={stat.value}
-                variant={stat.variant}
-              />
-            ))
-          )}
+        <section className="stats-grid" aria-label="Dashboard statistics">
+          {stats.map((stat) => (
+            <StatsCard
+              key={stat.title}
+              title={stat.title}
+              value={stat.value}
+              variant={stat.variant}
+            />
+          ))}
         </section>
         <section className="dashboard-content">
           <Outlet />

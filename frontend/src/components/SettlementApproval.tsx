@@ -57,20 +57,10 @@ export function SettlementApproval() {
   }
 
   return (
-    <div style={styles.container}>
-      <header style={styles.header}>
-        <h1 style={styles.title}>Settlement Approvals</h1>
-        <button
-          type="button"
-          style={styles.themeToggle}
-          onClick={toggleTheme}
-          aria-label={`Switch to ${nextTheme} theme`}
-        >
-          {theme === 'dark' ? 'Light' : 'Dark'} theme
-        </button>
-      </header>
+    <div style={styles.container} role="region" aria-label="Settlement approvals">
+      <h1 style={styles.title}>Settlement Approvals</h1>
 
-      {actionError && <p style={styles.errorText}>{actionError}</p>}
+      {actionError && <p style={{ color: 'red' }} role="alert">{actionError}</p>}
 
       {pendingSettlements.length === 0 ? (
         <p>No pending settlements.</p>
@@ -102,15 +92,15 @@ export function SettlementApproval() {
   )
 
   function renderProgress(current: number, required: number) {
+    const pct = Math.min(100, Math.round((current / required) * 100))
     return (
       <div style={styles.progressWrap}>
-        <div style={styles.progressBar}>
+        <div style={styles.progressBar} role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label={`${current} of ${required} approvals`}>
           <div
             style={{
               ...styles.progressFill,
-              width: `${Math.min(100, (current / required) * 100)}%`,
-              background:
-                current >= required ? 'var(--color-success)' : 'var(--color-primary)',
+              width: `${pct}%`,
+              background: current >= required ? '#22c55e' : '#3b82f6',
             }}
           />
         </div>

@@ -9,6 +9,7 @@ import {
   getAddressStatus,
   getSignerAddress,
 } from "../utils/compliance"
+import { CopyableText } from "./CopyableText"
 
 interface ManagedAddress {
   address: string
@@ -170,11 +171,12 @@ export function ComplianceManager() {
           />
         </label>
 
-        <div className="compliance-actions">
+        <div className="compliance-actions" role="group" aria-label="Compliance actions">
           <button
             className="btn btn--secondary"
             onClick={handleFetchStatus}
             disabled={loading || actionSubmitting || !addressValid}
+            aria-label="Fetch compliance status for address"
           >
             {loading ? "Fetching..." : "Fetch Status"}
           </button>
@@ -182,6 +184,7 @@ export function ComplianceManager() {
             className="btn btn--primary"
             onClick={handleAllow}
             disabled={loading || actionSubmitting || !addressValid}
+            aria-label="Allow address on compliance list"
           >
             Allow Address
           </button>
@@ -189,6 +192,7 @@ export function ComplianceManager() {
             className="btn btn--danger"
             onClick={handleBlock}
             disabled={loading || actionSubmitting || !addressValid}
+            aria-label="Block address on compliance list"
           >
             Block Address
           </button>
@@ -196,14 +200,15 @@ export function ComplianceManager() {
             className="btn btn--secondary"
             onClick={handleClear}
             disabled={loading || actionSubmitting || !addressValid}
+            aria-label="Clear address from compliance list"
           >
             Clear Address
           </button>
         </div>
       </div>
 
-      {error && <div className="message message--error">{error}</div>}
-      {message && <div className="message message--success">{message}</div>}
+      {error && <div className="message message--error" role="alert">{error}</div>}
+      {message && <div className="message message--success" role="status" aria-live="polite">{message}</div>}
 
       {status && (
         <div className="status-summary">
@@ -246,7 +251,7 @@ export function ComplianceManager() {
             ) : (
               managed.map((entry) => (
                 <tr key={entry.address}>
-                  <td className="address-cell">{entry.address}</td>
+                  <td className="address-cell"><CopyableText text={entry.address} label="Copy address" /></td>
                   <td>
                     <ComplianceStatusBadge status={entry.status} />
                   </td>

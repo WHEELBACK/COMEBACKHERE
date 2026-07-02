@@ -2,15 +2,18 @@ import { useState, useEffect } from "react"
 import { useInvoice } from "../hooks/useInvoice"
 import { useWallet } from "../hooks/useWallet"
 import { StatusBadge } from "./StatusBadge"
+import { CopyableText } from "./CopyableText"
 import { PayConfirmationModal } from "./PayConfirmationModal"
+import { CancelConfirmationModal } from "./CancelConfirmationModal"
 import { TransactionHistory } from "./TransactionHistory"
-import { InvoiceListSkeleton } from "./Skeleton"
+import { InvoiceQRCode } from "./InvoiceQRCode"
 
 export function InvoicePayment() {
-  const { invoice, loading, error, loadInvoice, pay } = useInvoice()
+  const { invoice, loading, error, loadInvoice, pay, cancel } = useInvoice()
   const { address, connected, connecting, connect } = useWallet()
   const [invoiceId, setInvoiceId] = useState("")
   const [showConfirm, setShowConfirm] = useState(false)
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [timeLeft, setTimeLeft] = useState<{
     days: number
@@ -87,46 +90,78 @@ export function InvoicePayment() {
     })
   }
 
+  const handleCancelClick = () => {
+    setResult(null)
+    setShowCancelConfirm(true)
+  }
+
+  const handleConfirmCancel = async () => {
+    if (!address) return
+    setSubmitting(true)
+    const res = await cancel(address)
+    setSubmitting(false)
+    setShowCancelConfirm(false)
+    setResult({
+      success: res.success,
+      hash: res.transaction_hash,
+      errorMsg: res.error,
+    })
+  }
+
   const canPay =
     connected && invoice?.status === "Pending"
+
+  const isMerchant =
+    connected &&
+    address != null &&
+    invoice?.merchant != null &&
+    address.toLowerCase() === invoice.merchant.toLowerCase()
+
+  const canCancel = isMerchant && invoice?.status === "Pending"
 
   return (
     <div className="payment-flow">
       <h1>Invoice Payment</h1>
 
-      <div className="invoice-lookup">
+      <div className="invoice-lookup" role="search" aria-label="Invoice lookup">
+        <label htmlFor="payment-invoice-id" className="sr-only">Invoice ID</label>
         <input
+          id="payment-invoice-id"
           type="number"
           placeholder="Enter Invoice ID"
           value={invoiceId}
           onChange={(e) => setInvoiceId(e.target.value)}
+          aria-label="Invoice ID for payment"
         />
         <button
           className="btn btn--primary"
           onClick={handleLoadInvoice}
           disabled={!invoiceId || loading}
+          aria-label={loading ? "Loading invoice" : "Load invoice"}
         >
           {loading ? "Loading..." : "Load Invoice"}
         </button>
       </div>
 
-      {loading && !invoice && <InvoiceListSkeleton rows={1} />}
+      {loading && <p className="status-text" aria-live="polite">Loading invoice...</p>}
 
-      {error && <div className="message message--error">{error}</div>}
+      {error && <div className="message message--error" role="alert">{error}</div>}
 
       {result && (
         <div
           className={`message message--${result.success ? "success" : "error"}`}
+          role="status"
+          aria-live="polite"
         >
           {result.success ? (
             <>
-              Payment successful!
+              {invoice?.status === "Cancelled" ? "Invoice cancelled successfully!" : "Payment successful!"}
               <br />
               Transaction hash:{" "}
-              <code className="tx-hash">{result.hash}</code>
+              <code className="tx-hash"><CopyableText text={result.hash!} label="Copy transaction hash" /></code>
             </>
           ) : (
-            <>Payment failed: {result.errorMsg}</>
+            <>Operation failed: {result.errorMsg}</>
           )}
         </div>
       )}
@@ -134,7 +169,7 @@ export function InvoicePayment() {
       {invoice && (
         <div className="invoice-card">
           <div className="invoice-card__header">
-            <h2>Invoice #{invoice.id}</h2>
+            <h2>Invoice #<CopyableText text={String(invoice.id)} label="Copy invoice ID" /></h2>
             <StatusBadge status={invoice.status} />
           </div>
 
@@ -162,7 +197,7 @@ export function InvoicePayment() {
             <div className="detail-row">
               <span className="detail-label">Merchant</span>
               <span className="detail-value detail-value--address">
-                {invoice.merchant}
+                <CopyableText text={invoice.merchant} label="Copy merchant address" />
               </span>
             </div>
             <div className="detail-row">
@@ -177,20 +212,27 @@ export function InvoicePayment() {
             </div>
           </div>
 
-          <div className="invoice-card__actions">
+          <div className="invoice-card__actions" role="group" aria-label="Invoice actions">
             {!connected && (
               <button
                 className="btn btn--primary"
                 onClick={connect}
                 disabled={connecting}
+                aria-label="Connect wallet to pay invoice"
               >
                 {connecting ? "Connecting..." : "Connect Wallet"}
               </button>
             )}
 
             {connected && canPay && (
-              <button className="btn btn--primary" onClick={handlePayClick}>
+              <button className="btn btn--primary" onClick={handlePayClick} aria-label={`Pay invoice #${invoice.id}`}>
                 Pay Invoice
+              </button>
+            )}
+
+            {canCancel && (
+              <button className="btn btn--danger" onClick={handleCancelClick}>
+                Cancel Invoice
               </button>
             )}
 
@@ -204,6 +246,10 @@ export function InvoicePayment() {
         </div>
       )}
 
+      {invoice && (
+        <InvoiceQRCode invoiceId={invoice.id} />
+      )}
+
       {invoice && <TransactionHistory invoice={invoice} />}
 
       {showConfirm && invoice && (
@@ -211,6 +257,15 @@ export function InvoicePayment() {
           invoice={invoice}
           onConfirm={handleConfirmPayment}
           onCancel={() => setShowConfirm(false)}
+          submitting={submitting}
+        />
+      )}
+
+      {showCancelConfirm && invoice && (
+        <CancelConfirmationModal
+          invoice={invoice}
+          onConfirm={handleConfirmCancel}
+          onCancel={() => setShowCancelConfirm(false)}
           submitting={submitting}
         />
       )}

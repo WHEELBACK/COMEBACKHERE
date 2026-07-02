@@ -25,6 +25,12 @@
   color: var(--color-text);
 }
 
+.dashboard-header__controls {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
