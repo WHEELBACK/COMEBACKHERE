@@ -172,7 +172,12 @@ describe("invoice grace window routes", () => {
       .post("/api/invoice/grace-window")
       .send({ grace_window_seconds: -1 })
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/grace_window_seconds/)
+    expect(res.body.error).toBe("Validation failed")
+    expect(res.body.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "grace_window_seconds" }),
+      ])
+    )
   })
 })
 

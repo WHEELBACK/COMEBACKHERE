@@ -1,14 +1,13 @@
 import { Router, type Request, type Response } from "express"
 import { Keypair } from "stellar-sdk"
+import { validate, createDisputeSchema, disputeVoteSchema } from "../middleware/validation.js"
+import { recordVote } from "../lib/vote-tracker.js"
 
 const router = Router()
 
 export interface CreateDisputeBody {
-  /** Stellar public key of the party raising the dispute (claimant). */
   claimant_address: string
-  /** ID of the settlement this dispute is linked to. */
   settlement_id: string
-  /** Optional human-readable reason for the dispute. */
   reason?: string
 }
 
@@ -21,32 +20,12 @@ function isValidStellarAddress(addr: string): boolean {
   }
 }
 
-function validateBody(body: Partial<CreateDisputeBody>): string | null {
-  if (!body.claimant_address) return "claimant_address is required"
-  if (!isValidStellarAddress(body.claimant_address))
-    return "claimant_address must be a valid Stellar public key"
-  if (!body.settlement_id) return "settlement_id is required"
-  if (typeof body.settlement_id !== "string" || !/^\d+$/.test(body.settlement_id))
-    return "settlement_id must be a positive integer string"
-  return null
-}
-
 /**
  * POST /disputes
- * Validates the claimant, links the dispute to a settlement, transitions the
- * settlement to OnHold, and returns a dispute record.
- *
- * Body:  { claimant_address, settlement_id, reason? }
+ * Body: { claimant_address, settlement_id, reason? }
  * Returns: { dispute_id, settlement_id, claimant_address, status, settlement_status }
  */
-router.post("/", async (req: Request, res: Response) => {
-  const body = req.body as Partial<CreateDisputeBody>
-  const validationError = validateBody(body)
-  if (validationError) {
-    res.status(400).json({ error: validationError })
-    return
-  }
-
+router.post("/", validate(createDisputeSchema), async (req: Request, res: Response) => {
   const rpcUrl = process.env.SOROBAN_RPC_URL
   const settlementContractId = process.env.SETTLEMENT_CONTRACT_ID
   const signerSecret = process.env.SIGNER_SECRET_KEY
@@ -56,13 +35,10 @@ router.post("/", async (req: Request, res: Response) => {
     return
   }
 
-  const settlementId = body.settlement_id as string
-  const claimantAddress = body.claimant_address as string
+  const settlementId = req.body.settlement_id as string
+  const claimantAddress = req.body.claimant_address as string
 
   try {
-    // In production this would call raise_dispute on the settlement contract via Soroban RPC.
-    // The contract transitions the settlement to OnHold atomically. Here we return the
-    // expected shape so downstream clients can integrate without a live node.
     const disputeId = `${settlementId}-${Date.now()}`
 
     res.status(201).json({
@@ -76,6 +52,44 @@ router.post("/", async (req: Request, res: Response) => {
     const status = (err as any)?.status ?? 500
     const message = err instanceof Error ? err.message : String(err)
     res.status(status).json({ error: message })
+  }
+})
+
+/**
+ * POST /disputes/:id/vote
+ * Body: { signer_address, weight }
+ *
+ * Rejects duplicate votes from the same signer.
+ * Accumulates weight across distinct signers.
+ */
+router.post("/:id/vote", validate(disputeVoteSchema), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params
+    const signerAddress = req.body.signer_address as string
+    const weight = req.body.weight as number
+
+    const result = recordVote(id, signerAddress, weight)
+
+    if (!result.accepted) {
+      res.status(409).json({
+        error: "Duplicate vote",
+        dispute_id: id,
+        signer_address: signerAddress,
+        total_weight: result.totalWeight,
+      })
+      return
+    }
+
+    res.status(200).json({
+      dispute_id: id,
+      signer_address: signerAddress,
+      weight,
+      total_weight: result.totalWeight,
+      status: "Voting",
+    })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
   }
 })
 

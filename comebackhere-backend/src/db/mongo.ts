@@ -21,6 +21,26 @@ export interface IndexerCursor {
   updated_at: Date
 }
 
+export interface ThresholdRecord {
+  _id?: string
+  threshold: number
+  previous_threshold?: number
+  caller?: string
+  tx_hash?: string
+  updated_at: Date
+}
+
+export interface AuditLogRecord {
+  _id?: string
+  action: string
+  resource: string
+  caller?: string
+  previous_value?: unknown
+  new_value?: unknown
+  tx_hash?: string
+  created_at: Date
+}
+
 let client: MongoClient | null = null
 let db: Db | null = null
 
@@ -41,6 +61,13 @@ export async function connectMongo(): Promise<Db> {
   const cursors = db.collection<IndexerCursor>("indexer_cursors")
   await cursors.createIndex({ _id: 1 }, { unique: true })
 
+  const thresholds = db.collection<ThresholdRecord>("thresholds")
+  await thresholds.createIndex({ updated_at: -1 })
+
+  const auditLogs = db.collection<AuditLogRecord>("audit_logs")
+  await auditLogs.createIndex({ created_at: -1 })
+  await auditLogs.createIndex({ action: 1, resource: 1 })
+
   return db
 }
 
@@ -50,6 +77,14 @@ export function getSettlementsCollection(database: Db): Collection<SettlementRec
 
 export function getCursorsCollection(database: Db): Collection<IndexerCursor> {
   return database.collection<IndexerCursor>("indexer_cursors")
+}
+
+export function getThresholdsCollection(database: Db): Collection<ThresholdRecord> {
+  return database.collection<ThresholdRecord>("thresholds")
+}
+
+export function getAuditLogsCollection(database: Db): Collection<AuditLogRecord> {
+  return database.collection<AuditLogRecord>("audit_logs")
 }
 
 export async function closeMongo(): Promise<void> {

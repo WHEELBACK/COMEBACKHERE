@@ -3,4 +3,31 @@
 .env.testnet
 artifacts/addresses.json
 coverage/
+
 node_modules/
+dist/
+
+# Test artifacts
+__snapshots__/
+*.snap
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Dependency lock conflicts
+*.orig
+*.rej
+<<<<<<<*
+=======*
+>>>>>>>*

@@ -7,6 +7,7 @@ import {
   submitContractCall,
   type SorobanClient,
 } from "../lib/soroban.js"
+import { validate, graceWindowSchema } from "../middleware/validation.js"
 
 const router = Router()
 
@@ -91,22 +92,12 @@ export async function setGraceWindow(
   return { grace_window_seconds: graceWindowSeconds, tx_hash: txHash }
 }
 
-router.post("/grace-window", async (req: Request, res: Response) => {
+router.post("/grace-window", validate(graceWindowSchema), async (req: Request, res: Response) => {
   const env = requireEnv(res)
   if (!env) return
 
-  const graceWindowSeconds = req.body?.grace_window_seconds
-  if (
-    typeof graceWindowSeconds !== "number" ||
-    !Number.isInteger(graceWindowSeconds) ||
-    graceWindowSeconds <= 0
-  ) {
-    res.status(400).json({ error: "grace_window_seconds must be a positive integer" })
-    return
-  }
-
   try {
-    const result = await setGraceWindow(graceWindowSeconds, env)
+    const result = await setGraceWindow(req.body.grace_window_seconds, env)
     res.json(result)
   } catch (err: unknown) {
     const status = (err as { status?: number })?.status ?? 500
