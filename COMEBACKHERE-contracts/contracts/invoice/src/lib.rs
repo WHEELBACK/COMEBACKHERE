@@ -24,6 +24,8 @@ pub enum ContractError {
     DuplicateNonce = 13,
     TreasuryNotConfigured = 14,
     NotAParty = 15,
+    Overflow = 16,
+    AddressBlocked = 17,
 }
 
 #[contracttype]
@@ -225,6 +227,68 @@ impl InvoiceContract {
             .get::<DataKey, Invoice>(&DataKey::Invoice(invoice_id))
             .ok_or(ContractError::InvoiceNotFound)?;
         Ok(invoice.status)
+    }
+
+    /// Returns a paginated list of invoice IDs belonging to a given merchant, most useful
+    /// for callers (e.g. the backend indexer) that need to enumerate a merchant's invoices
+    /// without tracking IDs off-chain.
+    ///
+    /// Follows the same pagination shape as [`Self::get_pending_settlements`]-style calls
+    /// on the treasury contract: `start_after` is the number of matching invoices to skip,
+    /// and `limit` bounds the page size.
+    ///
+    /// # Parameters
+    /// - `merchant`: The merchant address to filter invoices by.
+    /// - `start_after`: Number of matching invoices to skip before collecting the page
+    ///   (defaults to 0 when `None`).
+    /// - `limit`: Maximum number of invoice IDs to return. Capped at 100 regardless of the
+    ///   value passed in.
+    ///
+    /// # Returns
+    /// A `Vec<u64>` of invoice IDs belonging to `merchant`, oldest first.
+    pub fn get_invoices_by_merchant(
+        env: Env,
+        merchant: Address,
+        start_after: Option<u32>,
+        limit: u32,
+    ) -> Vec<u64> {
+        const MAX_PAGE_SIZE: u32 = 100;
+        let cap: u32 = if limit > MAX_PAGE_SIZE {
+            MAX_PAGE_SIZE
+        } else {
+            limit
+        };
+        let skip: u32 = start_after.unwrap_or(0);
+
+        let count: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::InvoiceCount)
+            .unwrap_or(0);
+
+        let mut result: Vec<u64> = Vec::new(&env);
+        let mut matched: u32 = 0;
+        let mut collected: u32 = 0;
+
+        for id in 1..=count {
+            if let Some(invoice) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Invoice>(&DataKey::Invoice(id))
+            {
+                if invoice.merchant == merchant {
+                    if matched >= skip {
+                        if collected >= cap {
+                            break;
+                        }
+                        result.push_back(id);
+                        collected += 1;
+                    }
+                    matched += 1;
+                }
+            }
+        }
+        result
     }
 
     /// Marks a batch of invoices as [`InvoiceStatus::Paid`] in a single transaction.
@@ -641,7 +705,7 @@ impl InvoiceContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger};
     use soroban_sdk::Env;
 
     fn setup_contract(ts: u64) -> (Env, Address, Address) {
@@ -874,13 +938,8 @@ mod tests {
         invoice_client.initialize(&admin);
         invoice_client.set_treasury(&admin, &treasury_cid);
         env.ledger().with_mut(|li| li.timestamp = ts);
-        (
-            env,
-            invoice_cid,
-            treasury_cid,
-            admin,
-            Address::generate(&env),
-        )
+        let customer = Address::generate(&env);
+        (env, invoice_cid, treasury_cid, admin, customer)
     }
 
     #[test]
@@ -912,7 +971,7 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
         let invoice_id =
-            invoice_client.create_invoice(&merchant, &customer, &500i128, &token, &9999, &1);
+            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1);
 
         invoice_client.raise_dispute(&invoice_id, &2u64, &merchant, &1u32);
 
@@ -948,7 +1007,7 @@ mod tests {
         let token = Address::generate(&env);
         let claimant = Address::generate(&env);
         let invoice_id =
-            invoice_client.create_invoice(&merchant, &customer, &100i128, &token, &9999, &1);
+            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1);
 
         let result = invoice_client.try_raise_dispute(&invoice_id, &1u64, &claimant, &1u32);
         assert_eq!(result, Err(Ok(ContractError::TreasuryNotConfigured)));
@@ -963,7 +1022,7 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
         let invoice_id =
-            invoice_client.create_invoice(&merchant, &customer, &100i128, &token, &9999, &1);
+            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1);
 
         invoice_client.pause(&admin);
 
@@ -980,7 +1039,7 @@ mod tests {
         let merchant = Address::generate(env);
         let customer = Address::generate(env);
         let token = Address::generate(env);
-        let id = client.create_invoice(&merchant, &customer, &1_000_000i128, &token, &9999, &1);
+        let id = client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1);
         (merchant, customer, id)
     }
 
@@ -1096,5 +1155,76 @@ mod tests {
         client.pause(&admin);
         let res = client.try_cancel_invoiced(&id, &merchant);
         assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    // ── get_invoices_by_merchant ─────────────────────────────────────────────
+
+    /// Only invoice IDs belonging to the queried merchant are returned.
+    #[test]
+    fn test_get_invoices_by_merchant_filters_by_merchant() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant_a = Address::generate(&env);
+        let merchant_b = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        client.create_invoice(&merchant_a, &customer, &1000i128, &token, &5000, &1);
+        client.create_invoice(&merchant_b, &customer, &1000i128, &token, &5000, &1);
+        client.create_invoice(&merchant_a, &customer, &1000i128, &token, &5000, &2);
+
+        let ids = client.get_invoices_by_merchant(&merchant_a, &None, &10u32);
+        assert_eq!(ids, soroban_sdk::vec![&env, 1u64, 3u64]);
+    }
+
+    /// A merchant with no invoices gets an empty page back.
+    #[test]
+    fn test_get_invoices_by_merchant_no_invoices_returns_empty() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+
+        let ids = client.get_invoices_by_merchant(&merchant, &None, &10u32);
+        assert_eq!(ids, Vec::new(&env));
+    }
+
+    /// `start_after` skips the given number of already-seen matches for pagination.
+    #[test]
+    fn test_get_invoices_by_merchant_pagination_start_after() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        for nonce in 1..=5u64 {
+            client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &nonce);
+        }
+
+        let page1 = client.get_invoices_by_merchant(&merchant, &None, &2u32);
+        assert_eq!(page1, soroban_sdk::vec![&env, 1u64, 2u64]);
+
+        let page2 = client.get_invoices_by_merchant(&merchant, &Some(2u32), &2u32);
+        assert_eq!(page2, soroban_sdk::vec![&env, 3u64, 4u64]);
+
+        let page3 = client.get_invoices_by_merchant(&merchant, &Some(4u32), &2u32);
+        assert_eq!(page3, soroban_sdk::vec![&env, 5u64]);
+    }
+
+    /// `limit` is capped at 100 even when a caller requests more.
+    #[test]
+    fn test_get_invoices_by_merchant_limit_capped_at_100() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        for nonce in 1..=105u64 {
+            client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &nonce);
+        }
+
+        let ids = client.get_invoices_by_merchant(&merchant, &None, &1000u32);
+        assert_eq!(ids.len(), 100);
     }
 }
