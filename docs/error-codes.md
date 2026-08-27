@@ -3,6 +3,8 @@
 This document maps every `InvoiceError`, `ContractError`, `SettlementError`, and `TreasuryError` variant (and other contract error codes) to its numeric value, the condition that triggers it, and the recommended remediation steps for integrators.
 
 > Cross-reference: see [docs/api-reference.md](./api-reference.md) for HTTP-level error shapes returned by the backend.
+>
+> Cross-reference: see [ARCHITECTURE.md § Invoice state machine](../ARCHITECTURE.md#invoice-state-machine) for a diagram of every legal `InvoiceStatus` transition and the function that triggers it — useful context for knowing which `InvalidStateTransition` / `NotPending` cases below are expected versus a real bug.
 
 ---
 
@@ -47,6 +49,10 @@ Defined in `COMEBACKHERE-contracts/contracts/invoice/src/lib.rs`. Shares some va
 | 12 | `GraceWindowNotExpired` | `release_escrow` was called before `created_at + grace_window`. | Wait until `ledger.timestamp() >= created_at + grace_window`. Admin may reduce `GraceWindow` via `set_grace_window` (default 86 400 seconds). |
 | 13 | `DuplicateNonce` | The (merchant, nonce) pair has already been used by a previous invoice. | Generate a fresh nonce for each invoice. Different merchants may reuse the same nonce value without collision. |
 | 14 | `TreasuryNotConfigured` | `raise_dispute` was called before the admin ran `set_treasury`. | Admin must call `set_treasury` once before disputes can be raised. |
+| 15 | `NotAParty` | `raise_dispute` was called by an address that is neither the invoice's merchant nor its customer. | Sign with the merchant or customer key associated with the invoice. |
+| 16 | `Overflow` | An internal counter (invoice ID, or `created_at + grace_window`) would overflow `u64`. | Practically unreachable outside of adversarial ledger state; not user-actionable. |
+| 17 | `AddressBlocked` | `mark_paids` was called for a customer that the configured compliance contract reports as not allowed. | Confirm the customer's compliance status with `ComplianceContract.is_allowed` before retrying. |
+| 18 | `InvalidStateTransition` | `mark_paids` was called on an invoice in `RefundRequested`, `Released`, `Cancelled`, or `Expired` status — see [ARCHITECTURE.md § Invoice state machine](../ARCHITECTURE.md#invoice-state-machine) for the full legal-transition diagram. | Fetch the current status with `get_invoice_status` first. A refund already in progress must not be overridden by a stale payment confirmation. |
 
 ---
 
