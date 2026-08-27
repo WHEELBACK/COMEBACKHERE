@@ -65,6 +65,25 @@ Defined in `COMEBACKHERE-contracts/contracts/compliance/src/lib.rs`.
 
 > Note: the enum in `COMEBACKHERE-contracts/contracts/compliance/src/lib.rs` is named `ContractError`, matching the naming convention used by the invoice and treasury contracts in this repo. It is sometimes referred to informally as `ComplianceError` in design discussions — they are the same type.
 
+See [Compliance events](#compliance-events) below for the event shapes emitted by `batch_allow_addresses` and the other compliance entry points.
+
+---
+
+## Compliance events
+
+Defined in `COMEBACKHERE-contracts/contracts/compliance/src/lib.rs`. Every state-changing compliance call emits one or more Soroban events so an off-chain indexer can reconstruct allowlist state without re-reading contract storage.
+
+| Event topic | Emitted by | Data payload | Notes |
+| ------------- | ------------ | --------------- | ------- |
+| `address_allowed` | `allow_address` | `Address` | Permanent allow, no expiry. |
+| `address_allowed` | `batch_allow_addresses` | `(Address, u64)` — address and its `until` timestamp | One event per address processed. Same topic as `allow_address`, but the payload additionally carries the `until` value shared by the whole batch. |
+| `address_allowed_until` | `allow_address_until` | `(Address, u64)` — address and its `until` timestamp | Single-address, time-bounded allow. |
+| `address_blocked` | `block_address` | `Address` | |
+| `address_cleared` | `clear_address` | `(Address, AddressStatus)` — address and the status it held immediately before clearing | Never emitted when the address was already `Cleared` (that call fails with `AddressNotFound` instead). |
+| `compliance_batch_processed` | `batch_allow_addresses` | `(Address, u32)` — the calling admin and the number of addresses processed | Emitted once per `batch_allow_addresses` call, after all per-address `address_allowed` events for that call. Lets an indexer confirm a batch operation has fully landed (`processed_count` matches the number of `address_allowed` events it should have seen in that transaction) without treating event counting as the sole source of truth. |
+
+`batch_allow_addresses` caps `addresses` at 50 entries per call (`ContractError::BatchTooLarge` above that) and validates `until` the same way `allow_address_until` does (`ContractError::PastExpiry` if `until <= env.ledger().timestamp()`). Both checks run before any storage writes or events, so a rejected call has no partial effects.
+
 ---
 
 ## SettlementError

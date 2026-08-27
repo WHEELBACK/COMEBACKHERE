@@ -152,6 +152,10 @@ impl ComplianceContract {
                 .publish((Symbol::new(&e, "address_allowed"),), (addr.clone(), until));
         }
 
+        e.events().publish(
+            (Symbol::new(&e, "compliance_batch_processed"),),
+            (admin, addresses.len()),
+        );
         Ok(())
     }
 
@@ -359,6 +363,10 @@ mod tests {
             .filter(|ev| ev.0 == (cid.clone(), "address_allowed".into()))
             .count();
         assert_eq!(allowed_count, 3);
+
+        assert!(all_events
+            .iter()
+            .any(|ev| ev.0 == (cid.clone(), "compliance_batch_processed".into())));
     }
 
     #[test]
@@ -395,6 +403,36 @@ mod tests {
         }
 
         c.batch_allow_addresses(&admin, &addresses, &2000u64);
+
+        let all_events = e.events().all();
+        assert!(all_events
+            .iter()
+            .any(|ev| ev.0 == (cid.clone(), "compliance_batch_processed".into())));
+    }
+
+    #[test]
+    fn test_batch_allow_addresses_summary_event_emitted_once_per_batch() {
+        let (e, cid, admin, _addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        let addresses = soroban_sdk::vec![
+            &e,
+            Address::generate(&e),
+            Address::generate(&e),
+            Address::generate(&e),
+            Address::generate(&e)
+        ];
+
+        c.batch_allow_addresses(&admin, &addresses, &2000u64);
+
+        let all_events = e.events().all();
+        let summary_count = all_events
+            .iter()
+            .filter(|ev| ev.0 == (cid.clone(), "compliance_batch_processed".into()))
+            .count();
+        assert_eq!(
+            summary_count, 1,
+            "exactly one compliance_batch_processed event should be emitted per batch call"
+        );
     }
 
     #[test]
