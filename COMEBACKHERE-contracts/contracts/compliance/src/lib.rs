@@ -267,6 +267,42 @@ mod tests {
         assert!(c.is_allowed(&addr));
     }
 
+    // ── clear_address / expiry interaction ─────────────────────────────────────
+
+    #[test]
+    fn test_clear_address_before_expiry() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.allow_address_until(&admin, &addr, &2000u64);
+        assert!(c.is_allowed(&addr));
+
+        c.clear_address(&admin, &addr);
+        assert!(!c.is_allowed(&addr));
+    }
+
+    #[test]
+    fn test_clear_address_after_expiry() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.allow_address_until(&admin, &addr, &2000u64);
+        e.ledger().with_mut(|li| li.timestamp = 2001);
+        assert!(!c.is_allowed(&addr));
+
+        c.clear_address(&admin, &addr);
+        assert!(!c.is_allowed(&addr));
+    }
+
+    #[test]
+    fn test_clear_address_never_allowed() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        assert!(!c.is_allowed(&addr));
+
+        let res = c.try_clear_address(&admin, &addr);
+        assert_eq!(res, Err(Ok(ContractError::AddressNotFound)));
+        assert!(!c.is_allowed(&addr));
+    }
+
     #[test]
     fn test_permanent_allow_unaffected_by_time() {
         let (_e, c, admin, addr) = setup(9999);
