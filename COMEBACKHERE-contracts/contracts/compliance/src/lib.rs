@@ -10,6 +10,7 @@ pub enum ContractError {
     ContractPaused = 2,
     AlreadyInitialized = 3,
     AddressNotFound = 4,
+    PastExpiry = 5,
 }
 
 #[contracttype]
@@ -41,6 +42,14 @@ fn is_paused(e: &Env) -> bool {
 fn check_not_paused(e: &Env) -> Result<(), ContractError> {
     if is_paused(e) {
         Err(ContractError::ContractPaused)
+    } else {
+        Ok(())
+    }
+}
+
+fn check_not_past_expiry(e: &Env, until: u64) -> Result<(), ContractError> {
+    if until <= e.ledger().timestamp() {
+        Err(ContractError::PastExpiry)
     } else {
         Ok(())
     }
@@ -103,6 +112,7 @@ impl ComplianceContract {
     ) -> Result<(), ContractError> {
         check_not_paused(&e)?;
         admin.require_auth();
+        check_not_past_expiry(&e, until)?;
         e.storage().instance().set(
             &DataKey::Status(addr.clone()),
             &AddressStatus::AllowedUntil(until),
@@ -212,18 +222,49 @@ mod tests {
 
     #[test]
     fn test_is_allowed_exactly_at_expiry_returns_false() {
+        // `until` must be in the future at creation time (issue: past-expiry
+        // rejection), so we advance the ledger to the boundary afterwards
+        // instead of creating the entry already-expired.
         let (e, cid, admin, addr) = setup(1000);
         let c = ComplianceContractClient::new(&e, &cid);
-        c.allow_address_until(&admin, &addr, &1000u64);
+        c.allow_address_until(&admin, &addr, &2000u64);
+        e.ledger().with_mut(|li| li.timestamp = 2000);
         assert!(!c.is_allowed(&addr));
     }
 
     #[test]
     fn test_is_allowed_past_expiry_returns_false() {
-        let (e, cid, admin, addr) = setup(1001);
+        let (e, cid, admin, addr) = setup(1000);
         let c = ComplianceContractClient::new(&e, &cid);
-        c.allow_address_until(&admin, &addr, &1000u64);
+        c.allow_address_until(&admin, &addr, &2000u64);
+        e.ledger().with_mut(|li| li.timestamp = 2001);
         assert!(!c.is_allowed(&addr));
+    }
+
+    // ── allow_address_until past-expiry validation ─────────────────────────────
+
+    #[test]
+    fn test_allow_address_until_rejects_past_timestamp() {
+        let (e, cid, admin, addr) = setup(2000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        let res = c.try_allow_address_until(&admin, &addr, &1000u64);
+        assert_eq!(res, Err(Ok(ContractError::PastExpiry)));
+    }
+
+    #[test]
+    fn test_allow_address_until_rejects_timestamp_equal_to_now() {
+        let (e, cid, admin, addr) = setup(2000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        let res = c.try_allow_address_until(&admin, &addr, &2000u64);
+        assert_eq!(res, Err(Ok(ContractError::PastExpiry)));
+    }
+
+    #[test]
+    fn test_allow_address_until_accepts_future_timestamp() {
+        let (e, cid, admin, addr) = setup(2000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.allow_address_until(&admin, &addr, &2001u64);
+        assert!(c.is_allowed(&addr));
     }
 
     #[test]

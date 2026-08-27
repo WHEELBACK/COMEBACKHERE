@@ -60,6 +60,9 @@ Defined in `COMEBACKHERE-contracts/contracts/compliance/src/lib.rs`.
 | 2 | `ContractPaused` | A state-changing call was made while the compliance contract is paused. | Compliance check calls return early on pause; defer the user action or have the admin unpause. |
 | 3 | `AlreadyInitialized` | `initialize` was called on a contract that is already set up. | Deployment-time error. The compliance contract can only be initialised once. |
 | 4 | `AddressNotFound` | A status query (or block/unblock flow) referenced an address that has not been recorded in `Status(Address)`. | Register the address via `set_status` first, or use the `Cleared` default if no entry exists. |
+| 5 | `PastExpiry` | `allow_address_until` was called with `until <= env.ledger().timestamp()`. | Pass a `until` timestamp strictly greater than the current ledger time. An already-expired entry is rejected rather than silently created as a no-op. |
+
+> Note: the enum in `COMEBACKHERE-contracts/contracts/compliance/src/lib.rs` is named `ContractError`, matching the naming convention used by the invoice and treasury contracts in this repo. It is sometimes referred to informally as `ComplianceError` in design discussions — they are the same type.
 
 ---
 
