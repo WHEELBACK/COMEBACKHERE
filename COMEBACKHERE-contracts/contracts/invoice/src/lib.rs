@@ -24,6 +24,13 @@ pub enum ContractError {
     DuplicateNonce = 13,
     TreasuryNotConfigured = 14,
     NotAParty = 15,
+    Overflow = 16,
+    AddressBlocked = 17,
+    /// A state-changing call was rejected because the invoice is in a terminal
+    /// or refund-related state that does not permit the requested transition
+    /// (e.g. `mark_paids` called on an invoice that is `RefundRequested`,
+    /// `Released`, `Cancelled`, or `Expired`).
+    InvalidStateTransition = 18,
 }
 
 #[contracttype]
@@ -239,7 +246,10 @@ impl InvoiceContract {
     /// # Errors
     /// - [`ContractError::ContractPaused`] if the contract is currently paused.
     /// - [`ContractError::InvoiceNotFound`] if any ID in the batch does not exist.
-    /// - [`ContractError::InvoiceAlreadyPaid`] if any invoice is not in `Pending` status.
+    /// - [`ContractError::InvalidStateTransition`] if any invoice is `RefundRequested`,
+    ///   `Released`, `Cancelled`, or `Expired` — a payment confirmation must never
+    ///   silently override a refund already in progress or a closed invoice.
+    /// - [`ContractError::InvoiceAlreadyPaid`] if any invoice is already `Paid`.
     /// - [`ContractError::InvoiceExpired`] if any invoice's `expires_at` has passed.
     ///
     /// # Events
@@ -260,6 +270,20 @@ impl InvoiceContract {
                 .persistent()
                 .get::<DataKey, Invoice>(&DataKey::Invoice(id))
                 .ok_or(ContractError::InvoiceNotFound)?;
+            // Terminal and refund-related states must never be silently
+            // overridden by a stale payment confirmation: a payer's refund
+            // request (or an already-settled/cancelled/expired invoice) is
+            // rejected with a distinct error rather than falling through to
+            // the generic "already paid" case below.
+            if matches!(
+                invoice.status,
+                InvoiceStatus::RefundRequested
+                    | InvoiceStatus::Released
+                    | InvoiceStatus::Cancelled
+                    | InvoiceStatus::Expired
+            ) {
+                return Err(ContractError::InvalidStateTransition);
+            }
             if invoice.status != InvoiceStatus::Pending {
                 return Err(ContractError::InvoiceAlreadyPaid);
             }
@@ -1096,5 +1120,69 @@ mod tests {
         client.pause(&admin);
         let res = client.try_cancel_invoiced(&id, &merchant);
         assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    // ── mark_paids terminal/refund-state guard tests ─────────────────────────
+
+    /// A stale mark_paids call must not silently override a refund already
+    /// requested by the customer — it should be rejected, not re-marked Paid.
+    #[test]
+    fn test_mark_paids_on_refund_requested_returns_invalid_state_transition() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let (_merchant, customer, id) = create_test_invoice(&client, &env);
+
+        client.mark_paids(&soroban_sdk::vec![&env, id]);
+        client.request_refund(&id, &customer);
+
+        let res = client.try_mark_paids(&soroban_sdk::vec![&env, id]);
+        assert_eq!(res, Err(Ok(ContractError::InvalidStateTransition)));
+
+        // The refund request must survive the stale confirmation untouched.
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.status, InvoiceStatus::RefundRequested);
+    }
+
+    /// mark_paids on a Released (escrow already released) invoice is rejected.
+    #[test]
+    fn test_mark_paids_on_released_returns_invalid_state_transition() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let (merchant, customer, id) = create_test_invoice(&client, &env);
+
+        client.mark_paids(&soroban_sdk::vec![&env, id]);
+        client.request_refund(&id, &customer);
+        client.set_grace_window(&admin, &0u64);
+        client.release_escrow(&id, &merchant);
+
+        let res = client.try_mark_paids(&soroban_sdk::vec![&env, id]);
+        assert_eq!(res, Err(Ok(ContractError::InvalidStateTransition)));
+    }
+
+    /// mark_paids on a Cancelled invoice is rejected with the same distinct error.
+    #[test]
+    fn test_mark_paids_on_cancelled_returns_invalid_state_transition() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let (merchant, _customer, id) = create_test_invoice(&client, &env);
+
+        client.cancel_invoiced(&id, &merchant);
+
+        let res = client.try_mark_paids(&soroban_sdk::vec![&env, id]);
+        assert_eq!(res, Err(Ok(ContractError::InvalidStateTransition)));
+    }
+
+    /// mark_paids on an already-Paid invoice still returns the more specific
+    /// InvoiceAlreadyPaid error, distinct from the terminal/refund-state guard.
+    #[test]
+    fn test_mark_paids_on_already_paid_returns_invoice_already_paid() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let (_merchant, _customer, id) = create_test_invoice(&client, &env);
+
+        client.mark_paids(&soroban_sdk::vec![&env, id]);
+
+        let res = client.try_mark_paids(&soroban_sdk::vec![&env, id]);
+        assert_eq!(res, Err(Ok(ContractError::InvoiceAlreadyPaid)));
     }
 }
