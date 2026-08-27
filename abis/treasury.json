@@ -61,20 +61,14 @@
     "settlement_released"
   ],
   "errors": {
-    "1": "AlreadyInitialized",
-    "2": "ZeroThreshold",
-    "3": "SettlementNotFound",
-    "4": "AlreadyExecuted",
-    "5": "ThresholdNotMet",
-    "6": "ThresholdNotConfigured",
-    "7": "InvalidAmount",
-    "8": "ContractPaused",
-    "9": "Unauthorized",
-    "10": "UnauthorizedSigner",
-    "11": "InvalidTokenContract",
-    "12": "TokenNotAllowed",
-    "13": "RotationNotFound",
-    "14": "RotationAlreadyExecuted",
-    "15": "SettlementOnHold"
+    "1": "ContractPaused",
+    "2": "NotPending",
+    "3": "InsufficientApprovals",
+    "4": "DisputeNotFound",
+    "5": "DisputeAlreadyRaised",
+    "6": "DisputeNotRaised",
+    "7": "AlreadyVoted",
+    "8": "UnauthorizedSigner",
+    "9": "ThresholdNotMet"
   }
 }

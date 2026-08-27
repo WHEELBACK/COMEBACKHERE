@@ -658,6 +658,41 @@ impl TreasuryContract {
             .get(&DataKey::Settlement(settlement_id))
             .unwrap()
     }
+
+    fn get_dispute_internal(e: &Env, settlement_id: u64) -> Dispute {
+        e.storage()
+            .instance()
+            .get(&DataKey::Dispute(settlement_id))
+            .unwrap_or_else(|| panic_with_error!(e, TreasuryError::DisputeNotFound))
+    }
+
+    fn finalize_dispute_internal(e: &Env, settlement_id: u64, resolve_in_favor: bool) {
+        let mut dispute: Dispute = e
+            .storage()
+            .instance()
+            .get(&DataKey::Dispute(settlement_id))
+            .unwrap_or_else(|| panic_with_error!(e, TreasuryError::DisputeNotFound));
+
+        dispute.status = if resolve_in_favor {
+            DisputeStatus::ResolvedClaimant
+        } else {
+            DisputeStatus::ResolvedCounterparty
+        };
+        e.storage().instance().set(&DataKey::Dispute(settlement_id), &dispute);
+
+        // In favour of the claimant (the dispute raiser): the settlement is voided.
+        // In favour of the counterparty (the merchant): the settlement resumes as
+        // Pending and can proceed through the normal approval/execution flow.
+        let mut settlement = Self::get_settlement_internal(e, settlement_id);
+        settlement.status = if resolve_in_favor {
+            SettlementStatus::Cancelled
+        } else {
+            SettlementStatus::Pending
+        };
+        e.storage().instance().set(&DataKey::Settlement(settlement_id), &settlement);
+
+        events::dispute_resolved(e, &settlement_id, &resolve_in_favor, &dispute.resolution_weight);
+    }
 }
 
 #[cfg(test)]
@@ -1106,5 +1141,206 @@ mod tests {
         assert_eq!(c.try_unpause(&non_admin), Err(Ok(TreasuryError::Unauthorized)));
         assert_eq!(c.try_update_threshold(&non_admin, &2u32), Err(Ok(TreasuryError::Unauthorized)));
         assert_eq!(c.try_withdraw(&non_admin, &non_admin, &100u64), Err(Ok(TreasuryError::Unauthorized)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::{vec, Env};
+
+    struct TestContext {
+        env: Env,
+        contract_id: Address,
+        signer1: Address,
+        signer2: Address,
+        signer3: Address,
+        token: Address,
+        merchant: Address,
+    }
+
+    fn setup() -> TestContext {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let signer1 = Address::generate(&env);
+        let signer2 = Address::generate(&env);
+        let signer3 = Address::generate(&env);
+        let token = Address::generate(&env);
+        let merchant = Address::generate(&env);
+
+        let signers = vec![
+            &env,
+            (signer1.clone(), 1u64),
+            (signer2.clone(), 1u64),
+            (signer3.clone(), 1u64),
+        ];
+
+        let contract_id = env.register_contract(None, TreasuryContract);
+        let client = TreasuryContractClient::new(&env, &contract_id);
+        client.initialize(&signers, &2u64, &admin);
+
+        TestContext {
+            env,
+            contract_id,
+            signer1,
+            signer2,
+            signer3,
+            token,
+            merchant,
+        }
+    }
+
+    fn propose_and_raise(ctx: &TestContext) -> u64 {
+        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
+        let settlement_id = client.propose_settlement(&ctx.signer1, &ctx.token, &1000u64, &ctx.merchant);
+        client.raise_dispute(&ctx.signer1, &settlement_id, &1u32);
+        settlement_id
+    }
+
+    fn read_dispute(ctx: &TestContext, settlement_id: u64) -> Dispute {
+        ctx.env.as_contract(&ctx.contract_id, || {
+            ctx.env
+                .storage()
+                .instance()
+                .get(&DataKey::Dispute(settlement_id))
+                .unwrap()
+        })
+    }
+
+    fn read_settlement(ctx: &TestContext, settlement_id: u64) -> Settlement {
+        ctx.env.as_contract(&ctx.contract_id, || {
+            ctx.env
+                .storage()
+                .instance()
+                .get(&DataKey::Settlement(settlement_id))
+                .unwrap()
+        })
+    }
+
+    #[test]
+    fn test_raise_dispute_holds_settlement_and_records_dispute() {
+        let ctx = setup();
+        let settlement_id = propose_and_raise(&ctx);
+
+        let dispute = read_dispute(&ctx, settlement_id);
+        assert_eq!(dispute.status, DisputeStatus::Raised);
+        assert_eq!(dispute.resolution_weight, 0u64);
+        assert_eq!(dispute.raised_by, ctx.signer1);
+        assert_eq!(dispute.reason, 1u32);
+        assert!(dispute.voters.is_empty());
+
+        let settlement = read_settlement(&ctx, settlement_id);
+        assert!(matches!(settlement.status, SettlementStatus::OnHold));
+    }
+
+    #[test]
+    fn test_raise_dispute_twice_fails() {
+        let ctx = setup();
+        let settlement_id = propose_and_raise(&ctx);
+
+        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
+        let result = client.try_raise_dispute(&ctx.signer2, &settlement_id, &2u32);
+        assert_eq!(result, Err(Ok(TreasuryError::DisputeAlreadyRaised)));
+    }
+
+    #[test]
+    fn test_votes_resolve_dispute_in_favour_of_claimant() {
+        let ctx = setup();
+        let settlement_id = propose_and_raise(&ctx);
+
+        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
+
+        // First vote: weight 1 < threshold 2, dispute stays Raised.
+        client.vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
+        let dispute = read_dispute(&ctx, settlement_id);
+        assert_eq!(dispute.status, DisputeStatus::Raised);
+        assert_eq!(dispute.resolution_weight, 1u64);
+
+        // Second vote reaches the threshold and resolves in favour of the claimant.
+        client.vote_dispute_resolution(&ctx.signer2, &settlement_id, &true);
+        let dispute = read_dispute(&ctx, settlement_id);
+        assert_eq!(dispute.status, DisputeStatus::ResolvedClaimant);
+        assert_eq!(dispute.resolution_weight, 2u64);
+
+        let settlement = read_settlement(&ctx, settlement_id);
+        assert!(matches!(settlement.status, SettlementStatus::Cancelled));
+    }
+
+    #[test]
+    fn test_votes_resolve_dispute_in_favour_of_counterparty() {
+        let ctx = setup();
+        let settlement_id = propose_and_raise(&ctx);
+
+        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
+        client.vote_dispute_resolution(&ctx.signer1, &settlement_id, &false);
+        client.vote_dispute_resolution(&ctx.signer2, &settlement_id, &false);
+
+        let dispute = read_dispute(&ctx, settlement_id);
+        assert_eq!(dispute.status, DisputeStatus::ResolvedCounterparty);
+
+        let settlement = read_settlement(&ctx, settlement_id);
+        assert!(matches!(settlement.status, SettlementStatus::Pending));
+    }
+
+    #[test]
+    fn test_signer_cannot_vote_twice() {
+        let ctx = setup();
+        let settlement_id = propose_and_raise(&ctx);
+
+        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
+        client.vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
+
+        let result = client.try_vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
+        assert_eq!(result, Err(Ok(TreasuryError::AlreadyVoted)));
+    }
+
+    #[test]
+    fn test_non_signer_cannot_vote() {
+        let ctx = setup();
+        let settlement_id = propose_and_raise(&ctx);
+
+        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
+        let outsider = Address::generate(&ctx.env);
+
+        let result = client.try_vote_dispute_resolution(&outsider, &settlement_id, &true);
+        assert_eq!(result, Err(Ok(TreasuryError::UnauthorizedSigner)));
+    }
+
+    #[test]
+    fn test_vote_without_dispute_fails() {
+        let ctx = setup();
+        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
+        let settlement_id = client.propose_settlement(&ctx.signer1, &ctx.token, &1000u64, &ctx.merchant);
+
+        let result = client.try_vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
+        assert_eq!(result, Err(Ok(TreasuryError::DisputeNotFound)));
+    }
+
+    #[test]
+    fn test_resolve_before_threshold_fails() {
+        let ctx = setup();
+        let settlement_id = propose_and_raise(&ctx);
+
+        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
+        client.vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
+
+        let result = client.try_resolve_dispute(&ctx.signer2, &settlement_id, &true);
+        assert_eq!(result, Err(Ok(TreasuryError::ThresholdNotMet)));
+    }
+
+    #[test]
+    fn test_vote_after_resolution_fails() {
+        let ctx = setup();
+        let settlement_id = propose_and_raise(&ctx);
+
+        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
+        client.vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
+        client.vote_dispute_resolution(&ctx.signer2, &settlement_id, &true);
+
+        let result = client.try_vote_dispute_resolution(&ctx.signer3, &settlement_id, &false);
+        assert_eq!(result, Err(Ok(TreasuryError::DisputeNotRaised)));
     }
 }
