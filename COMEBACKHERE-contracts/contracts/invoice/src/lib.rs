@@ -3,8 +3,12 @@
 mod events;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, String, Symbol,
+    Vec,
 };
+
+/// Maximum length, in bytes, allowed for the optional `reference` field on an invoice.
+const MAX_REFERENCE_LEN: u32 = 64;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -24,8 +28,9 @@ pub enum ContractError {
     DuplicateNonce = 13,
     TreasuryNotConfigured = 14,
     NotAParty = 15,
-    Overflow = 16,
-    AddressBlocked = 17,
+    ReferenceTooLong = 16,
+    Overflow = 17,
+    AddressBlocked = 18,
 }
 
 #[contracttype]
@@ -50,6 +55,9 @@ pub struct Invoice {
     pub status: InvoiceStatus,
     pub created_at: u64,
     pub expires_at: u64,
+    /// Optional merchant-supplied reference (e.g. an order or invoice number
+    /// from the merchant's own system), capped at `MAX_REFERENCE_LEN` bytes.
+    pub reference: Option<String>,
 }
 
 #[contracttype]
@@ -141,6 +149,8 @@ impl InvoiceContract {
     /// - `expires_at`: Absolute ledger timestamp (seconds since Unix epoch) after which
     ///   the invoice can no longer be paid.
     /// - `nonce`: A per-merchant unique value used to prevent duplicate submissions.
+    /// - `reference`: An optional merchant-supplied reference (e.g. an order ID from the
+    ///   merchant's own system), capped at `MAX_REFERENCE_LEN` (64) bytes.
     ///
     /// # Returns
     /// The newly assigned invoice ID (a `u64` counter starting at 1).
@@ -148,6 +158,7 @@ impl InvoiceContract {
     /// # Errors
     /// - [`ContractError::ContractPaused`] if the contract is currently paused.
     /// - [`ContractError::DuplicateNonce`] if `(merchant, nonce)` has already been used.
+    /// - [`ContractError::ReferenceTooLong`] if `reference` exceeds `MAX_REFERENCE_LEN` bytes.
     ///
     /// # Events
     /// Emits `invoice_created(merchant, invoice_id)` on success.
@@ -159,9 +170,16 @@ impl InvoiceContract {
         token: Address,
         expires_at: u64,
         nonce: u64,
+        reference: Option<String>,
     ) -> Result<u64, ContractError> {
         check_not_paused(&env)?;
         merchant.require_auth();
+
+        if let Some(ref r) = reference {
+            if r.len() > MAX_REFERENCE_LEN {
+                return Err(ContractError::ReferenceTooLong);
+            }
+        }
 
         let nonce_key = DataKey::Nonce(merchant.clone(), nonce);
         if env.storage().persistent().has(&nonce_key) {
@@ -189,6 +207,7 @@ impl InvoiceContract {
             status: InvoiceStatus::Pending,
             created_at: now,
             expires_at,
+            reference,
         };
         env.storage()
             .persistent()
@@ -725,7 +744,7 @@ mod tests {
         let merchant = Address::generate(&env);
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
-        let invoice_id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let invoice_id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1, &None);
         assert_eq!(invoice_id, 1);
     }
 
@@ -737,9 +756,9 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
 
-        client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1, &None);
 
-        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1, &None);
         assert_eq!(result, Err(Ok(ContractError::DuplicateNonce)));
     }
 
@@ -761,8 +780,8 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
 
-        client.create_invoice(&merchant_a, &customer, &1000i128, &token, &5000, &1);
-        client.create_invoice(&merchant_b, &customer, &1000i128, &token, &5000, &1);
+        client.create_invoice(&merchant_a, &customer, &1000i128, &token, &5000, &1, &None);
+        client.create_invoice(&merchant_b, &customer, &1000i128, &token, &5000, &1, &None);
 
         let invoice_a = client.get_invoice(&1);
         let invoice_b = client.get_invoice(&2);
@@ -786,7 +805,7 @@ mod tests {
 
         client.pause(&admin);
 
-        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1, &None);
         assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
     }
 
@@ -805,7 +824,7 @@ mod tests {
         let merchant = Address::generate(&env);
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
-        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1, &None);
         assert_eq!(result, Err(Ok(ContractError::Overflow)));
     }
 
@@ -822,7 +841,7 @@ mod tests {
         let merchant = Address::generate(&env);
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
-        let invoice_id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let invoice_id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1, &None);
         client.mark_paids(&soroban_sdk::vec![&env, invoice_id]);
         client.request_refund(&invoice_id, &customer);
         let result = client.try_release_escrow(&invoice_id, &merchant);
@@ -844,11 +863,11 @@ mod tests {
         client.initialize(&admin);
 
         client.pause(&admin);
-        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1, &None);
         assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
 
         client.unpause(&admin);
-        let invoice_id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &2);
+        let invoice_id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &2, &None);
         assert_eq!(invoice_id, 1);
     }
 
@@ -952,7 +971,7 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
         let invoice_id =
-            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1);
+            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1, &None);
 
         invoice_client.raise_dispute(&invoice_id, &1u64, &merchant, &1u32);
 
@@ -971,7 +990,7 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
         let invoice_id =
-            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1);
+            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1, &None);
 
         invoice_client.raise_dispute(&invoice_id, &2u64, &merchant, &1u32);
 
@@ -1007,7 +1026,7 @@ mod tests {
         let token = Address::generate(&env);
         let claimant = Address::generate(&env);
         let invoice_id =
-            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1);
+            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1, &None);
 
         let result = invoice_client.try_raise_dispute(&invoice_id, &1u64, &claimant, &1u32);
         assert_eq!(result, Err(Ok(ContractError::TreasuryNotConfigured)));
@@ -1022,7 +1041,7 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
         let invoice_id =
-            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1);
+            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1, &None);
 
         invoice_client.pause(&admin);
 
@@ -1039,7 +1058,7 @@ mod tests {
         let merchant = Address::generate(env);
         let customer = Address::generate(env);
         let token = Address::generate(env);
-        let id = client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1);
+        let id = client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1, &None);
         (merchant, customer, id)
     }
 
@@ -1169,9 +1188,9 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
 
-        client.create_invoice(&merchant_a, &customer, &1000i128, &token, &5000, &1);
-        client.create_invoice(&merchant_b, &customer, &1000i128, &token, &5000, &1);
-        client.create_invoice(&merchant_a, &customer, &1000i128, &token, &5000, &2);
+        client.create_invoice(&merchant_a, &customer, &1000i128, &token, &5000, &1, &None);
+        client.create_invoice(&merchant_b, &customer, &1000i128, &token, &5000, &1, &None);
+        client.create_invoice(&merchant_a, &customer, &1000i128, &token, &5000, &2, &None);
 
         let ids = client.get_invoices_by_merchant(&merchant_a, &None, &10u32);
         assert_eq!(ids, soroban_sdk::vec![&env, 1u64, 3u64]);
@@ -1198,7 +1217,7 @@ mod tests {
         let token = Address::generate(&env);
 
         for nonce in 1..=5u64 {
-            client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &nonce);
+            client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &nonce, &None);
         }
 
         let page1 = client.get_invoices_by_merchant(&merchant, &None, &2u32);
@@ -1221,10 +1240,102 @@ mod tests {
         let token = Address::generate(&env);
 
         for nonce in 1..=105u64 {
-            client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &nonce);
+            client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &nonce, &None);
         }
 
         let ids = client.get_invoices_by_merchant(&merchant, &None, &1000u32);
         assert_eq!(ids.len(), 100);
+    }
+
+    // ── optional `reference` field ───────────────────────────────────────────
+
+    /// A reference within the length limit is stored and returned as-is.
+    #[test]
+    fn test_create_invoice_with_reference_is_stored() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        let reference = String::from_str(&env, "order-12345");
+
+        let id = client.create_invoice(
+            &merchant,
+            &customer,
+            &1000i128,
+            &token,
+            &5000,
+            &1,
+            &Some(reference.clone()),
+        );
+
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.reference, Some(reference));
+    }
+
+    /// Omitting the reference leaves it `None`.
+    #[test]
+    fn test_create_invoice_without_reference_defaults_to_none() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        let id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1, &None);
+
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.reference, None);
+    }
+
+    /// A reference longer than MAX_REFERENCE_LEN (64 bytes) is rejected.
+    #[test]
+    fn test_create_invoice_reference_too_long_returns_error() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        let too_long = String::from_str(
+            &env,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+
+        let result = client.try_create_invoice(
+            &merchant,
+            &customer,
+            &1000i128,
+            &token,
+            &5000,
+            &1,
+            &Some(too_long),
+        );
+        assert_eq!(result, Err(Ok(ContractError::ReferenceTooLong)));
+    }
+
+    /// A reference exactly at MAX_REFERENCE_LEN (64 bytes) is accepted.
+    #[test]
+    fn test_create_invoice_reference_at_max_length_succeeds() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        let exact = String::from_str(
+            &env,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+
+        let id = client.create_invoice(
+            &merchant,
+            &customer,
+            &1000i128,
+            &token,
+            &5000,
+            &1,
+            &Some(exact.clone()),
+        );
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.reference, Some(exact));
     }
 }
