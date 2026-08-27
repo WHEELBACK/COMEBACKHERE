@@ -73,3 +73,45 @@ fn bench_propose_settlement_deterministic() {
         "propose_settlement CPU cost should be deterministic"
     );
 }
+
+/// Regression benchmark for the reordering in #31: the token allowlist check
+/// now runs before the pause and signer-auth checks in `propose_settlement`,
+/// so a disallowed token should be rejected for meaningfully less than the
+/// cost of a full accepted validation pass, rather than paying for
+/// pause/auth work first and only then failing on the allowlist.
+#[test]
+fn bench_propose_settlement_rejected_token_cheaper_than_accepted() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let contract_id = e.register(TreasuryContract, ());
+    let client = TreasuryContractClient::new(&e, &contract_id);
+
+    let admin = Address::generate(&e);
+    let signer = Address::generate(&e);
+    let allowed_token = Address::generate(&e);
+    let disallowed_token = Address::generate(&e);
+    let merchant = Address::generate(&e);
+
+    client.initialize(&vec![&e, (signer.clone(), 1u64)], &1, &admin);
+    client.add_token_to_allowlist(&admin, &allowed_token);
+
+    e.budget().reset_unlimited();
+    let cpu_accept_before = e.budget().get_cpu_instructions_used();
+    client.propose_settlement(&signer, &allowed_token, &5_000_000u64, &merchant);
+    let cpu_accept_after = e.budget().get_cpu_instructions_used();
+    let cpu_accept = cpu_accept_after - cpu_accept_before;
+
+    e.budget().reset_unlimited();
+    let cpu_reject_before = e.budget().get_cpu_instructions_used();
+    let result =
+        client.try_propose_settlement(&signer, &disallowed_token, &5_000_000u64, &merchant);
+    let cpu_reject_after = e.budget().get_cpu_instructions_used();
+    let cpu_reject = cpu_reject_after - cpu_reject_before;
+
+    assert_eq!(result, Err(Ok(TreasuryError::TokenNotAllowed)));
+    assert!(
+        cpu_reject < cpu_accept,
+        "rejecting a disallowed token ({cpu_reject} cpu) should cost less than a full \
+         accepted proposal ({cpu_accept} cpu) now that the allowlist check runs first"
+    );
+}
