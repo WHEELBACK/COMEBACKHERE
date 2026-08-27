@@ -145,6 +145,61 @@ export async function getOnChainSettlement(
   }
 }
 
+export interface SettlementSimulation {
+  settlementId: bigint
+  status: string
+  wouldSucceed: boolean
+  approvalWeight: bigint
+  threshold: bigint
+  settlementAmount: bigint
+  treasuryBalance: bigint
+  projectedBalance: bigint
+}
+
+/**
+ * Previews the outcome of `execute_settlement` for `settlementId` without submitting
+ * or mutating any on-chain state, by simulating a call to the treasury contract's
+ * read-only `simulate_settlement` function.
+ */
+export async function getSettlementSimulation(
+  client: SorobanClient,
+  treasuryContractId: string,
+  settlementId: bigint,
+  sourceAccount: string,
+  networkPassphrase: string,
+): Promise<SettlementSimulation> {
+  const retval = await simulateContractRead(
+    client,
+    treasuryContractId,
+    "simulate_settlement",
+    [nativeToScVal(settlementId, { type: "u64" })],
+    sourceAccount,
+    networkPassphrase,
+  )
+
+  const map = retval.map()
+  if (!map) {
+    throw Object.assign(new Error("Invalid simulate_settlement response"), { status: 422 })
+  }
+
+  const entries: Record<string, xdr.ScVal> = {}
+  for (const entry of map) {
+    const key = entry.key().sym().toString()
+    entries[key] = entry.val()
+  }
+
+  return {
+    settlementId: BigInt(entries.settlement_id?.u64()?.toString() ?? "0"),
+    status: scValToSettlementStatus(entries.status ?? xdr.ScVal.scvVoid()),
+    wouldSucceed: entries.would_succeed?.b() ?? false,
+    approvalWeight: BigInt(entries.approval_weight?.u64()?.toString() ?? "0"),
+    threshold: BigInt(entries.threshold?.u64()?.toString() ?? "0"),
+    settlementAmount: BigInt(entries.settlement_amount?.u64()?.toString() ?? "0"),
+    treasuryBalance: BigInt(entries.treasury_balance?.i128()?.toString() ?? "0"),
+    projectedBalance: BigInt(entries.projected_balance?.i128()?.toString() ?? "0"),
+  }
+}
+
 export async function submitContractCall(
   client: SorobanClient,
   contractId: string,
