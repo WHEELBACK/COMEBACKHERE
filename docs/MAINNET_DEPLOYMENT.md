@@ -123,6 +123,78 @@ that itself meets the current threshold.
    their key must be removed via a signed `set_signer` transaction within 24
    hours. The remaining signers must meet quorum to execute this.
 
+### Signer Loss or Compromise Recovery
+
+This is the procedure for the scenario the rest of this document does not
+cover: a signer's key is lost or compromised, and the remaining signers can
+no longer reach the current `Threshold` even with every one of them
+approving.
+
+On-chain, `set_signer` and `update_threshold` (see
+`COMEBACKHERE-contracts/contracts/treasury/src/lib.rs`) are gated by
+`check_admin` — the single stored admin address — not by a live
+signer-quorum vote. The contract itself does not require any treasury
+signer's approval weight to execute either call. The multi-sig protection
+around this recovery path is therefore an off-chain ceremony control (the
+procedure below), the same way the rest of this document's governance
+model is enforced by process rather than by the contract.
+
+#### Recovery procedure
+
+1. **Freeze the treasury.** Call `pause(admin)` immediately to block new
+   `propose_settlement` / `approve_settlement` / `execute_settlement` calls
+   while recovery is in progress.
+2. **Convene an emergency ceremony.** Use the same [Signer
+   Roles](#signer-roles) as a deployment ceremony — Lead Deployer, remaining
+   Treasury Signers, and a Ceremony Witness at minimum — and record
+   identities and the reason for recovery in the ceremony log, per
+   [Ceremony](#ceremony).
+3. **Lower the threshold first if needed.** Compute the total weight of the
+   signers that remain trusted (excluding the lost/compromised signer). If
+   that total is below the current threshold (`get_threshold`), call
+   `update_threshold(admin, new_threshold)` to bring the threshold to at or
+   below the remaining trusted weight **before** revoking the compromised
+   signer. Doing this out of order — revoking the signer first — can leave
+   the treasury unable to reach quorum for any settlement, including the one
+   that would restore a working signer set.
+4. **Revoke the lost/compromised signer.** Call
+   `set_signer(admin, compromised_signer, 0)`. A weight of `0` removes that
+   signer's ability to approve settlements; there is no separate "remove"
+   call.
+5. **Onboard a replacement signer, if any.** Call
+   `set_signer(admin, new_signer, weight)` for the replacement key,
+   generated and custodied per [Key Custody
+   Requirements](#key-custody-requirements) (hardware wallet, distinct
+   geography, no shared custody).
+6. **Restore the threshold.** Once the replacement signer is onboarded and
+   the trusted total weight supports it, call `update_threshold` again to
+   return to (or set) the desired threshold.
+7. **Unpause.** Call `unpause(admin)` once the signer set and threshold are
+   consistent.
+8. **Record the recovery** in the deployment/ceremony log: old and new
+   signer addresses, old and new threshold values, and the transaction hash
+   for every `pause` / `update_threshold` / `set_signer` / `unpause` call.
+
+#### Minimum remaining signers needed
+
+Steps 1–7 need only the admin key's signature on-chain — `set_signer` and
+`update_threshold` do not check treasury-signer approval weight. What
+actually requires signer participation is this project's governance policy:
+under the default configuration (**3-of-5 by weight**, minimum quorum 3), an
+emergency ceremony still needs the same ceremony quorum as a normal
+deployment — **3 signers** (Treasury Signer role, 2+, plus Lead
+Deployer/Witness) — to independently verify and attest to the recovery
+before the admin key is used.
+
+A **single** lost or compromised signer (5 → 4 remaining) can always be
+recovered under the default model, since 4 remaining signers still clear the
+3-signer ceremony quorum. If **two or more** signers are lost or compromised
+at once, fewer than 3 trusted signers remain, the ceremony quorum itself
+cannot be met, and recovery is gated solely by the admin key — a residual
+single point of failure. Treat that case as a severity-1 incident (see
+[Abort Conditions](#abort-conditions)) requiring out-of-band verification of
+every remaining signer's identity before the admin proceeds.
+
 ---
 
 ## Mainnet Signing Ceremony Checklist
