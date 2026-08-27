@@ -38,6 +38,17 @@ pub struct Settlement {
     pub proposer: Address,
 }
 
+/// Tracks cumulative withdrawals of one token within the current rolling
+/// 24h ledger-time window, used to enforce `daily_withdraw_limit`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawWindow {
+    /// Ledger timestamp (seconds) at which the current window started.
+    pub window_start: u64,
+    /// Cumulative amount withdrawn since `window_start`.
+    pub spent: u64,
+}
+
 /// Error types returned by Treasury contract operations.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -66,6 +77,10 @@ pub enum TreasuryError {
     /// `rotate_signer` was called with an `old_signer` that has no registered
     /// weight (i.e. is not a current signer).
     SignerNotFound = 12,
+    /// `withdraw` was called for a token with a configured
+    /// `daily_withdraw_limit` and the withdrawal would push cumulative
+    /// withdrawals for the current 24h window above that limit.
+    DailyLimitExceeded = 13,
 }
 
 /// Storage keys for Treasury contract instance state.
@@ -89,6 +104,10 @@ pub enum DataKey {
     Threshold,
     /// Token allowlist key.
     TokenAllowlist,
+    /// Per-token admin-configured daily withdrawal cap.
+    DailyWithdrawLimit(Address),
+    /// Per-token rolling-window withdrawal ledger; value is a [`WithdrawWindow`].
+    WithdrawWindow(Address),
 }
 
 fn is_paused(e: &Env) -> bool {
@@ -690,25 +709,117 @@ impl TreasuryContract {
         Ok(())
     }
 
-    /// Withdraws funds from the treasury to a recipient address.
+    /// Sets (or clears, with `limit = 0`) the admin-configured daily withdrawal
+    /// cap for a token. `withdraw` enforces this cap over a rolling 24h
+    /// ledger-time window per token; a token with no configured limit is
+    /// unrestricted.
     ///
     /// # Arguments
     /// * `e` - Soroban environment handle.
     /// * `admin` - Admin address (must authenticate).
-    /// * `_to` - Target recipient address.
-    /// * `_amount` - Amount to withdraw.
+    /// * `token` - Token contract address the cap applies to.
+    /// * `limit` - Maximum cumulative withdrawal amount per 24h window.
     ///
     /// # Errors
     /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
     /// * Returns [`TreasuryError::Unauthorized`] if caller is not the contract admin.
-    pub fn withdraw(
+    pub fn set_daily_withdraw_limit(
         e: Env,
         admin: Address,
-        _to: Address,
-        _amount: u64,
+        token: Address,
+        limit: u64,
     ) -> Result<(), TreasuryError> {
         check_not_paused(&e)?;
         Self::check_admin(&e, &admin)?;
+        e.storage()
+            .instance()
+            .set(&DataKey::DailyWithdrawLimit(token.clone()), &limit);
+        e.events().publish(
+            (Symbol::new(&e, "daily_withdraw_limit_set"),),
+            (token, limit),
+        );
+        Ok(())
+    }
+
+    /// Returns the configured daily withdrawal cap for a token, or `None` if
+    /// the admin has never set one (in which case withdrawals of that token
+    /// are unrestricted).
+    pub fn get_daily_withdraw_limit(e: Env, token: Address) -> Option<u64> {
+        e.storage()
+            .instance()
+            .get(&DataKey::DailyWithdrawLimit(token))
+    }
+
+    /// Withdraws funds from the treasury to a recipient address.
+    ///
+    /// If a `daily_withdraw_limit` has been configured for `token`, this
+    /// tracks cumulative withdrawals of that token in a 24h ledger-time
+    /// window (measured from the first withdrawal in the window; the window
+    /// resets once `ledger.timestamp()` has advanced 24h past its start) and
+    /// rejects any withdrawal that would push the window's cumulative total
+    /// above the limit. This bounds worst-case exposure from a compromised
+    /// signer set to one configured cap per settlement cycle, rather than
+    /// allowing the treasury to be drained in a single transaction.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Admin address (must authenticate).
+    /// * `token` - Token being withdrawn; used to look up the daily cap.
+    /// * `_to` - Target recipient address.
+    /// * `amount` - Amount to withdraw.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if caller is not the contract admin.
+    /// * Returns [`TreasuryError::DailyLimitExceeded`] if `token` has a configured
+    ///   daily limit and `amount` would push the current 24h window's cumulative
+    ///   withdrawals above it.
+    pub fn withdraw(
+        e: Env,
+        admin: Address,
+        token: Address,
+        _to: Address,
+        amount: u64,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+
+        const WINDOW_SECONDS: u64 = 86_400;
+
+        let limit: Option<u64> = e
+            .storage()
+            .instance()
+            .get(&DataKey::DailyWithdrawLimit(token.clone()));
+
+        if let Some(limit) = limit {
+            let now = e.ledger().timestamp();
+            let window: Option<WithdrawWindow> = e
+                .storage()
+                .instance()
+                .get(&DataKey::WithdrawWindow(token.clone()));
+            let (window_start, spent) = match window {
+                Some(w) if now.saturating_sub(w.window_start) < WINDOW_SECONDS => {
+                    (w.window_start, w.spent)
+                }
+                _ => (now, 0u64),
+            };
+
+            let new_spent = spent
+                .checked_add(amount)
+                .ok_or(TreasuryError::DailyLimitExceeded)?;
+            if new_spent > limit {
+                return Err(TreasuryError::DailyLimitExceeded);
+            }
+
+            e.storage().instance().set(
+                &DataKey::WithdrawWindow(token.clone()),
+                &WithdrawWindow {
+                    window_start,
+                    spent: new_spent,
+                },
+            );
+        }
+
         Ok(())
     }
 
@@ -1213,10 +1324,11 @@ mod tests {
         let c = client(&e, &id);
         let admin = soroban_sdk::Address::generate(&e);
         let user = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
         c.initialize(&soroban_sdk::vec![&e], &1, &admin);
 
         c.deposit(&user, &1000u64);
-        c.withdraw(&admin, &user, &500u64);
+        c.withdraw(&admin, &token, &user, &500u64);
     }
 
     #[test]
@@ -1225,12 +1337,16 @@ mod tests {
         let c = client(&e, &id);
         let admin = soroban_sdk::Address::generate(&e);
         let non_admin = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
         c.initialize(&soroban_sdk::vec![&e], &1, &admin);
 
         assert_eq!(c.try_pause(&non_admin), Err(Ok(TreasuryError::Unauthorized)));
         assert_eq!(c.try_unpause(&non_admin), Err(Ok(TreasuryError::Unauthorized)));
         assert_eq!(c.try_update_threshold(&non_admin, &2u32), Err(Ok(TreasuryError::Unauthorized)));
-        assert_eq!(c.try_withdraw(&non_admin, &non_admin, &100u64), Err(Ok(TreasuryError::Unauthorized)));
+        assert_eq!(
+            c.try_withdraw(&non_admin, &token, &non_admin, &100u64),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
     }
 
     // ── rotate_signer tests ──────────────────────────────────────────────────
@@ -1329,5 +1445,88 @@ mod tests {
         // s2 is already an active signer; rotating s1 onto it must be rejected.
         let res = c.try_rotate_signer(&admin, &s1, &s2, &5u64);
         assert_eq!(res, Err(Ok(TreasuryError::DuplicateSigner)));
+    }
+
+    // ── daily withdrawal limit tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_withdraw_within_daily_limit_succeeds() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.set_daily_withdraw_limit(&admin, &token, &1_000u64);
+        c.withdraw(&admin, &token, &user, &600u64);
+        c.withdraw(&admin, &token, &user, &400u64);
+    }
+
+    #[test]
+    fn test_withdraw_exceeding_daily_limit_rejected() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.set_daily_withdraw_limit(&admin, &token, &1_000u64);
+        c.withdraw(&admin, &token, &user, &600u64);
+
+        let res = c.try_withdraw(&admin, &token, &user, &500u64);
+        assert_eq!(res, Err(Ok(TreasuryError::DailyLimitExceeded)));
+    }
+
+    #[test]
+    fn test_withdraw_limit_is_per_token() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token_a = soroban_sdk::Address::generate(&e);
+        let token_b = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.set_daily_withdraw_limit(&admin, &token_a, &1_000u64);
+        c.withdraw(&admin, &token_a, &user, &1_000u64);
+
+        // token_b has no configured limit, so it is unrestricted even though
+        // token_a's window is exhausted.
+        c.withdraw(&admin, &token_b, &user, &1_000_000u64);
+    }
+
+    #[test]
+    fn test_withdraw_window_resets_after_24h() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.set_daily_withdraw_limit(&admin, &token, &1_000u64);
+        c.withdraw(&admin, &token, &user, &1_000u64);
+        assert_eq!(
+            c.try_withdraw(&admin, &token, &user, &1u64),
+            Err(Ok(TreasuryError::DailyLimitExceeded))
+        );
+
+        e.ledger().with_mut(|li| li.timestamp += 86_400);
+        // A full window has elapsed, so the cap applies fresh.
+        c.withdraw(&admin, &token, &user, &1_000u64);
+    }
+
+    #[test]
+    fn test_withdraw_without_configured_limit_is_unrestricted() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.withdraw(&admin, &token, &user, &1_000_000_000u64);
     }
 }
