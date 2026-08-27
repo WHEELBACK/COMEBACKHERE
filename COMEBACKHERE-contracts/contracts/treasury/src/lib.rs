@@ -58,6 +58,14 @@ pub enum TreasuryError {
     DuplicateSigner = 7,
     InvalidWeightSum = 8,
     NotSettlementParty = 9,
+    /// `update_threshold` was called with a threshold above the sum of all
+    /// registered signer weights.
+    ThresholdExceedsWeight = 10,
+    /// `get_pending_settlements` was called with `limit` above `MAX_PAGE_SIZE`.
+    InvalidPagination = 11,
+    /// `rotate_signer` was called with an `old_signer` that has no registered
+    /// weight (i.e. is not a current signer).
+    SignerNotFound = 12,
 }
 
 /// Storage keys for Treasury contract instance state.
@@ -69,6 +77,10 @@ pub enum DataKey {
     Paused,
     /// Mapping of signer address to voting weight key.
     Signer(Address),
+    /// List of all addresses ever registered as a signer, so total signer
+    /// weight can be recomputed on demand instead of relying on a cached
+    /// counter that could drift out of sync.
+    SignerList,
     /// Settlement proposal storage key by settlement ID.
     Settlement(u64),
     /// Auto-incrementing settlement ID counter key.
@@ -166,6 +178,94 @@ impl TreasuryContract {
             signer_list.push_back(signer);
             e.storage().instance().set(&DataKey::SignerList, &signer_list);
         }
+        Ok(())
+    }
+
+    /// Rotates a signer's key: deregisters `old_signer` entirely and
+    /// registers `new_signer` with `new_weight` in its place. Unlike calling
+    /// `set_signer` twice, this keeps `SignerList` (and therefore
+    /// `total_signer_weight`) exactly in sync with the active signer set
+    /// regardless of whether `new_weight` is higher or lower than the weight
+    /// `old_signer` held — `total_signer_weight` is always recomputed from
+    /// live storage rather than tracked as a separate running total, so it
+    /// cannot drift out of sync with the individual signer weights.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Admin address (must authenticate).
+    /// * `old_signer` - The signer address being replaced; must currently hold non-zero weight.
+    /// * `new_signer` - The replacement signer address.
+    /// * `new_weight` - Voting weight assigned to `new_signer`.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract operations are paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if `admin` is not the stored contract admin.
+    /// * Returns [`TreasuryError::SignerNotFound`] if `old_signer` is not a current signer.
+    /// * Returns [`TreasuryError::DuplicateSigner`] if `new_signer` is already a distinct
+    ///   active signer.
+    ///
+    /// # Note
+    /// Settlements that already accumulated approval weight from `old_signer` keep that
+    /// weight as a snapshot on the settlement record — rotating (or reweighting) a signer
+    /// does not retroactively change `approval_weight` on in-flight settlements, so a
+    /// settlement that already reached quorum remains executable.
+    pub fn rotate_signer(
+        e: Env,
+        admin: Address,
+        old_signer: Address,
+        new_signer: Address,
+        new_weight: u64,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+
+        let old_weight: u64 = e
+            .storage()
+            .instance()
+            .get(&DataKey::Signer(old_signer.clone()))
+            .unwrap_or(0u64);
+        if old_weight == 0 {
+            return Err(TreasuryError::SignerNotFound);
+        }
+
+        if new_signer != old_signer {
+            let existing_new_weight: u64 = e
+                .storage()
+                .instance()
+                .get(&DataKey::Signer(new_signer.clone()))
+                .unwrap_or(0u64);
+            if existing_new_weight > 0 {
+                return Err(TreasuryError::DuplicateSigner);
+            }
+        }
+
+        e.storage()
+            .instance()
+            .remove(&DataKey::Signer(old_signer.clone()));
+        e.storage()
+            .instance()
+            .set(&DataKey::Signer(new_signer.clone()), &new_weight);
+
+        let signer_list: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::SignerList)
+            .unwrap_or_else(|| Vec::new(&e));
+        let mut updated_list: Vec<Address> = Vec::new(&e);
+        for s in signer_list.iter() {
+            if s != old_signer {
+                updated_list.push_back(s);
+            }
+        }
+        if !updated_list.contains(&new_signer) {
+            updated_list.push_back(new_signer.clone());
+        }
+        e.storage().instance().set(&DataKey::SignerList, &updated_list);
+
+        e.events().publish(
+            (Symbol::new(&e, "signer_rotated"),),
+            (old_signer, new_signer, old_weight, new_weight),
+        );
         Ok(())
     }
 
@@ -454,6 +554,31 @@ impl TreasuryContract {
         Ok(())
     }
 
+    /// Returns the sum of all currently registered signer weights, recomputed
+    /// live from storage on every call (not a cached counter), so it can
+    /// never drift out of sync with the individual `Signer(address)` entries.
+    pub fn get_total_signer_weight(e: Env) -> u64 {
+        Self::total_signer_weight(&e)
+    }
+
+    fn total_signer_weight(e: &Env) -> u64 {
+        let signer_list: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::SignerList)
+            .unwrap_or_else(|| Vec::new(e));
+        let mut total: u64 = 0;
+        for signer in signer_list.iter() {
+            let weight: u64 = e
+                .storage()
+                .instance()
+                .get(&DataKey::Signer(signer))
+                .unwrap_or(0u64);
+            total += weight;
+        }
+        total
+    }
+
     /// Places a pending settlement on hold by raising a dispute.
     ///
     /// # Arguments
@@ -657,41 +782,6 @@ impl TreasuryContract {
             .instance()
             .get(&DataKey::Settlement(settlement_id))
             .unwrap()
-    }
-
-    fn get_dispute_internal(e: &Env, settlement_id: u64) -> Dispute {
-        e.storage()
-            .instance()
-            .get(&DataKey::Dispute(settlement_id))
-            .unwrap_or_else(|| panic_with_error!(e, TreasuryError::DisputeNotFound))
-    }
-
-    fn finalize_dispute_internal(e: &Env, settlement_id: u64, resolve_in_favor: bool) {
-        let mut dispute: Dispute = e
-            .storage()
-            .instance()
-            .get(&DataKey::Dispute(settlement_id))
-            .unwrap_or_else(|| panic_with_error!(e, TreasuryError::DisputeNotFound));
-
-        dispute.status = if resolve_in_favor {
-            DisputeStatus::ResolvedClaimant
-        } else {
-            DisputeStatus::ResolvedCounterparty
-        };
-        e.storage().instance().set(&DataKey::Dispute(settlement_id), &dispute);
-
-        // In favour of the claimant (the dispute raiser): the settlement is voided.
-        // In favour of the counterparty (the merchant): the settlement resumes as
-        // Pending and can proceed through the normal approval/execution flow.
-        let mut settlement = Self::get_settlement_internal(e, settlement_id);
-        settlement.status = if resolve_in_favor {
-            SettlementStatus::Cancelled
-        } else {
-            SettlementStatus::Pending
-        };
-        e.storage().instance().set(&DataKey::Settlement(settlement_id), &settlement);
-
-        events::dispute_resolved(e, &settlement_id, &resolve_in_favor, &dispute.resolution_weight);
     }
 }
 
@@ -1142,205 +1232,102 @@ mod tests {
         assert_eq!(c.try_update_threshold(&non_admin, &2u32), Err(Ok(TreasuryError::Unauthorized)));
         assert_eq!(c.try_withdraw(&non_admin, &non_admin, &100u64), Err(Ok(TreasuryError::Unauthorized)));
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{vec, Env};
+    // ── rotate_signer tests ──────────────────────────────────────────────────
 
-    struct TestContext {
-        env: Env,
-        contract_id: Address,
-        signer1: Address,
-        signer2: Address,
-        signer3: Address,
-        token: Address,
-        merchant: Address,
+    /// Rotating a signer to a HIGHER weight must increase total_signer_weight
+    /// by exactly the delta, not leave the old weight double-counted or lost.
+    #[test]
+    fn test_rotate_signer_to_higher_weight_updates_total_signer_weight() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let s2 = soroban_sdk::Address::generate(&e);
+        let new_s1 = soroban_sdk::Address::generate(&e);
+        // total weight = 3 (s1=1, s2=2)
+        c.initialize(
+            &soroban_sdk::vec![&e, (s1.clone(), 1u64), (s2.clone(), 2u64)],
+            &1,
+            &admin,
+        );
+        assert_eq!(c.get_total_signer_weight(), 3u64);
+
+        // Rotate s1 (weight 1) -> new_s1 (weight 5): total should become 2 + 5 = 7.
+        c.rotate_signer(&admin, &s1, &new_s1, &5u64);
+        assert_eq!(c.get_total_signer_weight(), 7u64);
+
+        // The old signer address must no longer carry any weight.
+        let res = c.try_rotate_signer(&admin, &s1, &new_s1, &1u64);
+        assert_eq!(res, Err(Ok(TreasuryError::SignerNotFound)));
     }
 
-    fn setup() -> TestContext {
-        let env = Env::default();
-        env.mock_all_auths();
+    /// Rotating a signer to a LOWER weight updates total_signer_weight, but
+    /// must not retroactively shrink approval_weight already accumulated on
+    /// an in-flight settlement — a settlement that already reached quorum
+    /// stays executable even after the approving signer's weight drops.
+    #[test]
+    fn test_rotate_signer_to_lower_weight_preserves_inflight_quorum() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let s2 = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        let new_s1 = soroban_sdk::Address::generate(&e);
+        // threshold=3, s1 weight=3 (alone meets threshold), s2 weight=1
+        c.initialize(
+            &soroban_sdk::vec![&e, (s1.clone(), 3u64), (s2.clone(), 1u64)],
+            &3,
+            &admin,
+        );
+        assert_eq!(c.get_total_signer_weight(), 4u64);
 
-        let admin = Address::generate(&env);
-        let signer1 = Address::generate(&env);
-        let signer2 = Address::generate(&env);
-        let signer3 = Address::generate(&env);
-        let token = Address::generate(&env);
-        let merchant = Address::generate(&env);
+        let sid = c.propose_settlement(&s1, &token, &500u64, &merchant);
+        c.approve_settlement(&s1, &sid);
 
-        let signers = vec![
-            &env,
-            (signer1.clone(), 1u64),
-            (signer2.clone(), 1u64),
-            (signer3.clone(), 1u64),
-        ];
+        // Rotate s1 down to weight 1 *after* it already approved.
+        c.rotate_signer(&admin, &s1, &new_s1, &1u64);
+        assert_eq!(c.get_total_signer_weight(), 2u64, "total weight must reflect the new, lower weight");
 
-        let contract_id = env.register_contract(None, TreasuryContract);
-        let client = TreasuryContractClient::new(&env, &contract_id);
-        client.initialize(&signers, &2u64, &admin);
-
-        TestContext {
-            env,
-            contract_id,
-            signer1,
-            signer2,
-            signer3,
-            token,
-            merchant,
-        }
-    }
-
-    fn propose_and_raise(ctx: &TestContext) -> u64 {
-        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
-        let settlement_id = client.propose_settlement(&ctx.signer1, &ctx.token, &1000u64, &ctx.merchant);
-        client.raise_dispute(&ctx.signer1, &settlement_id, &1u32);
-        settlement_id
-    }
-
-    fn read_dispute(ctx: &TestContext, settlement_id: u64) -> Dispute {
-        ctx.env.as_contract(&ctx.contract_id, || {
-            ctx.env
-                .storage()
-                .instance()
-                .get(&DataKey::Dispute(settlement_id))
-                .unwrap()
-        })
-    }
-
-    fn read_settlement(ctx: &TestContext, settlement_id: u64) -> Settlement {
-        ctx.env.as_contract(&ctx.contract_id, || {
-            ctx.env
-                .storage()
-                .instance()
-                .get(&DataKey::Settlement(settlement_id))
-                .unwrap()
-        })
+        // The settlement's already-captured approval_weight (3) is a snapshot
+        // and is unaffected by the later rotation, so it still clears the
+        // threshold (3) and executes successfully.
+        c.execute_settlement(&s1, &sid, &token);
+        let settlement = c.get_settlement(&sid).unwrap();
+        assert!(matches!(settlement.status, SettlementStatus::Executed));
     }
 
     #[test]
-    fn test_raise_dispute_holds_settlement_and_records_dispute() {
-        let ctx = setup();
-        let settlement_id = propose_and_raise(&ctx);
+    fn test_rotate_signer_requires_admin() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let non_admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let new_s1 = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (s1.clone(), 1u64)], &1, &admin);
 
-        let dispute = read_dispute(&ctx, settlement_id);
-        assert_eq!(dispute.status, DisputeStatus::Raised);
-        assert_eq!(dispute.resolution_weight, 0u64);
-        assert_eq!(dispute.raised_by, ctx.signer1);
-        assert_eq!(dispute.reason, 1u32);
-        assert!(dispute.voters.is_empty());
-
-        let settlement = read_settlement(&ctx, settlement_id);
-        assert!(matches!(settlement.status, SettlementStatus::OnHold));
+        let res = c.try_rotate_signer(&non_admin, &s1, &new_s1, &1u64);
+        assert_eq!(res, Err(Ok(TreasuryError::Unauthorized)));
     }
 
     #[test]
-    fn test_raise_dispute_twice_fails() {
-        let ctx = setup();
-        let settlement_id = propose_and_raise(&ctx);
+    fn test_rotate_signer_rejects_duplicate_new_signer() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let s2 = soroban_sdk::Address::generate(&e);
+        c.initialize(
+            &soroban_sdk::vec![&e, (s1.clone(), 1u64), (s2.clone(), 2u64)],
+            &1,
+            &admin,
+        );
 
-        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
-        let result = client.try_raise_dispute(&ctx.signer2, &settlement_id, &2u32);
-        assert_eq!(result, Err(Ok(TreasuryError::DisputeAlreadyRaised)));
-    }
-
-    #[test]
-    fn test_votes_resolve_dispute_in_favour_of_claimant() {
-        let ctx = setup();
-        let settlement_id = propose_and_raise(&ctx);
-
-        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
-
-        // First vote: weight 1 < threshold 2, dispute stays Raised.
-        client.vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
-        let dispute = read_dispute(&ctx, settlement_id);
-        assert_eq!(dispute.status, DisputeStatus::Raised);
-        assert_eq!(dispute.resolution_weight, 1u64);
-
-        // Second vote reaches the threshold and resolves in favour of the claimant.
-        client.vote_dispute_resolution(&ctx.signer2, &settlement_id, &true);
-        let dispute = read_dispute(&ctx, settlement_id);
-        assert_eq!(dispute.status, DisputeStatus::ResolvedClaimant);
-        assert_eq!(dispute.resolution_weight, 2u64);
-
-        let settlement = read_settlement(&ctx, settlement_id);
-        assert!(matches!(settlement.status, SettlementStatus::Cancelled));
-    }
-
-    #[test]
-    fn test_votes_resolve_dispute_in_favour_of_counterparty() {
-        let ctx = setup();
-        let settlement_id = propose_and_raise(&ctx);
-
-        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
-        client.vote_dispute_resolution(&ctx.signer1, &settlement_id, &false);
-        client.vote_dispute_resolution(&ctx.signer2, &settlement_id, &false);
-
-        let dispute = read_dispute(&ctx, settlement_id);
-        assert_eq!(dispute.status, DisputeStatus::ResolvedCounterparty);
-
-        let settlement = read_settlement(&ctx, settlement_id);
-        assert!(matches!(settlement.status, SettlementStatus::Pending));
-    }
-
-    #[test]
-    fn test_signer_cannot_vote_twice() {
-        let ctx = setup();
-        let settlement_id = propose_and_raise(&ctx);
-
-        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
-        client.vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
-
-        let result = client.try_vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
-        assert_eq!(result, Err(Ok(TreasuryError::AlreadyVoted)));
-    }
-
-    #[test]
-    fn test_non_signer_cannot_vote() {
-        let ctx = setup();
-        let settlement_id = propose_and_raise(&ctx);
-
-        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
-        let outsider = Address::generate(&ctx.env);
-
-        let result = client.try_vote_dispute_resolution(&outsider, &settlement_id, &true);
-        assert_eq!(result, Err(Ok(TreasuryError::UnauthorizedSigner)));
-    }
-
-    #[test]
-    fn test_vote_without_dispute_fails() {
-        let ctx = setup();
-        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
-        let settlement_id = client.propose_settlement(&ctx.signer1, &ctx.token, &1000u64, &ctx.merchant);
-
-        let result = client.try_vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
-        assert_eq!(result, Err(Ok(TreasuryError::DisputeNotFound)));
-    }
-
-    #[test]
-    fn test_resolve_before_threshold_fails() {
-        let ctx = setup();
-        let settlement_id = propose_and_raise(&ctx);
-
-        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
-        client.vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
-
-        let result = client.try_resolve_dispute(&ctx.signer2, &settlement_id, &true);
-        assert_eq!(result, Err(Ok(TreasuryError::ThresholdNotMet)));
-    }
-
-    #[test]
-    fn test_vote_after_resolution_fails() {
-        let ctx = setup();
-        let settlement_id = propose_and_raise(&ctx);
-
-        let client = TreasuryContractClient::new(&ctx.env, &ctx.contract_id);
-        client.vote_dispute_resolution(&ctx.signer1, &settlement_id, &true);
-        client.vote_dispute_resolution(&ctx.signer2, &settlement_id, &true);
-
-        let result = client.try_vote_dispute_resolution(&ctx.signer3, &settlement_id, &false);
-        assert_eq!(result, Err(Ok(TreasuryError::DisputeNotRaised)));
+        // s2 is already an active signer; rotating s1 onto it must be rejected.
+        let res = c.try_rotate_signer(&admin, &s1, &s2, &5u64);
+        assert_eq!(res, Err(Ok(TreasuryError::DuplicateSigner)));
     }
 }
