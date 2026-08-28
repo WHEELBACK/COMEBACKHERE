@@ -159,6 +159,126 @@ brew services stop redis     # macOS
 
 Or remap the Docker Redis port as shown above.
 
+## Compromised SIGNER_SECRET_KEY — Incident Runbook
+
+If the `SIGNER_SECRET_KEY` used by the backend is suspected compromised,
+follow these steps immediately to limit damage and restore security.
+
+> **Scope:** This runbook covers the Stellar secret key stored in the
+> `SIGNER_SECRET_KEY` environment variable, which is used by multiple
+> backend routes (`threshold.ts`, `invoice-settings.ts`, `treasury.ts`,
+> `compliance.ts`, `invoices.ts`, `disputes.ts`, `release-escrow.ts`)
+> to sign contract calls.
+
+### Step 1 — Rotate the key
+
+Generate a new Stellar keypair:
+
+```sh
+# Using Stellar CLI
+stellar keys generate new-signer --network testnet
+NEW_PUBLIC_KEY=$(stellar keys address new-signer)
+NEW_SECRET_KEY=$(stellar keys show new-signer)
+```
+
+Or using the Stellar Laboratory:
+
+1. Go to https://laboratory.stellar.org/#account-creation
+2. Click **Generate** to create a new keypair
+3. Copy both the **Public Key** and **Secret Key**
+
+### Step 2 — Update the backend environment
+
+Replace `SIGNER_SECRET_KEY` in your deployment environment:
+
+```sh
+# For docker-compose deployments, update .env and restart
+echo "SIGNER_SECRET_KEY=$NEW_SECRET_KEY" >> .env
+docker compose restart backend
+```
+
+For cloud deployments (AWS, GCP, etc.), update the environment variable
+in your secrets manager and redeploy the backend service.
+
+### Step 3 — Register the new signer on-chain
+If the compromised key was registered as a treasury signer (not just the
+backend signing key), you must update the on-chain signer set.
+
+**Option A — Admin uses `set_signer` (if you have admin access):**
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT_ID \
+  --source $ADMIN_SECRET_KEY \
+  --rpc-url $SOROBAN_RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- set_signer \
+  --admin $ADMIN_PUBLIC_KEY \
+  --signer $NEW_PUBLIC_KEY \
+  --weight 1
+```
+
+Then remove the old signer:
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT_ID \
+  --source $ADMIN_SECRET_KEY \
+  --rpc-url $SOROBAN_RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- set_signer \
+  --admin $ADMIN_PUBLIC_KEY \
+  --signer $OLD_PUBLIC_KEY \
+  --weight 0
+```
+
+**Option B — Multi-sig rotation (if admin key is also compromised):**
+
+Use `propose_signer_rotation` and `approve_signer_rotation` per the
+mainnet deployment guide (see [docs/MAINNET_DEPLOYMENT.md](./MAINNET_DEPLOYMENT.md)).
+
+### Step 4 — Verify no unauthorised transactions
+
+Check recent transactions signed by the compromised key:
+
+```sh
+# Search Horizon for recent transactions from the old signer's account
+curl "https://horizon-testnet.stellar.org/accounts/$OLD_PUBLIC_KEY/transactions?limit=50" | jq '.records[] | {id: .id, created_at: .created_at, memo: .memo}'
+```
+
+On mainnet, replace `horizon-testnet.stellar.org` with `horizon.stellar.org`.
+
+Look for:
+- Unexpected `execute_settlement` calls
+- Unauthorised `propose_settlement` or `approve_settlement` calls
+- Any `set_signer` or `update_threshold` changes
+
+If you find unauthorised transactions, escalate immediately to the governance
+team and consider pausing the affected contracts.
+
+### Step 5 — Audit and monitor
+
+1. **Review backend logs** for any requests processed with the compromised key:
+
+   ```sh
+   docker compose logs backend 2>&1 | grep -i "signer\|settlement\|treasury"
+   ```
+
+2. **Check webhook delivery logs** for any settlement events that may have
+   been triggered.
+
+3. **Monitor the account** for the next 24 hours for any delayed transactions.
+
+### Prevention
+
+- Rotate signing keys on a regular schedule (every 12 months recommended).
+- Store `SIGNER_SECRET_KEY` in a secrets manager, never in version control.
+- Use separate keys for different environments (testnet vs mainnet).
+- Enable transaction monitoring and alerting on the signer account.
+
+> **See also:** [docs/MAINNET_DEPLOYMENT.md](./MAINNET_DEPLOYMENT.md)
+> for the full signing ceremony and key rotation procedures.
+
 ## General Tips
 
 - **Reset everything**: `docker compose down -v && docker compose up -d && ./scripts/deploy_testnet.sh`
