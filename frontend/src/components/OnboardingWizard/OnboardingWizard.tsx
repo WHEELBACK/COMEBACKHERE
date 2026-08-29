@@ -126,7 +126,11 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
         .getPublicKey()
         .then((key: string) => {
           setWalletAddress(key);
-          setCurrentStep(1);
+          // Only advance when coming from this step — do not jump forward if
+          // the user navigated back to re-inspect their wallet address.
+          if (currentStep === 0) {
+            setCurrentStep(1);
+          }
         })
         .catch(() => setError("Failed to connect wallet. Is Freighter installed?"));
     } else {
@@ -145,7 +149,10 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
       return;
     }
     setVerified(true);
-    setCurrentStep(2);
+    // Only advance when coming from this step.
+    if (currentStep === 1) {
+      setCurrentStep(2);
+    }
   }
 
   function handleCreateInvoice() {
@@ -160,7 +167,10 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
       return;
     }
     setInvoiceCreated(true);
-    setCurrentStep(3);
+    // Only advance when coming from this step.
+    if (currentStep === 2) {
+      setCurrentStep(3);
+    }
   }
 
   function handleNext() {
@@ -196,9 +206,19 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
     onComplete();
   }
 
+  /**
+   * Navigate to the previous step.
+   *
+   * All data entered on later steps is preserved in component state and in
+   * localStorage so that the user can come back to those steps without losing
+   * their progress. The wizard only clears state when the entire flow is
+   * completed successfully.
+   */
   function handleBack() {
     setError(null);
-    setCurrentStep((prev) => Math.max(0, prev - 1));
+    if (currentStep > 0) {
+      setCurrentStep((prev) => prev - 1);
+    }
   }
 
   function renderStepContent() {
@@ -323,13 +343,20 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
         </div>
 
         <div className="wizard-footer">
+          {/* Back button is shown on every step after the first */}
           {currentStep > 0 && (
-            <button className="wizard-btn wizard-btn--secondary" onClick={handleBack}>
+            <button
+              type="button"
+              className="wizard-btn wizard-btn--secondary"
+              onClick={handleBack}
+              aria-label={`Go back to step ${currentStep} of ${STEPS.length}`}
+            >
               Back
             </button>
           )}
           {currentStep < STEPS.length - 1 && (
             <button
+              type="button"
               className="wizard-btn wizard-btn--primary"
               onClick={handleNext}
               disabled={!canProceedToNext()}
