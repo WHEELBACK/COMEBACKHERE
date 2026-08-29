@@ -5,6 +5,9 @@
 # the locally built artifacts. Exits non-zero and prints a clear diff if any
 # mismatch is detected.
 #
+# Usage:
+#   ./verify.sh [--output {text|json}]
+#
 # Required environment variables:
 #   SOROBAN_RPC_URL        — Soroban RPC endpoint
 #   INVOICE_CONTRACT_ID    — deployed invoice contract ID  (C…)
@@ -17,6 +20,27 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Parse command-line arguments
+OUTPUT_FORMAT="text"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      OUTPUT_FORMAT="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Validate output format
+if [[ ! "$OUTPUT_FORMAT" =~ ^(text|json)$ ]]; then
+  echo "ERROR: --output must be 'text' or 'json'" >&2
+  exit 1
+fi
 
 # ── ABI metadata sanity check ─────────────────────────────────────────────────
 echo "Checking ABI metadata…"
@@ -47,6 +71,7 @@ CONTRACTS_DIR="${CONTRACTS_DIR:-$ROOT_DIR/../COMEBACKHERE-contracts/target/wasm3
 
 FAIL=0
 MISMATCHES=()
+CHECKS=()  # For JSON output: array of check results
 
 verify_contract() {
   local name="$1"
@@ -93,13 +118,19 @@ print(hashlib.sha256(wasm_bytes).hexdigest())
   fi
 
   if [[ "$local_hash" == "$deployed_hash" ]]; then
-    echo "  ✓ $name: hash match ($local_hash)"
+    if [[ "$OUTPUT_FORMAT" == "text" ]]; then
+      echo "  ✓ $name: hash match ($local_hash)"
+    fi
+    CHECKS+=("{\"contract\":\"$name\",\"status\":\"pass\",\"local_hash\":\"$local_hash\",\"deployed_hash\":\"$deployed_hash\"}")
   else
-    echo "  ✗ $name: HASH MISMATCH" >&2
-    echo "    local:    $local_hash" >&2
-    echo "    deployed: $deployed_hash" >&2
+    if [[ "$OUTPUT_FORMAT" == "text" ]]; then
+      echo "  ✗ $name: HASH MISMATCH" >&2
+      echo "    local:    $local_hash" >&2
+      echo "    deployed: $deployed_hash" >&2
+    fi
     FAIL=1
     MISMATCHES+=("$name")
+    CHECKS+=("{\"contract\":\"$name\",\"status\":\"fail\",\"local_hash\":\"$local_hash\",\"deployed_hash\":\"$deployed_hash\"}")
   fi
 }
 
@@ -118,13 +149,29 @@ verify_contract "compliance" \
   "$COMPLIANCE_CONTRACT_ID" \
   "$CONTRACTS_DIR/comebackhere_compliance.wasm"
 
-if (( FAIL )); then
-  echo ""
-  echo "VERIFICATION FAILED — the following contracts have WASM hash mismatches:" >&2
-  printf '  - %s\n' "${MISMATCHES[@]}" >&2
-  echo "Ensure you are comparing the correct build artifacts to the correct deployment." >&2
-  exit 1
+if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+  # Output JSON result
+  echo "{"
+  echo "  \"status\": \"$([ $FAIL -eq 0 ] && echo 'pass' || echo 'fail')\","
+  echo "  \"checks\": ["
+  for i in "${!CHECKS[@]}"; do
+    echo "    ${CHECKS[$i]}$([ $i -lt $((${#CHECKS[@]} - 1)) ] && echo ',' || echo '')"
+  done
+  echo "  ]"
+  echo "}"
+else
+  # Text output
+  if (( FAIL )); then
+    echo ""
+    echo "VERIFICATION FAILED — the following contracts have WASM hash mismatches:" >&2
+    printf '  - %s\n' "${MISMATCHES[@]}" >&2
+    echo "Ensure you are comparing the correct build artifacts to the correct deployment." >&2
+  else
+    echo ""
+    echo "All WASM hashes verified successfully."
+  fi
 fi
 
-echo ""
-echo "All WASM hashes verified successfully."
+if (( FAIL )); then
+  exit 1
+fi
