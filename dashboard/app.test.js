@@ -135,9 +135,9 @@ describe('getStatusBadge()', () => {
     loadAppScript();
   });
 
-  it('returns a span with badge-pending for unknown statuses', () => {
+  it('returns a span with badge-unknown (the safe fallback) for unknown statuses', () => {
     const badge = getStatusBadge('Unknown');
-    expect(badge).toContain('badge-pending');
+    expect(badge).toContain('badge-unknown');
     expect(badge).toContain('<span class="badge');
   });
 
@@ -312,5 +312,72 @@ describe('fetchInvoices() error handling', () => {
 
     const summary = document.getElementById('summary');
     expect(summary.querySelectorAll('.summary-card').length).toBe(7);
+  });
+});
+
+// ── Issue 4: Unknown-status fallback ─────────────────────────────────────────
+
+describe('unknown status fallback (getStatusBadge)', () => {
+  beforeAll(() => {
+    setupDOM();
+    loadAppScript();
+  });
+
+  it('applies badge-unknown class for an unrecognised status', () => {
+    const badge = getStatusBadge('FutureStatus');
+    expect(badge).toContain('badge-unknown');
+    expect(badge).toContain('<span class="badge');
+    expect(badge).toContain('FutureStatus');
+  });
+
+  it('applies badge-unknown for an empty string status', () => {
+    const badge = getStatusBadge('');
+    expect(badge).toContain('badge-unknown');
+  });
+
+  it('does NOT apply badge-unknown for known statuses', () => {
+    const known = ['Pending', 'Paid', 'Expired', 'Cancelled', 'RefundRequested', 'Released'];
+    for (const s of known) {
+      const badge = getStatusBadge(s);
+      expect(badge).not.toContain('badge-unknown');
+    }
+  });
+
+  it('renders an invoice with unknown status and applies the fallback badge class', () => {
+    setupDOM();
+    const invoice = {
+      id: 99,
+      merchant: 'GBR...X1',
+      customer: 'GBR...Y2',
+      amount: '100',
+      token: 'USDC',
+      status: 'ArchivedByNewContract',
+      created_at: 1719000000,
+      expires_at: 1719600000,
+    };
+    renderTable([invoice]);
+    const row = document.querySelector('#invoiceBody tr');
+    expect(row).not.toBeNull();
+    const badgeCell = row.querySelectorAll('td')[4];
+    expect(badgeCell.querySelector('.badge-unknown')).not.toBeNull();
+    expect(badgeCell.textContent).toContain('ArchivedByNewContract');
+  });
+
+  it('unknown status renders without crashing the whole table', () => {
+    setupDOM();
+    const invoices = getDemoInvoices();
+    const withUnknown = [...invoices, {
+      id: 100,
+      merchant: 'GBR...Z0',
+      customer: 'GBR...Z1',
+      amount: '999',
+      token: 'USDC',
+      status: 'BrandNewStatus',
+      created_at: 1719000000,
+      expires_at: 1719600000,
+    }];
+    renderTable(withUnknown);
+    const rows = document.querySelectorAll('#invoiceBody tr');
+    expect(rows.length).toBe(withUnknown.length);
   });
 });

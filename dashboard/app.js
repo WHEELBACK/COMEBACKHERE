@@ -9,6 +9,10 @@ const STATUS_COLORS = {
   Released: 'badge-released',
 };
 
+// Fallback badge class applied when a status is not present in STATUS_COLORS
+// (e.g. a new status added to the contract without updating this static dashboard).
+const DEFAULT_BADGE_CLASS = 'badge-unknown';
+
 let invoices = [];
 let sortField = 'id';
 let sortAsc = true;
@@ -43,7 +47,7 @@ function formatTimestamp(ts) {
 }
 
 function getStatusBadge(status) {
-  const cls = STATUS_COLORS[status] || 'badge-pending';
+  const cls = STATUS_COLORS[status] || DEFAULT_BADGE_CLASS;
   return `<span class="badge ${cls}">${status === 'RefundRequested' ? 'Refund Requested' : status}</span>`;
 }
 
