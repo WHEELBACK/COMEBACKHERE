@@ -49,7 +49,7 @@ function DisputeCard({ dispute, onVote }: { dispute: Dispute; onVote: (id: numbe
   }
 
   return (
-    <div className="dispute-card">
+    <div className={`dispute-card${resolved ? ' dispute-card--finalized' : ''}`}>
       <div className="dispute-card__header">
         <span className="dispute-card__id">Settlement #{dispute.settlement_id}</span>
         {resolved && <OutcomeBadge outcome={dispute.outcome!} />}
@@ -69,7 +69,15 @@ function DisputeCard({ dispute, onVote }: { dispute: Dispute; onVote: (id: numbe
         </div>
       </div>
 
-      {!resolved && (
+      {/* When the outcome is finalized, show a clear status notice instead of
+          vote buttons. The buttons are not rendered at all so that there is no
+          possibility of submitting a now-meaningless vote transaction. */}
+      {resolved ? (
+        <div className="dispute-card__finalized-notice" role="status" aria-live="polite">
+          <span className="dispute-card__finalized-icon" aria-hidden="true">✓</span>
+          Outcome finalized — voting is closed for this dispute.
+        </div>
+      ) : (
         <div className="dispute-card__actions" role="group" aria-label={`Vote on settlement #${dispute.settlement_id}`}>
           <button
             className="vote-btn vote-btn--claimant"
