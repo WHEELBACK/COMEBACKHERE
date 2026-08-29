@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useSigners } from '../../hooks/useSigners'
 import { SignerInfo } from '../../types'
+import { generateIdenticon } from '../../utils/identicon'
 import './SignerManagement.css'
 
 const STELLAR_ADDRESS_RE = /^[G][A-Z0-9]{55}$/
@@ -8,6 +9,22 @@ const STELLAR_ADDRESS_RE = /^[G][A-Z0-9]{55}$/
 function shorten(addr: string): string {
   if (!addr || addr.length < 12) return addr
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`
+}
+
+/**
+ * Renders a deterministic identicon for the given signer address.
+ * The SVG is generated entirely client-side with no network requests.
+ */
+function Identicon({ address, size = 32 }: { address: string; size?: number }) {
+  const svg = generateIdenticon(address, { size })
+  return (
+    <span
+      className="signer-identicon"
+      aria-label={`Identicon for ${shorten(address)}`}
+      role="img"
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  )
 }
 
 function ConfirmModal({
@@ -222,8 +239,11 @@ function SignerRow({
   return (
     <tr className="signer-row">
       <td className="signer-td signer-td--address" title={signer.address}>
-        <span className="address-full">{signer.address}</span>
-        <span className="address-short">{shorten(signer.address)}</span>
+        <span className="signer-td__address-wrap">
+          <Identicon address={signer.address} size={32} />
+          <span className="address-full">{signer.address}</span>
+          <span className="address-short">{shorten(signer.address)}</span>
+        </span>
       </td>
       <td className="signer-td">
         <span className="weight-badge">{signer.weight}</span>
