@@ -257,13 +257,63 @@ ceremony. The Ceremony Witness records each step.
 
 ### Emergency Rollback
 
-If a critical issue is discovered after deployment:
+If a critical issue is discovered after a deployment partially or fully
+succeeds, follow this procedure.
 
-1. The Lead Deployer opens an emergency deployment issue
-2. If the contracts support pause: execute `pause` via multi-sig to halt
-   operations immediately
-3. Follow the standard ceremony process for any corrective deployment
-4. Document the incident in a post-mortem within 48 hours
+#### What rollback does and does not do
+
+**Soroban contracts cannot be un-deployed.** Any contract that was submitted
+to the Stellar ledger during the failed deployment remains on-chain and is
+accessible by anyone with its contract ID. Rollback only restores the local
+`artifacts/addresses.json` address registry so that downstream services
+(backend, frontend) can be pointed back at the previous known-good deployment.
+
+#### Scripted rollback
+
+`scripts/deploy_mainnet.sh` backs up `artifacts/addresses.json` to
+`artifacts/addresses.json.bak` before overwriting it with new contract IDs.
+To restore the previous address registry:
+
+```sh
+scripts/deploy_mainnet.sh --rollback
+```
+
+The script will:
+
+1. Confirm that `artifacts/addresses.json.bak` exists (created during the
+   previous successful deployment).
+2. Save the current (potentially corrupt) `addresses.json` as a timestamped
+   forensic copy (e.g., `addresses.json.rollback-20260101T120000Z`).
+3. Restore `artifacts/addresses.json` from the backup.
+4. Print a detailed summary of contract-level implications and next steps.
+
+If no backup file exists (e.g., this was the first ever deployment), the
+script exits with an error and provides manual recovery instructions.
+
+#### Manual recovery when no backup is available
+
+If `artifacts/addresses.json.bak` does not exist, reconstruct
+`artifacts/addresses.json` from the on-chain deployment ceremony record:
+
+1. Open the deployment issue for the last known-good deployment.
+2. Locate the recorded contract IDs (invoice, treasury, compliance) and
+   transaction hashes.
+3. Manually write `artifacts/addresses.json` using the structure defined in
+   `artifacts/addresses.json.example`.
+4. Commit the restored file and open a PR referencing the incident.
+
+#### Procedure after rollback
+
+1. The Lead Deployer opens an emergency deployment issue documenting:
+   - The partial or failed deployment's contract IDs
+   - Which contracts were deployed but not initialized
+   - The rollback timestamp and the restored address set
+2. If any contract supports `pause`: execute `pause` via multi-sig to halt
+   operations on the abandoned contract immediately.
+3. Reconfigure backend production secrets to use the restored (previous)
+   contract IDs from `artifacts/addresses.json`.
+4. Follow the standard ceremony process for any corrective redeployment.
+5. Document the incident in a post-mortem within 48 hours.
 
 ---
 
