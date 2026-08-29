@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { Settlement, SignerInfo } from '../../types'
+import { useSettlementHistory, SettlementEvent } from '../../hooks/useSettlementHistory'
 import './SettlementDetail.css'
 
 interface SettlementDetailProps {
@@ -127,11 +128,107 @@ function ApprovalProgressBar({ current, required }: { current: number; required:
   )
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatEventTimestamp(ts: number): string {
+  return new Date(ts * 1000).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function statusDotClass(status: string): string {
+  const key = status.toLowerCase().replace(/\s+/g, '')
+  const known = ['pending', 'executed', 'partiallyexecuted', 'onhold', 'cancelled', 'proposed', 'approved']
+  return `status-timeline__dot status-timeline__dot--${known.includes(key) ? key : 'default'}`
+}
+
+// ── StatusTimeline ────────────────────────────────────────────────────────────
+
+interface StatusTimelineProps {
+  events: SettlementEvent[]
+  loading: boolean
+  error: string | null
+}
+
+function StatusTimeline({ events, loading, error }: StatusTimelineProps) {
+  if (loading) {
+    return (
+      <div className="status-timeline">
+        <h3 className="status-timeline__title">Status History</h3>
+        <p className="status-timeline__loading" role="status" aria-live="polite">
+          Loading history…
+        </p>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="status-timeline">
+        <h3 className="status-timeline__title">Status History</h3>
+        <p className="status-timeline__error" role="alert">
+          Failed to load history: {error}
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="status-timeline">
+      <h3 className="status-timeline__title">Status History</h3>
+      {events.length === 0 ? (
+        <p className="status-timeline__empty">No status history available.</p>
+      ) : (
+        <ol
+          className="status-timeline__list"
+          aria-label="Settlement status history"
+        >
+          {events.map((evt, idx) => (
+            <li key={idx} className="status-timeline__item">
+              <span
+                className={statusDotClass(evt.status)}
+                aria-hidden="true"
+              />
+              <div className="status-timeline__content">
+                <div className="status-timeline__status-row">
+                  <span className="status-timeline__status-label">{evt.status}</span>
+                  <time
+                    className="status-timeline__timestamp"
+                    dateTime={new Date(evt.timestamp * 1000).toISOString()}
+                  >
+                    {formatEventTimestamp(evt.timestamp)}
+                  </time>
+                </div>
+                {evt.actor && (
+                  <div className="status-timeline__actor" title={evt.actor}>
+                    by {shorten(evt.actor)}
+                  </div>
+                )}
+                {evt.note && (
+                  <div className="status-timeline__note">{evt.note}</div>
+                )}
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+// ── SettlementDetail ──────────────────────────────────────────────────────────
+
 export default function SettlementDetail({ settlement, threshold, signers }: SettlementDetailProps) {
   const totalWeight = useMemo(
     () => signers.reduce((sum, s) => sum + s.weight, 0),
     [signers],
   )
+
+  const { events, loading: historyLoading, error: historyError } = useSettlementHistory(settlement.id)
 
   return (
     <div className="settlement-detail">
@@ -175,6 +272,12 @@ export default function SettlementDetail({ settlement, threshold, signers }: Set
           <strong>Hold Reason:</strong> {settlement.hold_reason}
         </div>
       )}
+
+      <StatusTimeline
+        events={events}
+        loading={historyLoading}
+        error={historyError}
+      />
     </div>
   )
 }
