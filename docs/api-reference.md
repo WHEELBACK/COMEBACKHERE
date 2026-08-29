@@ -576,6 +576,9 @@ The service indexes `address_allowed`, `address_allowed_until`, `address_blocked
 COMEBACKHERE signs every outbound webhook POST with HMAC-SHA256 so your endpoint
 can verify payload authenticity before processing it.
 
+> For the full payload reference, retry schedule, idempotency guidance, and
+> language-specific verification examples, see
+> [Webhook Payload Reference](./webhooks.md).
 > **Security note**: this is a security-sensitive feature. Treat your signing
 > secret with the same care as a private key. Rotate it immediately if it is ever
 > exposed.
