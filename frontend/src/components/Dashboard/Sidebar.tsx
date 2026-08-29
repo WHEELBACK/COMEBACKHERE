@@ -1,14 +1,24 @@
 import { NavLink } from "react-router-dom";
+import { useSigners } from "../../hooks/useSigners";
 import "./Sidebar.css";
 
-const links = [
+interface NavItem {
+  to: string;
+  label: string;
+  icon: string;
+  /** When true, the link is only shown to wallets that are registered signers. */
+  adminOnly?: boolean;
+}
+
+const links: NavItem[] = [
   { to: "/invoices", label: "Invoices", icon: "receipt" },
   { to: "/settlements", label: "Settlements", icon: "account_balance" },
   { to: "/on-hold", label: "On-Hold", icon: "hold" },
-  { to: "/treasury", label: "Treasury", icon: "treasury" },
   { to: "/disputes", label: "Disputes", icon: "gavel" },
-  { to: "/signers", label: "Signers", icon: "signers" },
-  { to: "/settings", label: "Settings", icon: "settings" },
+  // Admin-only: visible only to registered signers / protocol operators
+  { to: "/treasury", label: "Treasury", icon: "treasury", adminOnly: true },
+  { to: "/signers", label: "Signers", icon: "signers", adminOnly: true },
+  { to: "/settings", label: "Settings", icon: "settings", adminOnly: true },
 ];
 
 const iconMap: Record<string, string> = {
@@ -21,7 +31,35 @@ const iconMap: Record<string, string> = {
   settings: "\u{2699}\u{FE0F}",
 };
 
-export default function Sidebar() {
+interface SidebarProps {
+  /**
+   * The Stellar public key of the currently-connected wallet.
+   * When undefined/null the component treats the visitor as unauthenticated
+   * and hides all admin-only links.
+   */
+  connectedAddress?: string | null;
+}
+
+export default function Sidebar({ connectedAddress }: SidebarProps) {
+  const { signers, loading: signersLoading } = useSigners();
+
+  /**
+   * Determine whether the connected wallet is a registered signer.
+   *
+   * We resolve this from the treasury signer list fetched via useSigners.
+   * While the signer list is still loading we conservatively hide admin links
+   * (fail-closed) to prevent a momentary flash of privileged navigation items
+   * to non-admin users.
+   */
+  const isAdmin =
+    !signersLoading &&
+    !!connectedAddress &&
+    signers.some(
+      (s) => s.address.toLowerCase() === connectedAddress.toLowerCase(),
+    );
+
+  const visibleLinks = links.filter((link) => !link.adminOnly || isAdmin);
+
   return (
     <aside className="sidebar" role="complementary" aria-label="Sidebar navigation">
       <div className="sidebar-header">
@@ -29,7 +67,7 @@ export default function Sidebar() {
         <p className="sidebar-subtitle">Merchant Dashboard</p>
       </div>
       <nav className="sidebar-nav" aria-label="Dashboard navigation">
-        {links.map((link) => (
+        {visibleLinks.map((link) => (
           <NavLink
             key={link.to}
             to={link.to}
