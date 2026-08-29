@@ -27,3 +27,70 @@
   font-size: 0.8rem;
   line-height: 1.4;
 }
+
+/* ---- Confirmation dialog ---- */
+.network-selector__confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.network-selector__confirm-dialog {
+  background: var(--color-surface, #fff);
+  border-radius: var(--radius, 8px);
+  padding: 24px;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.24);
+}
+
+.network-selector__confirm-title {
+  margin: 0 0 12px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.network-selector__confirm-body {
+  margin: 0 0 20px;
+  font-size: 0.9rem;
+  color: var(--color-text-muted, var(--color-text));
+  line-height: 1.5;
+}
+
+.network-selector__confirm-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.network-selector__btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--radius, 6px);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.network-selector__btn--danger {
+  background: var(--color-danger, #e53e3e);
+  color: #fff;
+}
+
+.network-selector__btn--danger:hover {
+  opacity: 0.9;
+}
+
+.network-selector__btn--secondary {
+  background: var(--color-input-border, #ccc);
+  color: var(--color-text);
+}
+
+.network-selector__btn--secondary:hover {
+  opacity: 0.85;
+}
