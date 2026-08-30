@@ -1,6 +1,8 @@
 name: CI - Post-Deployment Verification
 
 on:
+  schedule:
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       network:
@@ -21,8 +23,8 @@ jobs:
   deploy-testnet:
     name: deploy (testnet)
     runs-on: ubuntu-latest
-    # Only runs on manual dispatch or if wired into a release workflow.
-    if: github.event_name == 'workflow_dispatch'
+    # Deployment only runs on manual dispatch. The nightly scheduled run
+    # skips deployment and verifies the existing live testnet deployment.
 
     steps:
       - uses: actions/checkout@v4
@@ -46,10 +48,12 @@ jobs:
             ${{ runner.os }}-cargo-deploy-
 
       - name: Build WASM artifacts
+        if: github.event_name == 'workflow_dispatch'
         run: cargo build --target wasm32-unknown-unknown --release
         working-directory: COMEBACKHERE-contracts
 
       - name: Run deploy_testnet.sh
+        if: github.event_name == 'workflow_dispatch'
         env:
           STELLAR_NETWORK: ${{ github.event.inputs.network }}
           SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
@@ -61,10 +65,75 @@ jobs:
           COMPLIANCE_CONTRACT_ID: ${{ github.event.inputs.compliance_contract_id }}
         run: ./scripts/deploy_testnet.sh
 
+  resolve-live-addresses:
+    name: resolve live testnet contract IDs
+    runs-on: ubuntu-latest
+    # Resolves the currently deployed testnet contract IDs from the most
+    # recent successful manual deploy run so scheduled verification targets
+    # the live deployment instead of requiring manually supplied inputs.
+    outputs:
+      network: ${{ steps.addresses.outputs.network }}
+      invoice_contract_id: ${{ steps.addresses.outputs.invoice_contract_id }}
+      treasury_contract_id: ${{ steps.addresses.outputs.treasury_contract_id }}
+      compliance_contract_id: ${{ steps.addresses.outputs.compliance_contract_id }}
+
+    steps:
+      - name: Find latest successful deploy run
+        id: find-run
+        if: github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'ci-post-deploy-verify.yml',
+              event: 'workflow_dispatch',
+              status: 'success',
+              per_page: 5,
+            });
+            const run = data.workflow_runs[0];
+            if (!run) {
+              core.setFailed('No previous successful workflow_dispatch run found; cannot resolve live testnet contract IDs.');
+            } else {
+              core.setOutput('run_id', String(run.id));
+            }
+
+      - name: Download deployed addresses artifact
+        if: github.event_name == 'schedule'
+        uses: actions/download-artifact@v4
+        with:
+          name: deployed-addresses-testnet
+          run-id: ${{ steps.find-run.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract live testnet contract IDs
+        id: addresses
+        if: github.event_name == 'schedule'
+        run: |
+          python3 - <<'PYEOF'
+          import json
+          import os
+
+          with open('artifacts/addresses.json') as f:
+              data = json.load(f)
+
+          by_name = {c['name']: c['address'] for c in data.get('contracts', [])}
+
+          def emit(key, value):
+              with open(os.environ.get('GITHUB_OUTPUT'), 'a') as out:
+                  out.write(f"{key}={value}\n")
+
+          emit('network', data.get('network', 'testnet'))
+          emit('invoice_contract_id', by_name.get('invoice', ''))
+          emit('treasury_contract_id', by_name.get('treasury', ''))
+          emit('compliance_contract_id', by_name.get('compliance', ''))
+          PYEOF
+
   verify:
     name: post-deploy WASM hash verification
     runs-on: ubuntu-latest
-    needs: deploy-testnet
+    needs: [deploy-testnet, resolve-live-addresses]
 
     steps:
       - uses: actions/checkout@v4
@@ -94,10 +163,10 @@ jobs:
       - name: Run verify.sh
         env:
           SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
-          STELLAR_NETWORK: ${{ github.event.inputs.network }}
-          INVOICE_CONTRACT_ID: ${{ github.event.inputs.invoice_contract_id }}
-          TREASURY_CONTRACT_ID: ${{ github.event.inputs.treasury_contract_id }}
-          COMPLIANCE_CONTRACT_ID: ${{ github.event.inputs.compliance_contract_id }}
+          STELLAR_NETWORK: ${{ github.event.inputs.network || needs.resolve-live-addresses.outputs.network || 'testnet' }}
+          INVOICE_CONTRACT_ID: ${{ github.event.inputs.invoice_contract_id || needs.resolve-live-addresses.outputs.invoice_contract_id }}
+          TREASURY_CONTRACT_ID: ${{ github.event.inputs.treasury_contract_id || needs.resolve-live-addresses.outputs.treasury_contract_id }}
+          COMPLIANCE_CONTRACT_ID: ${{ github.event.inputs.compliance_contract_id || needs.resolve-live-addresses.outputs.compliance_contract_id }}
           CONTRACTS_DIR: COMEBACKHERE-contracts/target/wasm32-unknown-unknown/release
         run: ./scripts/verify.sh
 
@@ -111,14 +180,45 @@ jobs:
 
       - name: Run export_deployed_addresses.sh
         env:
-          STELLAR_NETWORK: ${{ github.event.inputs.network }}
-          INVOICE_CONTRACT_ID: ${{ github.event.inputs.invoice_contract_id }}
-          TREASURY_CONTRACT_ID: ${{ github.event.inputs.treasury_contract_id }}
-          COMPLIANCE_CONTRACT_ID: ${{ github.event.inputs.compliance_contract_id }}
+          STELLAR_NETWORK: ${{ github.event.inputs.network || needs.resolve-live-addresses.outputs.network || 'testnet' }}
+          INVOICE_CONTRACT_ID: ${{ github.event.inputs.invoice_contract_id || needs.resolve-live-addresses.outputs.invoice_contract_id }}
+          TREASURY_CONTRACT_ID: ${{ github.event.inputs.treasury_contract_id || needs.resolve-live-addresses.outputs.treasury_contract_id }}
+          COMPLIANCE_CONTRACT_ID: ${{ github.event.inputs.compliance_contract_id || needs.resolve-live-addresses.outputs.compliance_contract_id }}
         run: ./scripts/export_deployed_addresses.sh
 
       - name: Upload addresses artifact
         uses: actions/upload-artifact@v4
         with:
-          name: deployed-addresses-${{ github.event.inputs.network }}
+          name: deployed-addresses-${{ github.event.inputs.network || needs.resolve-live-addresses.outputs.network || 'testnet' }}
           path: artifacts/addresses.json
+
+  alert-schedule-failure:
+    name: alert on nightly verification failure
+    runs-on: ubuntu-latest
+    needs: [resolve-live-addresses, verify, export-addresses]
+    if: ${{ github.event_name == 'schedule' && (needs.resolve-live-addresses.result == 'failure' || needs.verify.result == 'failure' || needs.export-addresses.result == 'failure') }}
+    permissions:
+      issues: write
+
+    steps:
+      - name: Create alert issue on nightly failure
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Nightly post-deploy verification failed',
+              body: [
+                '## Nightly post-deploy verification failed',
+                '',
+                'The scheduled `ci-post-deploy-verify.yml` run detected drift or an outage in the live testnet deployment.',
+                '',
+                `- Workflow run: ${runUrl}`,
+                `- Trigger: ${context.eventName}`,
+                `- Ref: ${context.ref}`,
+                '',
+                'Investigate the linked run to determine whether the deployed contracts drifted from source or the testnet is unavailable.',
+              ].join('\n'),
+            });
