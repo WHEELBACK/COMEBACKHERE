@@ -96,5 +96,6 @@ Notes on edges that are deliberately absent from this diagram:
 
 - [docs/dev-environment.md](docs/dev-environment.md) — full local setup.
 - [docs/abi-snapshot-workflow.md](docs/abi-snapshot-workflow.md) — when and how to regenerate `abis/`.
+- [docs/contract-tree-feature-parity.md](docs/contract-tree-feature-parity.md) — feature parity between the canonical and legacy contract trees.
 - [docs/error-codes.md](docs/error-codes.md) — contract error enums and their meanings.
 - [SECURITY.md](SECURITY.md) — which paths handle fund-safety-critical code.
