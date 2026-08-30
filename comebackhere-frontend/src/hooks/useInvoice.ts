@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react"
-import type { Invoice, PaymentResult } from "../types"
+import { InvoiceStatus, type Invoice, type PaymentResult } from "../types"
 import { fetchInvoice, payInvoice, cancelInvoice, requestRefund, releaseEscrow } from "../utils/soroban"
 
 const CONTRACT_ID = import.meta.env.VITE_INVOICE_CONTRACT_ID as string
@@ -52,11 +52,21 @@ export function useInvoice(): UseInvoiceReturn {
       if (!invoice) {
         return { success: false, error: "No invoice loaded" }
       }
-      const result = await cancelInvoice(CONTRACT_ID, Number(invoice.id), publicKey)
-      if (result.success) {
-        await loadInvoice(Number(invoice.id))
+      const previousInvoice = invoice
+      setInvoice({ ...invoice, status: InvoiceStatus.Cancelled })
+
+      try {
+        const result = await cancelInvoice(CONTRACT_ID, Number(invoice.id), publicKey)
+        if (result.success) {
+          await loadInvoice(Number(invoice.id))
+        } else {
+          setInvoice(previousInvoice)
+        }
+        return result
+      } catch (error) {
+        setInvoice(previousInvoice)
+        throw error
       }
-      return result
     },
     [invoice, loadInvoice]
   )

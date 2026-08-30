@@ -157,6 +157,41 @@ describe("usePolling", () => {
     expect(result.current.lastUpdatedAt).toBeNull()
   })
 
+  it("does not fire twice in quick succession when the tab becomes visible right before an interval tick", async () => {
+    const callback = vi.fn().mockResolvedValue(undefined)
+    renderHook(() => usePolling(callback, { interval: 5_000, enabled: true }))
+
+    await tick()        // call 1 (immediate, visible)
+    await tick(4_000)   // 1s away from the next scheduled tick
+
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => true,
+    })
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"))
+      await Promise.resolve()
+    })
+
+    // Tab hidden: the old interval must be torn down, so advancing well past
+    // the original schedule should not produce another call.
+    await tick(10_000)
+    expect(callback).toHaveBeenCalledTimes(1)
+
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      get: () => false,
+    })
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"))
+      await Promise.resolve()
+    })
+
+    // Resuming triggers exactly one immediate poll, not a duplicate from a
+    // stale interval landing around the same time.
+    expect(callback).toHaveBeenCalledTimes(2)
+  })
+
   it("polls multiple intervals correctly", async () => {
     const callback = vi.fn().mockResolvedValue(undefined)
     renderHook(() => usePolling(callback, { interval: 5_000, enabled: true }))

@@ -224,6 +224,21 @@ mod tests {
     use super::*;
     use axum::{routing::get, Router};
     use axum_test::TestServer;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serialises tests that mutate the process-wide environment so they don't
+    /// race with one another when run in parallel.
+    fn env_guard() -> &'static Mutex<()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD.get_or_init(|| Mutex::new(()))
+    }
+
+    fn restore_env(key: &str, value: Option<String>) {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
 
     fn make_server(max_requests: u64, window_secs: u64) -> TestServer {
         let config = RateLimitConfig {
@@ -376,5 +391,120 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
             "different IP should have its own independent bucket"
         );
+    }
+
+    // ── extract_ip ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_ip_takes_first_trimmed_ip_from_comma_list() {
+        use axum::http::header::{HeaderName, HeaderValue};
+        let mut req = Request::new(Body::from(""));
+        req.headers_mut().insert(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("1.2.3.4, 5.6.7.8, 9.9.9.9"),
+        );
+        assert_eq!(extract_ip(&req), "1.2.3.4");
+    }
+
+    #[test]
+    fn test_extract_ip_trims_whitespace_in_first_entry() {
+        use axum::http::header::{HeaderName, HeaderValue};
+        let mut req = Request::new(Body::from(""));
+        req.headers_mut().insert(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("  10.0.0.1  , 192.168.0.2"),
+        );
+        assert_eq!(extract_ip(&req), "10.0.0.1");
+    }
+
+    #[test]
+    fn test_extract_ip_falls_back_to_connect_info_without_xff() {
+        let mut req = Request::new(Body::from(""));
+        let addr: SocketAddr = "203.0.113.9:1234".parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        assert_eq!(extract_ip(&req), "203.0.113.9");
+    }
+
+    #[test]
+    fn test_extract_ip_skips_empty_xff_and_uses_connect_info() {
+        use axum::http::header::{HeaderName, HeaderValue};
+        let mut req = Request::new(Body::from(""));
+        req.headers_mut().insert(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("   "),
+        );
+        let addr: SocketAddr = "198.51.100.7:9999".parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        assert_eq!(extract_ip(&req), "198.51.100.7");
+    }
+
+    #[test]
+    fn test_extract_ip_returns_unknown_without_xff_or_connect_info() {
+        let req = Request::new(Body::from(""));
+        assert_eq!(extract_ip(&req), "unknown");
+    }
+
+    // ── Bucket rolling window ───────────────────────────────────────────────
+
+    #[test]
+    fn test_bucket_sliding_window_purges_stale_and_rolls() {
+        let t0 = Instant::now();
+        let window = Duration::from_millis(100);
+        let mut bucket = Bucket::new();
+
+        // Two requests inside the window are allowed (max = 3).
+        assert!(bucket.check_and_record(t0, window, 3).0);
+        assert!(bucket.check_and_record(t0 + Duration::from_millis(50), window, 3).0);
+
+        // A third request still inside the window fills the bucket → blocked.
+        assert!(!bucket.check_and_record(t0 + Duration::from_millis(60), window, 3).0);
+
+        // After t0 + window, the first entries expire, so a slot frees up and
+        // the rolling window allows the request again.
+        assert!(bucket.check_and_record(t0 + Duration::from_millis(150), window, 3).0);
+    }
+
+    // ── from_env ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_from_env_parses_points_and_duration() {
+        let _guard = env_guard().lock().unwrap();
+        let old_points = std::env::var("RATE_LIMIT_POINTS").ok();
+        let old_duration = std::env::var("RATE_LIMIT_DURATION").ok();
+        std::env::set_var("RATE_LIMIT_POINTS", "120");
+        std::env::set_var("RATE_LIMIT_DURATION", "30");
+        let cfg = RateLimitConfig::from_env();
+        restore_env("RATE_LIMIT_POINTS", old_points);
+        restore_env("RATE_LIMIT_DURATION", old_duration);
+        assert_eq!(cfg.max_requests, 120);
+        assert_eq!(cfg.window, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_from_env_uses_defaults_when_unset() {
+        let _guard = env_guard().lock().unwrap();
+        let old_points = std::env::var("RATE_LIMIT_POINTS").ok();
+        let old_duration = std::env::var("RATE_LIMIT_DURATION").ok();
+        std::env::remove_var("RATE_LIMIT_POINTS");
+        std::env::remove_var("RATE_LIMIT_DURATION");
+        let cfg = RateLimitConfig::from_env();
+        restore_env("RATE_LIMIT_POINTS", old_points);
+        restore_env("RATE_LIMIT_DURATION", old_duration);
+        assert_eq!(cfg.max_requests, 60);
+        assert_eq!(cfg.window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_from_env_ignores_invalid_values_and_uses_defaults() {
+        let _guard = env_guard().lock().unwrap();
+        let old_points = std::env::var("RATE_LIMIT_POINTS").ok();
+        let old_duration = std::env::var("RATE_LIMIT_DURATION").ok();
+        std::env::set_var("RATE_LIMIT_POINTS", "not-a-number");
+        std::env::set_var("RATE_LIMIT_DURATION", "abc");
+        let cfg = RateLimitConfig::from_env();
+        restore_env("RATE_LIMIT_POINTS", old_points);
+        restore_env("RATE_LIMIT_DURATION", old_duration);
+        assert_eq!(cfg.max_requests, 60);
+        assert_eq!(cfg.window, Duration::from_secs(60));
     }
 }

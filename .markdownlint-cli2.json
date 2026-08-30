@@ -1,0 +1,4 @@
+{
+  "config": ".markdownlint.json",
+  "customRules": ["./markdownlint-rule-relative-links.cjs"]
+}

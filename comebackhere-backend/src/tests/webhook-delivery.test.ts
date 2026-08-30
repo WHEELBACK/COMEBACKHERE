@@ -174,6 +174,54 @@ describe("deliverWebhook", () => {
     expect(capturedHeaders[1]["X-Idempotency-Key"]).toBe("invoice_paid:7")
   })
 
+  it("forwards X-Request-Id on every attempt when a correlationId is supplied", async () => {
+    const capturedHeaders: Record<string, string>[] = []
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      capturedHeaders.push((init?.headers ?? {}) as Record<string, string>)
+      return { status: 500 } as Response
+    }) as unknown as typeof fetch
+
+    const payload = makePayload()
+
+    await deliverWebhook("https://example.com/hook", payload, 3, fetchFn, noDelay, "trace-abc-123")
+
+    expect(capturedHeaders).toHaveLength(3)
+    expect(capturedHeaders.every((h) => h["X-Request-Id"] === "trace-abc-123")).toBe(true)
+  })
+
+  it("omits X-Request-Id when no correlationId is supplied", async () => {
+    const capturedHeaders: Record<string, string>[] = []
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      capturedHeaders.push((init?.headers ?? {}) as Record<string, string>)
+      return { status: 200 } as Response
+    }) as unknown as typeof fetch
+
+    const payload = makePayload()
+
+    await deliverWebhook("https://example.com/hook", payload, 2, fetchFn, noDelay)
+
+    expect(capturedHeaders).toHaveLength(1)
+    expect(capturedHeaders[0]["X-Request-Id"]).toBeUndefined()
+  })
+
+  it("records the correlationId as request_id in the delivery record", async () => {
+    const fetchFn = makeFetch([{ status: 200 }])
+    const payload = makePayload()
+
+    const record = await deliverWebhook("https://example.com/hook", payload, 5, fetchFn, noDelay, "trace-xyz-789")
+
+    expect(record.request_id).toBe("trace-xyz-789")
+  })
+
+  it("records request_id as null when no correlationId is supplied", async () => {
+    const fetchFn = makeFetch([{ status: 503 }])
+    const payload = makePayload()
+
+    const record = await deliverWebhook("https://example.com/hook", payload, 1, fetchFn, noDelay)
+
+    expect(record.request_id).toBeNull()
+  })
+
   it("records the last HTTP status code in the delivery record", async () => {
     const fetchFn = makeFetch([{ status: 404 }, { status: 429 }, { status: 200 }])
     const payload = makePayload()

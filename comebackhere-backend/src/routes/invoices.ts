@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express"
-import { Keypair, Networks, TransactionBuilder, BASE_FEE, Contract, nativeToScVal, SorobanRpc, xdr } from "stellar-sdk"
+import { Keypair, TransactionBuilder, BASE_FEE, Contract, nativeToScVal, SorobanRpc, xdr } from "stellar-sdk"
 import { connectMongo, getInvoicesCollection, type InvoiceRecord, type InvoiceStatus } from "../db/mongo.js"
+import { requireEnv } from "../lib/env.js"
 import { cacheGet, cacheSet } from "../lib/cache.js"
 import { validateBody, validateParams } from "../middleware/validate.js"
 import { createInvoiceSchema, invoiceIdParamSchema } from "../schemas/index.js"
@@ -254,18 +255,12 @@ router.get("/", async (req: Request, res: Response) => {
 router.get("/:id", validateParams(invoiceIdParamSchema), async (req: Request, res: Response) => {
   const { id } = req.params
 
-  const rpcUrl = process.env.SOROBAN_RPC_URL
-  const contractId = process.env.INVOICE_CONTRACT_ID
-  const networkPassphrase = process.env.NETWORK_PASSPHRASE ?? Networks.STANDALONE
-
-  if (!rpcUrl || !contractId) {
-    res.status(503).json({ error: "Service misconfiguration: missing required environment variables" })
-    return
-  }
+  const env = requireEnv(res, { invoiceContractId: "INVOICE_CONTRACT_ID" })
+  if (!env) return
 
   try {
-    const server = new SorobanRpc.Server(rpcUrl)
-    const contract = new Contract(contractId)
+    const server = new SorobanRpc.Server(env.rpcUrl)
+    const contract = new Contract(env.invoiceContractId)
 
     // Build a read-only ledger entry query for the invoice
     const ledgerKey = contract.getFootprint()
@@ -275,7 +270,7 @@ router.get("/:id", validateParams(invoiceIdParamSchema), async (req: Request, re
     const entries = await server.getLedgerEntries(
       xdr.LedgerKey.contractData(
         new xdr.LedgerKeyContractData({
-          contract: new Contract(contractId).address().toScAddress(),
+          contract: new Contract(env.invoiceContractId).address().toScAddress(),
           key: nativeToScVal(BigInt(id), { type: "u64" }),
           durability: xdr.ContractDataDurability.persistent(),
         })
@@ -368,24 +363,20 @@ router.get("/:id", validateParams(invoiceIdParamSchema), async (req: Request, re
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.post("/", validateBody(createInvoiceSchema), async (req: Request, res: Response) => {
-  const rpcUrl = process.env.SOROBAN_RPC_URL
-  const contractId = process.env.INVOICE_CONTRACT_ID
-  const signerSecret = process.env.SIGNER_SECRET_KEY
-  const networkPassphrase = process.env.NETWORK_PASSPHRASE ?? Networks.STANDALONE
-
-  if (!rpcUrl || !contractId || !signerSecret) {
-    res.status(503).json({ error: "Service misconfiguration: missing required environment variables" })
-    return
-  }
+  const env = requireEnv(res, {
+    invoiceContractId: "INVOICE_CONTRACT_ID",
+    signerSecret: "SIGNER_SECRET_KEY",
+  })
+  if (!env) return
 
   try {
-    const client = buildSorobanClient(rpcUrl)
+    const client = buildSorobanClient(env.rpcUrl)
     const result = await createInvoice(
       req.body as CreateInvoiceBody,
       client,
-      contractId,
-      signerSecret,
-      networkPassphrase
+      env.invoiceContractId,
+      env.signerSecret,
+      env.networkPassphrase
     )
 
     const db = await connectMongo()

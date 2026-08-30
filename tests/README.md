@@ -40,3 +40,4 @@ export USDC_CONTRACT_ID=<deployed USDC token contract>
 | Pay invoice | Pays the invoice with USDC via the payer account |
 | Escrow release | Proposes, approves, and executes a treasury settlement |
 | Invalid amount | Verifies rejection of invoices below the minimum amount |
+| Refund flow | Exercises create -> pay -> refund-request -> refund end-to-end |

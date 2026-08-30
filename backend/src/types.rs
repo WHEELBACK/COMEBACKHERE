@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,8 +40,33 @@ pub struct InvoiceResponse {
     pub created_at: Option<u64>,
 }
 
+/// Request body for POST /invoices (create)
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateInvoiceRequest {
+    /// The Stellar public key of the merchant creating the invoice (G…).
+    pub merchant: String,
+    /// Token identifier (e.g. "USDC").
+    pub token: String,
+    /// Invoice amount in stroops / smallest unit.
+    pub amount_usdc: u64,
+    /// Gross amount including fees, in stroops.
+    pub gross_usdc: u64,
+    /// Seconds from now until the invoice expires.
+    pub expires_in_seconds: u64,
+    /// Signed XDR transaction envelope (base64) invoking `create_invoice`.
+    pub signed_xdr: String,
+}
+
+/// Response body for POST /invoices (create)
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CreateInvoiceResponse {
+    pub invoice_id: u64,
+    pub status: InvoiceStatus,
+    pub transaction_hash: String,
+}
+
 /// Request body for POST /invoices/:id/pay
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PayRequest {
     /// The Stellar public key of the payer (G…).
     pub payer: String,
@@ -49,14 +75,14 @@ pub struct PayRequest {
 }
 
 /// Response body for POST /invoices/:id/pay
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PayResponse {
     pub status: InvoiceStatus,
     pub transaction_hash: String,
 }
 
 /// Request body for POST /invoices/:id/cancel
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CancelRequest {
     /// The Stellar public key of the merchant (G…).
     pub merchant: String,
@@ -65,14 +91,14 @@ pub struct CancelRequest {
 }
 
 /// Response body for POST /invoices/:id/cancel
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CancelResponse {
     pub status: InvoiceStatus,
     pub transaction_hash: String,
 }
 
 /// Request body for POST /invoices/:id/refund
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RefundRequest {
     /// The Stellar public key of the payer/customer (G…).
     pub payer: String,
@@ -81,32 +107,32 @@ pub struct RefundRequest {
 }
 
 /// Response body for POST /invoices/:id/refund
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RefundResponse {
     pub status: InvoiceStatus,
     pub transaction_hash: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
     pub code: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthStatus {
     Healthy,
     Degraded,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DependencyHealth {
     pub status: HealthStatus,
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RpcHealthResponse {
     pub status: HealthStatus,
     pub dependencies: std::collections::BTreeMap<String, DependencyHealth>,

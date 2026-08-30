@@ -173,4 +173,33 @@ describe("useWallet", () => {
     expect(result.current.connected).toBe(true)
     expect(result.current.address).toBe(fakeAddress)
   })
+
+  it("refreshes the active address and network while connected", async () => {
+    vi.useFakeTimers()
+    const firstAddress = "GBDXOEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+    const secondAddress = "GDR7WUDWIKWVBCUBVYLOGT3TJF5FGNQU5U7TACDDA2ZIQUETGGUET5XT"
+    const getAddress = vi.fn().mockResolvedValueOnce({ address: firstAddress }).mockResolvedValue({ address: secondAddress })
+    const getNetworkDetails = vi.fn()
+      .mockResolvedValueOnce({ passphrase: "Test SDF Network ; September 2015" })
+      .mockResolvedValue({ passphrase: "Public Global Stellar Network ; September 2015" })
+    vi.stubGlobal("freighterApi", { getAddress, getNetworkDetails })
+
+    const { result } = renderHook(() => useWallet())
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(result.current.address).toBe(firstAddress)
+    expect(result.current.network).toBe("Test SDF Network ; September 2015")
+
+    await act(async () => {
+      vi.advanceTimersByTime(5000)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(result.current.address).toBe(secondAddress)
+    expect(result.current.network).toBe("Public Global Stellar Network ; September 2015")
+    vi.useRealTimers()
+  })
 })

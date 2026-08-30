@@ -2,13 +2,13 @@ import { Router, type Request, type Response } from "express"
 import { Keypair, nativeToScVal, Address } from "stellar-sdk"
 import {
   buildSorobanClient,
-  getNetworkPassphrase,
   getOnChainSettlement,
   getSettlementSimulation,
   getTokenBalance,
   submitContractCall,
   type SorobanClient,
 } from "../lib/soroban.js"
+import { requireEnv } from "../lib/env.js"
 import { connectMongo, getSettlementsCollection } from "../db/mongo.js"
 import { validateBody } from "../middleware/validate.js"
 import {
@@ -48,29 +48,6 @@ export function setBalanceCache(data: Array<{ token: string; balance: string }>)
 /** Immediately invalidates the balance cache (call after execute-settlement / withdrawal). */
 export function invalidateBalanceCache(): void {
   _balanceCache = null
-}
-
-function requireEnv(res: Response): {
-  rpcUrl: string
-  treasuryContractId: string
-  usdcContractId: string
-  signerSecret: string
-  networkPassphrase: string
-} | null {
-  const rpcUrl = process.env.SOROBAN_RPC_URL
-  const treasuryContractId = process.env.TREASURY_CONTRACT_ID
-  const usdcContractId = process.env.USDC_CONTRACT_ID
-  const signerSecret = process.env.SIGNER_SECRET_KEY
-  const networkPassphrase = getNetworkPassphrase()
-
-  if (!rpcUrl || !treasuryContractId || !usdcContractId || !signerSecret) {
-    res.status(503).json({
-      error: "Service misconfiguration: missing required environment variables",
-    })
-    return null
-  }
-
-  return { rpcUrl, treasuryContractId, usdcContractId, signerSecret, networkPassphrase }
 }
 
 /**
@@ -160,7 +137,11 @@ router.get("/pending-settlements", async (_req: Request, res: Response) => {
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.post("/approve-settlement", validateBody(settlementIdSchema), async (req: Request, res: Response) => {
-  const env = requireEnv(res)
+  const env = requireEnv(res, {
+    treasuryContractId: "TREASURY_CONTRACT_ID",
+    usdcContractId: "USDC_CONTRACT_ID",
+    signerSecret: "SIGNER_SECRET_KEY",
+  })
   if (!env) return
 
   const settlementId = req.body.settlement_id
@@ -370,7 +351,11 @@ export async function executeSettlementWithBalanceCheck(
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.post("/execute-settlement", validateBody(executeSettlementSchema), async (req: Request, res: Response) => {
-  const env = requireEnv(res)
+  const env = requireEnv(res, {
+    treasuryContractId: "TREASURY_CONTRACT_ID",
+    usdcContractId: "USDC_CONTRACT_ID",
+    signerSecret: "SIGNER_SECRET_KEY",
+  })
   if (!env) return
 
   const { settlement_id: settlementId, token_contract } = req.body as { settlement_id: number; token_contract?: string }
@@ -757,7 +742,11 @@ router.post("/escalate-hold", validateBody(escalateHoldSchema), async (req: Requ
  * Results are cached for up to 5 seconds to reduce Soroban RPC load (#212).
  */
 router.get("/balances", async (_req: Request, res: Response) => {
-  const env = requireEnv(res)
+  const env = requireEnv(res, {
+    treasuryContractId: "TREASURY_CONTRACT_ID",
+    usdcContractId: "USDC_CONTRACT_ID",
+    signerSecret: "SIGNER_SECRET_KEY",
+  })
   if (!env) return
 
   // #212 — serve from cache when available

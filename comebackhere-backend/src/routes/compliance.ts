@@ -1,17 +1,78 @@
 import { Router, type Request, type Response } from "express"
 import {
   Keypair,
-  Networks,
   TransactionBuilder,
   BASE_FEE,
   Contract,
   nativeToScVal,
   SorobanRpc,
 } from "stellar-sdk"
-import { validateBody } from "../middleware/validate.js"
-import { allowBodySchema, blockBodySchema } from "../schemas/index.js"
+import { validateBody, validateQuery } from "../middleware/validate.js"
+import { allowBodySchema, blockBodySchema, complianceAuditQuerySchema } from "../schemas/index.js"
+import { connectMongo, getComplianceAuditCollection } from "../db/mongo.js"
 
 const router = Router()
+
+/**
+ * @swagger
+ * /compliance/audit:
+ *   get:
+ *     tags: [Compliance]
+ *     summary: List compliance audit events
+ *     parameters:
+ *       - in: query
+ *         name: address
+ *         schema: { type: string }
+ *       - in: query
+ *         name: event_type
+ *         schema: { type: string, enum: [address_allowed, address_allowed_until, address_blocked, address_cleared] }
+ *       - in: query
+ *         name: from_ledger
+ *         schema: { type: integer, minimum: 0 }
+ *       - in: query
+ *         name: to_ledger
+ *         schema: { type: integer, minimum: 0 }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+ *     responses:
+ *       200:
+ *         description: Paginated compliance audit events
+ *       400:
+ *         description: Invalid query parameters
+ *       500:
+ *         description: Database error
+ * Returns the durable, normalized audit trail emitted by the compliance contract.
+ */
+router.get("/audit", validateQuery(complianceAuditQuerySchema), async (req: Request, res: Response) => {
+  try {
+    const query = req.query as unknown as {
+      address?: string; event_type?: string; from_ledger?: number; to_ledger?: number; page: number; limit: number
+    }
+    const filter: Record<string, unknown> = {}
+    if (query.address) filter.address = query.address
+    if (query.event_type) filter.event_type = query.event_type
+    if (query.from_ledger !== undefined || query.to_ledger !== undefined) {
+      filter.ledger = {
+        ...(query.from_ledger !== undefined ? { $gte: query.from_ledger } : {}),
+        ...(query.to_ledger !== undefined ? { $lte: query.to_ledger } : {}),
+      }
+    }
+    const skip = (query.page - 1) * query.limit
+    const collection = getComplianceAuditCollection(await connectMongo())
+    const [events, total] = await Promise.all([
+      collection.find(filter).sort({ ledger: -1, _id: -1 }).skip(skip).limit(query.limit).toArray(),
+      collection.countDocuments(filter),
+    ])
+    res.json({ events, page: query.page, limit: query.limit, total, has_more: skip + events.length < total })
+  } catch (err: unknown) {
+    const status = (err as any)?.status ?? 500
+    res.status(status).json({ error: err instanceof Error ? err.message : String(err) })
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Shared Soroban client type — mirrors invoices.ts convention
@@ -32,15 +93,6 @@ function buildSorobanClient(rpcUrl: string): SorobanClient {
     sendTransaction: (tx) => server.sendTransaction(tx),
     getTransaction: (hash) => server.getTransaction(hash),
   }
-}
-
-function envOrError(): { rpcUrl: string; contractId: string; signerSecret: string; networkPassphrase: string } | null {
-  const rpcUrl = process.env.SOROBAN_RPC_URL
-  const contractId = process.env.COMPLIANCE_CONTRACT_ID
-  const signerSecret = process.env.SIGNER_SECRET_KEY
-  const networkPassphrase = process.env.NETWORK_PASSPHRASE ?? Networks.STANDALONE
-  if (!rpcUrl || !contractId || !signerSecret) return null
-  return { rpcUrl, contractId, signerSecret, networkPassphrase }
 }
 
 // ---------------------------------------------------------------------------
@@ -138,11 +190,11 @@ router.post("/allow", validateBody(allowBodySchema), async (req: Request, res: R
 
   const { address, until } = req.body as { address: string; until?: number }
 
-  const env = envOrError()
-  if (!env) {
-    res.status(503).json({ error: "Service misconfiguration: missing required environment variables" })
-    return
-  }
+  const env = requireEnv(res, {
+    complianceContractId: "COMPLIANCE_CONTRACT_ID",
+    signerSecret: "SIGNER_SECRET_KEY",
+  })
+  if (!env) return
 
   try {
     const client = buildSorobanClient(env.rpcUrl)
@@ -155,7 +207,7 @@ router.post("/allow", validateBody(allowBodySchema), async (req: Request, res: R
       operation as "allow_address" | "allow_address_until",
       args,
       client,
-      env.contractId,
+      env.complianceContractId,
       env.signerSecret,
       env.networkPassphrase
     )
@@ -190,11 +242,11 @@ router.post("/block", validateBody(blockBodySchema), async (req: Request, res: R
 
   const { address } = req.body as { address: string }
 
-  const env = envOrError()
-  if (!env) {
-    res.status(503).json({ error: "Service misconfiguration: missing required environment variables" })
-    return
-  }
+  const env = requireEnv(res, {
+    complianceContractId: "COMPLIANCE_CONTRACT_ID",
+    signerSecret: "SIGNER_SECRET_KEY",
+  })
+  if (!env) return
 
   // Audit log — admin identity + timestamp
   console.log(`[compliance] block_address admin="${adminKey}" address="${address}" ts="${new Date().toISOString()}"`)
@@ -205,7 +257,7 @@ router.post("/block", validateBody(blockBodySchema), async (req: Request, res: R
       "block_address",
       [nativeToScVal(address, { type: "address" })],
       client,
-      env.contractId,
+      env.complianceContractId,
       env.signerSecret,
       env.networkPassphrase
     )

@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from "express"
+import { requireEnv } from "../lib/env.js"
 import { validateBody } from "../middleware/validate.js"
 import { voteBodySchema, createDisputeSchema } from "../schemas/index.js"
 
@@ -208,14 +209,7 @@ export interface CreateDisputeBody {
 router.post("/", validateBody(createDisputeSchema), async (req: Request, res: Response) => {
   const body = req.body as CreateDisputeBody
 
-  const rpcUrl = process.env.SOROBAN_RPC_URL
-  const settlementContractId = process.env.SETTLEMENT_CONTRACT_ID
-  const signerSecret = process.env.SIGNER_SECRET_KEY
-
-  if (!rpcUrl || !settlementContractId || !signerSecret) {
-    res.status(503).json({ error: "Service misconfiguration: missing required environment variables" })
-    return
-  }
+  if (!requireEnv(res, { settlementContractId: "SETTLEMENT_CONTRACT_ID", signerSecret: "SIGNER_SECRET_KEY" })) return
 
   const settlementId = body.settlement_id
   const claimantAddress = body.claimant_address

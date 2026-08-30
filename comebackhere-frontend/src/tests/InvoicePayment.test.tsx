@@ -322,6 +322,32 @@ describe("InvoicePayment — confirmation modals", () => {
   })
 })
 
+describe("InvoicePayment — open dispute", () => {
+  it("shows a dispute notice instead of the generic status text when RefundRequested", () => {
+    mockUseWallet.connected = true
+    mockUseInvoice.invoice = { ...mockInvoice, status: "RefundRequested" }
+    render(<InvoicePayment />)
+    expect(screen.getByText(/dispute in progress/i)).toBeInTheDocument()
+    expect(screen.queryByText(/not available for payment/i)).not.toBeInTheDocument()
+  })
+
+  it("does not show a dispute notice for other non-pending statuses", () => {
+    mockUseWallet.connected = true
+    mockUseInvoice.invoice = { ...mockInvoice, status: "Paid" }
+    render(<InvoicePayment />)
+    expect(screen.queryByText(/dispute in progress/i)).not.toBeInTheDocument()
+  })
+
+  it("hides pay and cancel actions while a dispute is open", () => {
+    mockUseWallet.connected = true
+    mockUseWallet.address = mockInvoice.merchant
+    mockUseInvoice.invoice = { ...mockInvoice, status: "RefundRequested" }
+    render(<InvoicePayment />)
+    expect(screen.queryByRole("button", { name: /pay invoice/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /cancel invoice/i })).not.toBeInTheDocument()
+  })
+})
+
 describe("InvoicePayment — connect button disabled while connecting", () => {
   it("shows connecting state", () => {
     mockUseWallet.connecting = true

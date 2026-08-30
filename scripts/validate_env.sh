@@ -1,8 +1,57 @@
 #!/usr/bin/env bash
+# Validate required environment variables before deployment.
+#
+# Usage:
+#   scripts/validate_env.sh [ENV_FILE] [ENV_LABEL] [--env testnet|mainnet|local]
+#
+# The --env flag selects which set of required variables to enforce:
+#   local    — minimal set for local Docker Compose development
+#   testnet  — standard set for testnet deployments
+#   mainnet  — strict set for mainnet deployments (no test keys, additional checks)
+#
+# If --env is not specified, the script validates the common baseline variables
+# (compatible with prior behaviour).
+#
+# Examples:
+#   scripts/validate_env.sh .env.testnet testnet --env testnet
+#   scripts/validate_env.sh .env.mainnet mainnet  --env mainnet
+#   scripts/validate_env.sh .env.local   local    --env local
 set -euo pipefail
 
 ENV_FILE="${1:-}"
 ENV_LABEL="${2:-deployment}"
+ENV_MODE=""
+
+# Parse --env flag from remaining arguments
+for arg in "$@"; do
+  case "$arg" in
+    --env)
+      # next iteration will capture the value
+      ;;
+  esac
+done
+
+# Robust flag parsing: scan all args for --env <mode>
+i=1
+for arg in "$@"; do
+  if [[ "$arg" == "--env" ]]; then
+    next_i=$((i + 1))
+    eval "ENV_MODE=\"\${${next_i}:-}\""
+    break
+  fi
+  i=$((i + 1))
+done
+
+# Validate the mode value if provided
+if [[ -n "$ENV_MODE" ]]; then
+  case "$ENV_MODE" in
+    local|testnet|mainnet) ;;
+    *)
+      echo "Error: --env must be one of: local, testnet, mainnet (got '$ENV_MODE')." >&2
+      exit 1
+      ;;
+  esac
+fi
 
 if [[ -n "$ENV_FILE" && -f "$ENV_FILE" ]]; then
   # shellcheck disable=SC1090
@@ -115,6 +164,8 @@ require_any_var() {
   return 1
 }
 
+# ── common baseline variables (all modes) ────────────────────────────────────
+
 if ! require_any_var "Set SOROBAN_RPC_URL (or RPC_URL) to your Soroban RPC endpoint." "SOROBAN_RPC_URL" "RPC_URL"; then
   :
 fi
@@ -135,6 +186,97 @@ fi
 if ! require_any_var "Set ADMIN_SECRET_KEY (or SECRET_KEY) to the corresponding Stellar secret key for deployment signing." "ADMIN_SECRET_KEY" "SECRET_KEY"; then
   :
 fi
+
+# ── mode-specific variable checks ────────────────────────────────────────────
+
+case "$ENV_MODE" in
+
+  local)
+    # Local development: RPC is typically the local Docker Compose node.
+    # Verify that the RPC URL points to localhost or a local address.
+    _rpc_url="${SOROBAN_RPC_URL:-${RPC_URL:-}}"
+    if [[ -n "$_rpc_url" && "$_rpc_url" != *"localhost"* && "$_rpc_url" != *"127.0.0.1"* && "$_rpc_url" != *"0.0.0.0"* ]]; then
+      echo "Warning: --env local is set but SOROBAN_RPC_URL ('$_rpc_url') does not appear to point to a local node." >&2
+      echo "Hint: For local mode, use http://localhost:8000/soroban/rpc or similar." >&2
+    fi
+    ;;
+
+  testnet)
+    # Testnet: requires STELLAR_NETWORK to be explicitly set to 'testnet'.
+    if ! require_var "STELLAR_NETWORK" "Set STELLAR_NETWORK=testnet for testnet deployments."; then
+      :
+    else
+      if [[ "${STELLAR_NETWORK}" != "testnet" ]]; then
+        echo "Error: --env testnet requires STELLAR_NETWORK=testnet (got '${STELLAR_NETWORK}')." >&2
+        invalid+=("STELLAR_NETWORK")
+      fi
+    fi
+    # Testnet also requires deployed contract IDs to be present.
+    if ! require_var "INVOICE_CONTRACT_ID" "Set INVOICE_CONTRACT_ID to the deployed testnet invoice contract address."; then
+      :
+    fi
+    if ! require_var "TREASURY_CONTRACT_ID" "Set TREASURY_CONTRACT_ID to the deployed testnet treasury contract address."; then
+      :
+    fi
+    if ! require_var "COMPLIANCE_CONTRACT_ID" "Set COMPLIANCE_CONTRACT_ID to the deployed testnet compliance contract address."; then
+      :
+    fi
+    ;;
+
+  mainnet)
+    # Mainnet: strictest checks. Secret keys must not use testnet-only values,
+    # and the network passphrase must match the Stellar mainnet passphrase.
+    MAINNET_PASSPHRASE="Public Global Stellar Network ; September 2015"
+
+    _passphrase="${SOROBAN_NETWORK_PASSPHRASE:-${NETWORK_PASSPHRASE:-}}"
+    if [[ -n "$_passphrase" && "$_passphrase" != "$MAINNET_PASSPHRASE" ]]; then
+      echo "Error: --env mainnet requires SOROBAN_NETWORK_PASSPHRASE to equal the Stellar mainnet passphrase." >&2
+      echo "  Expected: '$MAINNET_PASSPHRASE'" >&2
+      echo "  Got:      '$_passphrase'" >&2
+      invalid+=("SOROBAN_NETWORK_PASSPHRASE")
+    fi
+
+    if ! require_var "STELLAR_NETWORK" "Set STELLAR_NETWORK=mainnet for mainnet deployments."; then
+      :
+    else
+      if [[ "${STELLAR_NETWORK}" != "mainnet" ]]; then
+        echo "Error: --env mainnet requires STELLAR_NETWORK=mainnet (got '${STELLAR_NETWORK}')." >&2
+        invalid+=("STELLAR_NETWORK")
+      fi
+    fi
+
+    # Deployed contract IDs are required for mainnet.
+    if ! require_var "INVOICE_CONTRACT_ID" "Set INVOICE_CONTRACT_ID to the deployed mainnet invoice contract address."; then
+      :
+    fi
+    if ! require_var "TREASURY_CONTRACT_ID" "Set TREASURY_CONTRACT_ID to the deployed mainnet treasury contract address."; then
+      :
+    fi
+    if ! require_var "COMPLIANCE_CONTRACT_ID" "Set COMPLIANCE_CONTRACT_ID to the deployed mainnet compliance contract address."; then
+      :
+    fi
+
+    # USDC contract ID is required on mainnet.
+    if ! require_var "USDC_CONTRACT_ID" "Set USDC_CONTRACT_ID to the official USDC asset contract ID on Stellar mainnet."; then
+      :
+    fi
+
+    # Reject obviously-testnet RPC URLs on mainnet mode.
+    _rpc_url="${SOROBAN_RPC_URL:-${RPC_URL:-}}"
+    if [[ -n "$_rpc_url" && "$_rpc_url" == *"testnet"* ]]; then
+      echo "Error: --env mainnet is set but SOROBAN_RPC_URL ('$_rpc_url') contains 'testnet'. Use a mainnet RPC endpoint." >&2
+      invalid+=("SOROBAN_RPC_URL")
+    fi
+
+    # Warn if RPC points to localhost — unusual for mainnet.
+    if [[ -n "$_rpc_url" && ( "$_rpc_url" == *"localhost"* || "$_rpc_url" == *"127.0.0.1"* ) ]]; then
+      echo "Warning: --env mainnet is set but SOROBAN_RPC_URL ('$_rpc_url') points to localhost. Confirm this is intentional." >&2
+    fi
+    ;;
+
+esac
+
+# ── final summary ─────────────────────────────────────────────────────────────
 
 if (( ${#missing[@]} > 0 )); then
   echo "Missing required environment variables:" >&2

@@ -54,18 +54,33 @@ export function usePolling(
     // Fire once immediately when enabled / address changes.
     runPoll()
 
-    const id = setInterval(runPoll, interval)
+    let id: ReturnType<typeof setInterval> | null = null
+    const startInterval = () => {
+      if (id === null) id = setInterval(runPoll, interval)
+    }
+    const stopInterval = () => {
+      if (id !== null) {
+        clearInterval(id)
+        id = null
+      }
+    }
 
-    // Pause/resume on visibility change.
+    // Only tick while the tab is visible; tearing the timer down entirely
+    // while hidden avoids waking up on every interval just to no-op.
+    if (!document.hidden) startInterval()
+
     const handleVisibilityChange = () => {
-      if (!document.hidden) {
+      if (document.hidden) {
+        stopInterval()
+      } else {
         runPoll()
+        startInterval()
       }
     }
     document.addEventListener("visibilitychange", handleVisibilityChange)
 
     return () => {
-      clearInterval(id)
+      stopInterval()
       document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
   }, [enabled, interval, runPoll])

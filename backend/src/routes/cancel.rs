@@ -6,8 +6,9 @@ use axum::{
 };
 
 use crate::extractors::ValidatedBody;
-use crate::soroban::SorobanClient;
-use crate::types::{CancelRequest, CancelResponse, ErrorResponse};
+use crate::idempotency::IdempotencyStore;
+use crate::types::{CancelRequest, ErrorResponse};
+use crate::AppState;
 
 #[utoipa::path(
     post,
@@ -27,6 +28,7 @@ use crate::types::{CancelRequest, CancelResponse, ErrorResponse};
 pub async fn cancel_invoice(
     State(state): State<AppState>,
     Path(id): Path<u64>,
+    headers: HeaderMap,
     ValidatedBody(body): ValidatedBody<CancelRequest>,
 ) -> impl IntoResponse {
     // ── Idempotency check ────────────────────────────────────────────────────
@@ -93,8 +95,10 @@ mod tests {
         Router,
     };
     use axum_test::TestServer;
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio::net::TcpListener;
 
     fn make_app() -> Router {
         let state = AppState {
@@ -112,15 +116,76 @@ mod tests {
             .with_state(state)
     }
 
+    const MERCHANT: &str =
+        "GMERCHANT0000000000000000000000000000000000000000000000000000";
+    const PAYER: &str =
+        "GPAYER0000000000000000000000000000000000000000000000000000";
+
+    /// Mock Soroban RPC returning a single Pending invoice owned by `MERCHANT`
+    /// and a success response for `sendTransaction`.
+    async fn spawn_mock_rpc() -> SocketAddr {
+        use serde_json::json;
+
+        let app = Router::new().route(
+            "/soroban/rpc",
+            post(|axum::Json(payload): axum::Json<serde_json::Value>| async move {
+                let method = payload
+                    .get("method")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("");
+                let body = match method {
+                    "simulateTransaction" => json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "map": [
+                                {"key": "id", "val": 1u64},
+                                {"key": "merchant", "val": MERCHANT},
+                                {"key": "payer", "val": PAYER},
+                                {"key": "status", "val": 0u32},
+                                {"key": "amount_usdc", "val": 100u64},
+                                {"key": "gross_usdc", "val": 100u64},
+                            ]
+                        }
+                    }),
+                    "sendTransaction" => json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": { "hash": "txhash123" }
+                    }),
+                    _ => json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "error": { "code": -32601, "message": "method not found" }
+                    }),
+                };
+                axum::Json(body)
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        addr
+    }
+
+    fn make_state(rpc_addr: &str) -> AppState {
+        AppState {
+            client: Arc::new(SorobanClient::new(
+                rpc_addr.to_string(),
+                "CONTRACT_ID".to_string(),
+                rpc_addr.to_string(),
+            )),
+            idempotency: IdempotencyStore::new(Duration::from_secs(86_400)),
+        }
+    }
+
     #[tokio::test]
     async fn test_cancel_invoice_missing_body_returns_422() {
-        let client = SorobanClient::new(
-            "http://127.0.0.1:19999/soroban/rpc".to_string(),
-            "CONTRACT_ID".to_string(),
-            "https://horizon.stellar.org".to_string(),
-        );
-        let app = make_app(client);
-        let server = TestServer::new(app).unwrap();
+        let server = TestServer::new(make_app()).unwrap();
 
         // No JSON body → 415 Unsupported Media Type (no Content-Type header)
         // or 422 Unprocessable Entity (JSON Content-Type but invalid body)
@@ -135,13 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_invoice_malformed_body_returns_422() {
-        let client = SorobanClient::new(
-            "http://127.0.0.1:19999/soroban/rpc".to_string(),
-            "CONTRACT_ID".to_string(),
-            "https://horizon.stellar.org".to_string(),
-        );
-        let app = make_app(client);
-        let server = TestServer::new(app).unwrap();
+        let server = TestServer::new(make_app()).unwrap();
 
         // Malformed (non-JSON) body → 422 Unprocessable Entity
         let resp = server
@@ -154,13 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_invoice_unreachable_rpc_returns_error() {
-        let client = SorobanClient::new(
-            "http://127.0.0.1:19999/soroban/rpc".to_string(),
-            "CONTRACT_ID".to_string(),
-            "https://horizon.stellar.org".to_string(),
-        );
-        let app = make_app(client);
-        let server = TestServer::new(app).unwrap();
+        let server = TestServer::new(make_app()).unwrap();
 
         let resp = server
             .post("/invoices/1/cancel")
@@ -178,26 +231,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_invoice_unauthorized_merchant_returns_403() {
-        use axum::{
-            routing::post,
-            Router,
-        };
-        use std::sync::Arc;
-
+        let rpc_addr = spawn_mock_rpc().await;
         let app = Router::new()
             .route("/invoices/:id/cancel", post(cancel_invoice))
-            .with_state(Arc::new(SorobanClient::new(
-                "http://127.0.0.1:19999/soroban/rpc".to_string(),
-                "CONTRACT_ID".to_string(),
-                "https://horizon.stellar.org".to_string(),
-            )));
+            .with_state(make_state(&format!("http://{rpc_addr}/soroban/rpc")));
 
         let server = TestServer::new(app).unwrap();
 
+        // A merchant different from the one recorded on the invoice is rejected.
         let resp = server
             .post("/invoices/1/cancel")
             .json(&serde_json::json!({
-                "merchant": "GMERCHANT0000000000000000000000000000000000000000000000000",
+                "merchant": "GOTHER00000000000000000000000000000000000000000000000000000",
                 "signed_xdr": "AAAA=="
             }))
             .await;
@@ -209,75 +254,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_invoice_authorized_merchant_succeeds() {
-        use axum::{
-            routing::{get, post},
-            Router,
-        };
-        use serde_json::json;
-        use std::{net::SocketAddr, sync::Arc};
-        use tokio::net::TcpListener;
-
-        let mock_rpc = Router::new()
-            .route(
-                "/soroban/rpc",
-                post(move |axum::Json(payload): axum::Json<serde_json::Value>| async move {
-                    if payload
-                        .get("method")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("") == "simulateTransaction"
-                    {
-                        return axum::Json(json!({
-                            "jsonrpc": "2.0",
-                            "id": 1,
-                            "result": {
-                                "map": [
-                                    {"key": "id", "val": 1u64},
-                                    {"key": "merchant", "val": "GMERCHANT0000000000000000000000000000000000000000000000000"},
-                                    {"key": "payer", "val": "GPAYER0000000000000000000000000000000000000000000000000"},
-                                    {"key": "status", "val": 0u32},
-                                    {"key": "amount_usdc", "val": 100u64},
-                                    {"key": "gross_usdc", "val": 100u64},
-                                ]
-                            }
-                        }));
-                    }
-                    if payload
-                        .get("method")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("") == "sendTransaction"
-                    {
-                        return axum::Json(json!({
-                            "jsonrpc": "2.0",
-                            "id": 2,
-                            "result": {"hash": "txhash123"}
-                        }));
-                    }
-                    StatusCode::NOT_FOUND
-                }),
-            );
-
-        let rpc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let rpc_addr = rpc_listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(rpc_listener, mock_rpc).await.unwrap();
-        });
-
-        let client = Arc::new(SorobanClient::new(
-            format!("http://{rpc_addr}/soroban/rpc"),
-            "CONTRACT_ID".to_string(),
-            format!("http://{rpc_addr}"),
-        ));
-
+        let rpc_addr = spawn_mock_rpc().await;
         let app = Router::new()
             .route("/invoices/:id/cancel", post(cancel_invoice))
-            .with_state(client);
+            .with_state(make_state(&format!("http://{rpc_addr}/soroban/rpc")));
 
         let server = TestServer::new(app).unwrap();
 
         let resp = server
             .post("/invoices/1/cancel")
             .json(&serde_json::json!({
-                "merchant": "GMERCHANT0000000000000000000000000000000000000000000000000",
+                "merchant": MERCHANT,
                 "signed_xdr": "AAAA=="
             }))
             .await;

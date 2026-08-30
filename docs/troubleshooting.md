@@ -181,6 +181,12 @@ delivery.
 - Otherwise the backend generates a new UUID v4 and attaches it to both the
   request context (`res.locals.requestId`) and the response header.
 
+When the backend delivers webhook events to a merchant endpoint, the same
+`X-Request-Id` is forwarded as a header on the outbound POST (every retry
+included), so merchants can correlate a delivery with the original request in
+their own logs. It is also recorded as `request_id` on the webhook delivery
+record.
+
 ### Filtering logs by correlation ID
 
 Capture the ID from a response and grep backend logs:

@@ -3,6 +3,10 @@ name = "comebackhere-backend"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "comebackhere_backend"
+path = "src/lib.rs"
+
 [[bin]]
 name = "server"
 path = "src/main.rs"
@@ -17,6 +21,10 @@ anyhow = "1"
 base64 = "0.22"
 hex = "0.4"
 tower = { version = "0.5", features = ["util"] }
+dashmap = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+utoipa = { version = "4", features = ["axum_extras"] }
 
 [dev-dependencies]
 axum-test = "14"

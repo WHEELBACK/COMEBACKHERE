@@ -2,36 +2,15 @@ import { Router, type Request, type Response } from "express"
 import { Keypair, nativeToScVal } from "stellar-sdk"
 import {
   buildSorobanClient,
-  getNetworkPassphrase,
   simulateContractRead,
   submitContractCall,
   type SorobanClient,
 } from "../lib/soroban.js"
+import { requireEnv } from "../lib/env.js"
 import { validateBody } from "../middleware/validate.js"
 import { graceWindowSchema } from "../schemas/index.js"
 
 const router = Router()
-
-function requireEnv(res: Response): {
-  rpcUrl: string
-  invoiceContractId: string
-  signerSecret: string
-  networkPassphrase: string
-} | null {
-  const rpcUrl = process.env.SOROBAN_RPC_URL
-  const invoiceContractId = process.env.INVOICE_CONTRACT_ID
-  const signerSecret = process.env.SIGNER_SECRET_KEY
-  const networkPassphrase = getNetworkPassphrase()
-
-  if (!rpcUrl || !invoiceContractId || !signerSecret) {
-    res.status(503).json({
-      error: "Service misconfiguration: missing required environment variables",
-    })
-    return null
-  }
-
-  return { rpcUrl, invoiceContractId, signerSecret, networkPassphrase }
-}
 
 /**
  * @openapi
@@ -58,7 +37,10 @@ function requireEnv(res: Response): {
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.get("/grace-window", async (_req: Request, res: Response) => {
-  const env = requireEnv(res)
+  const env = requireEnv(res, {
+    invoiceContractId: "INVOICE_CONTRACT_ID",
+    signerSecret: "SIGNER_SECRET_KEY",
+  })
   if (!env) return
 
   try {
@@ -161,7 +143,10 @@ export async function setGraceWindow(
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.post("/grace-window", validateBody(graceWindowSchema), async (req: Request, res: Response) => {
-  const env = requireEnv(res)
+  const env = requireEnv(res, {
+    invoiceContractId: "INVOICE_CONTRACT_ID",
+    signerSecret: "SIGNER_SECRET_KEY",
+  })
   if (!env) return
 
   const graceWindowSeconds = req.body.grace_window_seconds

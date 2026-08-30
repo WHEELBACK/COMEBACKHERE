@@ -6,8 +6,9 @@ use axum::{
 };
 
 use crate::extractors::ValidatedBody;
-use crate::soroban::SorobanClient;
+use crate::idempotency::IdempotencyStore;
 use crate::types::{ErrorResponse, PayRequest};
+use crate::AppState;
 
 #[utoipa::path(
     post,
@@ -27,6 +28,7 @@ use crate::types::{ErrorResponse, PayRequest};
 pub async fn pay_invoice(
     State(state): State<AppState>,
     Path(id): Path<u64>,
+    headers: HeaderMap,
     ValidatedBody(body): ValidatedBody<PayRequest>,
 ) -> impl IntoResponse {
     // ── Idempotency check ────────────────────────────────────────────────────
@@ -112,18 +114,6 @@ mod tests {
     #[tokio::test]
     async fn test_pay_invoice_missing_body_returns_4xx() {
         let server = TestServer::new(make_app()).unwrap();
-        let resp = server
-            .post("/invoices/1/pay")
-            .content_type("application/json")
-            .bytes(axum::body::Bytes::new())
-            .await;
-        assert!(
-            resp.status_code().is_client_error(),
-            "missing body should return a 4xx, got {}",
-            resp.status_code()
-        );
-        let app = make_app(client);
-        let server = TestServer::new(app).unwrap();
 
         // No JSON body → 415 Unsupported Media Type (no Content-Type header)
         // or 422 Unprocessable Entity (JSON Content-Type but invalid body)
@@ -138,13 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pay_invoice_malformed_body_returns_422() {
-        let client = SorobanClient::new(
-            "http://127.0.0.1:19999/soroban/rpc".to_string(),
-            "CONTRACT_ID".to_string(),
-            "https://horizon.stellar.org".to_string(),
-        );
-        let app = make_app(client);
-        let server = TestServer::new(app).unwrap();
+        let server = TestServer::new(make_app()).unwrap();
 
         // Malformed (non-JSON) body → 422 Unprocessable Entity
         let resp = server

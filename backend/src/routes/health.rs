@@ -85,12 +85,12 @@ mod tests {
     use std::{net::SocketAddr, sync::Arc};
     use tokio::net::TcpListener;
 
-    async fn spawn_mock_dependencies(healthy: bool) -> SocketAddr {
+    async fn spawn_mock_dependencies(rpc_healthy: bool, horizon_healthy: bool) -> SocketAddr {
         let app = Router::new()
             .route(
                 "/soroban/rpc",
                 post(move || async move {
-                    if healthy {
+                    if rpc_healthy {
                         (
                             StatusCode::OK,
                             axum::Json(json!({
@@ -108,7 +108,7 @@ mod tests {
             .route(
                 "/health",
                 get(move || async move {
-                    if healthy {
+                    if horizon_healthy {
                         StatusCode::OK.into_response()
                     } else {
                         StatusCode::SERVICE_UNAVAILABLE.into_response()
@@ -125,24 +125,42 @@ mod tests {
         addr
     }
 
-    #[tokio::test]
-    async fn returns_200_when_all_dependencies_are_healthy() {
-        let mock_addr = spawn_mock_dependencies(true).await;
-        let client = Arc::new(SorobanClient::new(
-            format!("http://{mock_addr}/soroban/rpc"),
-            "contract".to_string(),
-            format!("http://{mock_addr}"),
-        ));
+    /// Start the backend's health route against mock dependencies and return
+    /// the backend's bound address.
+    async fn spawn_health_server(client: Arc<SorobanClient>) -> SocketAddr {
+        use crate::idempotency::IdempotencyStore;
+        use std::time::Duration;
 
+        let state = crate::AppState {
+            client,
+            idempotency: IdempotencyStore::new(Duration::from_secs(86_400)),
+        };
         let app = Router::new()
             .route("/health/rpc", get(get_rpc_health))
             .with_state(state);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let health_addr = listener.local_addr().unwrap();
+        let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app.into_make_service()).await.unwrap();
         });
+
+        addr
+    }
+
+    async fn client_for(mock_addr: SocketAddr) -> Arc<SorobanClient> {
+        Arc::new(SorobanClient::new(
+            format!("http://{mock_addr}/soroban/rpc"),
+            "contract".to_string(),
+            format!("http://{mock_addr}"),
+        ))
+    }
+
+    #[tokio::test]
+    async fn returns_200_when_all_dependencies_are_healthy() {
+        let mock_addr = spawn_mock_dependencies(true, true).await;
+        let client = client_for(mock_addr).await;
+        let health_addr = spawn_health_server(client).await;
 
         let response = reqwest::get(format!("http://{health_addr}/health/rpc"))
             .await
@@ -152,22 +170,9 @@ mod tests {
 
     #[tokio::test]
     async fn returns_503_when_any_dependency_is_degraded() {
-        let mock_addr = spawn_mock_dependencies(false).await;
-        let client = Arc::new(SorobanClient::new(
-            format!("http://{mock_addr}/soroban/rpc"),
-            "contract".to_string(),
-            format!("http://{mock_addr}"),
-        ));
-
-        let app = Router::new()
-            .route("/health/rpc", get(get_rpc_health))
-            .with_state(client);
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let health_addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service()).await.unwrap();
-        });
+        let mock_addr = spawn_mock_dependencies(false, false).await;
+        let client = client_for(mock_addr).await;
+        let health_addr = spawn_health_server(client).await;
 
         let response = reqwest::get(format!("http://{health_addr}/health/rpc"))
             .await
@@ -184,22 +189,9 @@ mod tests {
     #[tokio::test]
     async fn returns_503_with_soroban_rpc_degraded_when_only_rpc_is_unhealthy() {
         // rpc_healthy=false, horizon_healthy=true  →  partial degradation
-        let addr = spawn_test_server(false, true).await;
-        let client = Arc::new(SorobanClient::new(
-            format!("http://{addr}/soroban/rpc"),
-            "contract".to_string(),
-            format!("http://{addr}"),
-        ));
-
-        let app = Router::new()
-            .route("/health/rpc", get(get_rpc_health))
-            .with_state(state);
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let health_addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service()).await.unwrap();
-        });
+        let mock_addr = spawn_mock_dependencies(false, true).await;
+        let client = client_for(mock_addr).await;
+        let health_addr = spawn_health_server(client).await;
 
         let response = reqwest::get(format!("http://{health_addr}/health/rpc"))
             .await
@@ -210,25 +202,25 @@ mod tests {
 
         let body: serde_json::Value = response.json().await.unwrap();
 
-        // The overall status field should be "Degraded".
+        // The overall status field should be "degraded" (snake_case).
         assert_eq!(
             body["status"].as_str().unwrap(),
-            "Degraded",
-            "expected overall status to be Degraded, got: {body}"
+            "degraded",
+            "expected overall status to be degraded, got: {body}"
         );
 
-        // soroban_rpc dependency must be reported as Degraded.
+        // soroban_rpc dependency must be reported as degraded.
         assert_eq!(
             body["dependencies"]["soroban_rpc"]["status"].as_str().unwrap(),
-            "Degraded",
-            "expected soroban_rpc to be Degraded, got: {body}"
+            "degraded",
+            "expected soroban_rpc to be degraded, got: {body}"
         );
 
-        // horizon dependency must still be reported as Healthy.
+        // horizon dependency must still be reported as healthy.
         assert_eq!(
             body["dependencies"]["horizon"]["status"].as_str().unwrap(),
-            "Healthy",
-            "expected horizon to be Healthy, got: {body}"
+            "healthy",
+            "expected horizon to be healthy, got: {body}"
         );
     }
 }

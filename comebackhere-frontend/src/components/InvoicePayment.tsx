@@ -119,6 +119,8 @@ export function InvoicePayment() {
 
   const canCancel = isMerchant && invoice?.status === "Pending"
 
+  const hasOpenDispute = invoice?.status === "RefundRequested"
+
   return (
     <div className="payment-flow">
       <h1>Invoice Payment</h1>
@@ -172,6 +174,15 @@ export function InvoicePayment() {
             <h2>Invoice #<CopyableText text={String(invoice.id)} label="Copy invoice ID" /></h2>
             <StatusBadge status={invoice.status} />
           </div>
+
+          {hasOpenDispute && (
+            <div className="message message--warning" role="status" aria-live="polite">
+              <strong>Dispute in progress.</strong> A refund has been requested for this
+              invoice, which opens an escrow dispute and holds the funds. Payment,
+              cancellation, and escrow release are unavailable until the dispute is
+              resolved.
+            </div>
+          )}
 
           <div className="invoice-card__body">
             <div className="detail-row">
@@ -236,7 +247,7 @@ export function InvoicePayment() {
               </button>
             )}
 
-            {connected && invoice.status !== "Pending" && (
+            {connected && invoice.status !== "Pending" && !hasOpenDispute && (
               <p className="status-text">
                 This invoice is not available for payment
                 (status: {invoice.status}).

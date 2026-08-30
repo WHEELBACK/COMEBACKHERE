@@ -2,14 +2,25 @@ import { useState, useEffect, useCallback } from "react"
 
 interface FreighterApi {
   getAddress: () => Promise<{ address: string }>
+  getNetworkDetails?: () => Promise<{ passphrase?: string }>
 }
 
 interface WindowWithFreighter extends Window {
   freighterApi?: FreighterApi
 }
 
+async function getNetworkPassphrase(freighterApi: FreighterApi): Promise<string | null> {
+  try {
+    const networkDetails = await freighterApi.getNetworkDetails?.()
+    return networkDetails?.passphrase ?? null
+  } catch {
+    return null
+  }
+}
+
 interface WalletState {
   address: string | null
+  network: string | null
   connected: boolean
   connecting: boolean
   error: string | null
@@ -38,6 +49,7 @@ function isWalletLockedError(error: unknown): boolean {
 export function useWallet() {
   const [wallet, setWallet] = useState<WalletState>({
     address: null,
+    network: null,
     connected: false,
     connecting: false,
     error: null,
@@ -61,8 +73,10 @@ export function useWallet() {
 
       try {
         const { address } = await freighterApi.getAddress()
+        const network = await getNetworkPassphrase(freighterApi)
         setWallet({
           address,
+          network,
           connected: true,
           connecting: false,
           error: null,
@@ -75,6 +89,7 @@ export function useWallet() {
 
         setWallet({
           address: null,
+          network: null,
           connected: false,
           connecting: false,
           error: errorMessage,
@@ -85,6 +100,9 @@ export function useWallet() {
     }
 
     checkConnection()
+
+    const interval = window.setInterval(checkConnection, 5000)
+    return () => window.clearInterval(interval)
   }, [])
 
   const connect = useCallback(async () => {
@@ -95,6 +113,7 @@ export function useWallet() {
     if (!freighterApi) {
       setWallet({
         address: null,
+        network: null,
         connected: false,
         connecting: false,
         error: "Freighter wallet not detected",
@@ -106,8 +125,10 @@ export function useWallet() {
 
     try {
       const { address } = await freighterApi.getAddress()
+      const network = await getNetworkPassphrase(freighterApi)
       setWallet({
         address,
+        network,
         connected: true,
         connecting: false,
         error: null,
@@ -120,6 +141,7 @@ export function useWallet() {
 
       setWallet({
         address: null,
+        network: null,
         connected: false,
         connecting: false,
         error: errorMessage,
@@ -133,6 +155,7 @@ export function useWallet() {
   const disconnect = useCallback(() => {
     setWallet({
       address: null,
+      network: null,
       connected: false,
       connecting: false,
       error: null,

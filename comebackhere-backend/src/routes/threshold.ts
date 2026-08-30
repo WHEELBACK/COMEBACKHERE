@@ -2,43 +2,25 @@ import { Router, type Request, type Response } from "express"
 import { Keypair, nativeToScVal } from "stellar-sdk"
 import {
   buildSorobanClient,
-  getNetworkPassphrase,
   simulateContractRead,
   submitContractCall,
   type SorobanClient,
 } from "../lib/soroban.js"
+import { requireEnv } from "../lib/env.js"
 import { validateBody } from "../middleware/validate.js"
 import { thresholdSchema } from "../schemas/index.js"
 
 const router = Router()
-
-function requireEnv(res: Response): {
-  rpcUrl: string
-  treasuryContractId: string
-  signerSecret: string
-  networkPassphrase: string
-} | null {
-  const rpcUrl = process.env.SOROBAN_RPC_URL
-  const treasuryContractId = process.env.TREASURY_CONTRACT_ID
-  const signerSecret = process.env.SIGNER_SECRET_KEY
-  const networkPassphrase = getNetworkPassphrase()
-
-  if (!rpcUrl || !treasuryContractId || !signerSecret) {
-    res.status(503).json({
-      error: "Service misconfiguration: missing required environment variables",
-    })
-    return null
-  }
-
-  return { rpcUrl, treasuryContractId, signerSecret, networkPassphrase }
-}
 
 /**
  * GET /api/treasury/threshold
  * Returns the current approval threshold from the treasury contract.
  */
 router.get("/threshold", async (_req: Request, res: Response) => {
-  const env = requireEnv(res)
+  const env = requireEnv(res, {
+    treasuryContractId: "TREASURY_CONTRACT_ID",
+    signerSecret: "SIGNER_SECRET_KEY",
+  })
   if (!env) return
 
   try {
@@ -95,7 +77,10 @@ export async function setThreshold(
 }
 
 router.post("/threshold", validateBody(thresholdSchema), async (req: Request, res: Response) => {
-  const env = requireEnv(res)
+  const env = requireEnv(res, {
+    treasuryContractId: "TREASURY_CONTRACT_ID",
+    signerSecret: "SIGNER_SECRET_KEY",
+  })
   if (!env) return
 
   const threshold = req.body.threshold

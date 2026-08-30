@@ -108,10 +108,10 @@ A settlement whose status is `OnHold`, meaning execution is blocked pending revi
 ## Dispute Terms
 
 **Dispute**
-An on-chain record raised by a claimant against a counterparty over a specific settlement. Raising a dispute automatically places the referenced settlement `OnHold`.
+An on-chain record raised by a claimant against a counterparty over a specific settlement. Raising a dispute automatically places the referenced settlement `OnHold`. Dispute records — including every resolution vote — are stored in the treasury contract's on-chain storage, so in-flight votes survive process restarts and are shared across backend replicas.
 
 **resolution_weight**
-Cumulative weight of signers who have voted on the dispute resolution. When it reaches the treasury threshold the dispute transitions to `ResolvedClaimant` or `ResolvedCounterparty`.
+Cumulative weight of signers who have voted on the dispute resolution. When it reaches the treasury threshold the dispute transitions to `ResolvedClaimant` or `ResolvedCounterparty`. A dispute resolved in favour of the counterparty (merchant) returns the settlement to `Pending` so it can resume the approval flow; a dispute resolved in favour of the claimant voids the settlement (`Cancelled`).
 
 **Dispute Quorum**
 The minimum cumulative signer weight required to finalise a dispute resolution. This is the same value as the treasury's `threshold` — when the `resolution_weight` of signers who have voted reaches this threshold, the dispute transitions from `Raised` to `ResolvedClaimant` or `ResolvedCounterparty`.

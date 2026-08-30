@@ -2,6 +2,17 @@ import { MongoClient, type Db, type Collection, MongoServerSelectionError } from
 
 export type InvoiceStatus = "Pending" | "Paid" | "Expired" | "Cancelled" | "RefundRequested" | "Released"
 
+export interface LegacyInvoiceRecord {
+  invoice_id: string
+  merchant_address: string
+  token: string
+  amount: number
+  due_date: number
+  status: InvoiceStatus
+  created_at: Date
+  updated_at: Date
+}
+
 export interface InvoiceRecord {
   invoice_id: string
   merchant_address: string
@@ -26,6 +37,21 @@ export interface SettlementRecord {
   updated_at: Date
   proposed_tx_hash?: string
   executed_tx_hash?: string
+}
+
+export type ComplianceAuditEventType = "address_allowed" | "address_allowed_until" | "address_blocked" | "address_cleared"
+
+export interface ComplianceAuditRecord {
+  event_id: string
+  event_type: ComplianceAuditEventType
+  address: string
+  expires_at: number | null
+  ledger: number
+  ledger_closed_at: string | null
+  transaction_hash: string
+  contract_id: string
+  paging_token: string | null
+  created_at: Date
 }
 
 export interface IndexerCursor {
@@ -125,6 +151,18 @@ export async function connectMongo(): Promise<Db> {
   const cursors = db.collection<IndexerCursor>("indexer_cursors")
   await cursors.createIndex({ _id: 1 }, { unique: true })
 
+  const complianceAudit = db.collection<ComplianceAuditRecord>("compliance_audit")
+  await complianceAudit.createIndex({ event_id: 1 }, { unique: true })
+  await complianceAudit.createIndex({ address: 1, ledger: -1 })
+  await complianceAudit.createIndex({ event_type: 1, ledger: -1 })
+  await complianceAudit.createIndex({ ledger: -1 })
+
+  const invoices = db.collection<InvoiceRecord>("invoices")
+  await invoices.createIndex({ invoice_id: 1 }, { unique: true })
+  await invoices.createIndex({ status: 1 })
+  await invoices.createIndex({ merchant_address: 1 })
+  await invoices.createIndex({ created_at: -1 })
+
   return db
 }
 
@@ -138,6 +176,10 @@ export function getSettlementsCollection(database: Db): Collection<SettlementRec
 
 export function getCursorsCollection(database: Db): Collection<IndexerCursor> {
   return database.collection<IndexerCursor>("indexer_cursors")
+}
+
+export function getComplianceAuditCollection(database: Db): Collection<ComplianceAuditRecord> {
+  return database.collection<ComplianceAuditRecord>("compliance_audit")
 }
 
 export async function closeMongo(): Promise<void> {
