@@ -3,7 +3,9 @@
 #[cfg(test)]
 extern crate std;
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, Symbol, Vec,
+};
 
 /// Status of a settlement proposal within the Treasury contract.
 #[contracttype]
@@ -38,6 +40,29 @@ pub struct Settlement {
     pub proposer: Address,
 }
 
+/// Result of previewing whether a settlement would succeed if `execute_settlement`
+/// were called right now, without mutating any contract state.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SettlementSimulation {
+    /// The settlement being previewed.
+    pub settlement_id: u64,
+    /// Current status of the settlement.
+    pub status: SettlementStatus,
+    /// Whether calling `execute_settlement` right now would succeed.
+    pub would_succeed: bool,
+    /// Accumulated approval weight from authorized signers.
+    pub approval_weight: u64,
+    /// The approval threshold that must be met or exceeded.
+    pub threshold: u64,
+    /// The settlement's amount, in the smallest unit of `token`.
+    pub settlement_amount: u64,
+    /// The treasury's current balance of `token`.
+    pub treasury_balance: i128,
+    /// The treasury's balance of `token` after the settlement would be paid out.
+    pub projected_balance: i128,
+}
+
 /// Error types returned by Treasury contract operations.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -58,6 +83,12 @@ pub enum TreasuryError {
     DuplicateSigner = 7,
     InvalidWeightSum = 8,
     NotSettlementParty = 9,
+    /// No settlement exists with the given ID.
+    SettlementNotFound = 10,
+    /// A new threshold would exceed the total signer voting weight.
+    ThresholdExceedsWeight = 11,
+    /// Requested pagination `limit` exceeds the maximum page size.
+    InvalidPagination = 12,
 }
 
 /// Storage keys for Treasury contract instance state.
@@ -77,6 +108,8 @@ pub enum DataKey {
     Threshold,
     /// Token allowlist key.
     TokenAllowlist,
+    /// List of all known signer addresses key.
+    SignerList,
 }
 
 fn is_paused(e: &Env) -> bool {
@@ -300,6 +333,61 @@ impl TreasuryContract {
         Ok(())
     }
 
+    /// Previews the outcome of calling [`Self::execute_settlement`] on `settlement_id`
+    /// right now, performing the same checks (quorum reached, treasury balance sufficient)
+    /// without mutating any contract state. Intended for signers/frontends (e.g.
+    /// `SettlementDetail`) to preview the outcome and USDC balance impact before a signer
+    /// commits to the real transaction.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `settlement_id` - ID of the settlement proposal to preview.
+    ///
+    /// # Returns
+    /// * [`SettlementSimulation`] describing whether execution would succeed, along with
+    ///   the approval and balance figures behind that verdict.
+    pub fn simulate_settlement(
+        e: Env,
+        settlement_id: u64,
+    ) -> Result<SettlementSimulation, TreasuryError> {
+        let settlement: Settlement = e
+            .storage()
+            .instance()
+            .get(&DataKey::Settlement(settlement_id))
+            .ok_or(TreasuryError::SettlementNotFound)?;
+
+        let threshold: u64 = e
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(0u64);
+        let quorum_reached = settlement.approval_weight >= threshold;
+
+        let treasury_balance: i128 = e.invoke_contract(
+            &settlement.token,
+            &Symbol::new(&e, "balance"),
+            soroban_sdk::vec![&e, e.current_contract_address().into_val(&e)],
+        );
+        let settlement_amount: i128 = settlement.amount as i128;
+        let sufficient_balance = treasury_balance >= settlement_amount;
+
+        let would_succeed = !is_paused(&e)
+            && settlement.status == SettlementStatus::Pending
+            && quorum_reached
+            && sufficient_balance;
+
+        Ok(SettlementSimulation {
+            settlement_id,
+            status: settlement.status,
+            would_succeed,
+            approval_weight: settlement.approval_weight,
+            threshold,
+            settlement_amount: settlement.amount,
+            treasury_balance,
+            projected_balance: treasury_balance - settlement_amount,
+        })
+    }
+
     /// Retrieves a paginated list of pending settlement IDs.
     ///
     /// # Arguments
@@ -353,6 +441,25 @@ impl TreasuryContract {
             }
         }
         Ok(result)
+    }
+
+    /// Sums the voting weight of every address in the signer list.
+    fn total_signer_weight(e: &Env) -> u64 {
+        let signer_list: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::SignerList)
+            .unwrap_or_else(|| Vec::new(e));
+        let mut total: u64 = 0;
+        for signer in signer_list.iter() {
+            let weight: u64 = e
+                .storage()
+                .instance()
+                .get(&DataKey::Signer(signer))
+                .unwrap_or(0);
+            total += weight;
+        }
+        total
     }
 
     fn check_admin(e: &Env, admin: &Address) -> Result<(), TreasuryError> {
@@ -528,8 +635,8 @@ impl TreasuryContract {
             return Err(TreasuryError::Unauthorized);
         }
 
-        let old_merchant = settlement.merchant;
-        settlement.merchant = new_merchant;
+        let old_merchant = settlement.merchant.clone();
+        settlement.merchant = new_merchant.clone();
 
         e.storage()
             .instance()
@@ -730,7 +837,7 @@ mod tests {
         let signer = soroban_sdk::Address::generate(&e);
         c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
         let result = c.get_pending_settlements(&None, &None);
-        assert_eq!(result, Ok(Vec::new(&e)));
+        assert_eq!(result, Vec::new(&e));
     }
 
     #[test]
@@ -743,7 +850,7 @@ mod tests {
         let signer = soroban_sdk::Address::generate(&e);
         c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
         let sid = c.propose_settlement(&signer, &token, &1000u64, &merchant);
-        let result = c.get_pending_settlements(&None, &None).unwrap();
+        let result = c.get_pending_settlements(&None, &None);
         assert_eq!(result.len(), 1);
         assert_eq!(result.get(0).unwrap(), sid);
     }
@@ -761,7 +868,7 @@ mod tests {
         let s2 = c.propose_settlement(&signer, &token, &2000u64, &merchant);
         c.approve_settlement(&signer, &s1);
         c.execute_settlement(&signer, &s1, &token);
-        let result = c.get_pending_settlements(&None, &None).unwrap();
+        let result = c.get_pending_settlements(&None, &None);
         assert_eq!(result.len(), 1);
         assert_eq!(result.get(0).unwrap(), s2);
     }
@@ -778,7 +885,7 @@ mod tests {
         for _ in 0..5 {
             c.propose_settlement(&signer, &token, &100u64, &merchant);
         }
-        let page = c.get_pending_settlements(&Some(2u32), &Some(2u32)).unwrap();
+        let page = c.get_pending_settlements(&Some(2u32), &Some(2u32));
         assert_eq!(page.len(), 2);
         assert_eq!(page.get(0).unwrap(), 3u64);
         assert_eq!(page.get(1).unwrap(), 4u64);
@@ -796,8 +903,8 @@ mod tests {
         for _ in 0..5 {
             c.propose_settlement(&signer, &token, &100u64, &merchant);
         }
-        let result = c.get_pending_settlements(&None, &Some(200u32));
-        assert_eq!(result, Err(TreasuryError::InvalidPagination));
+        let result = c.try_get_pending_settlements(&None, &Some(200u32));
+        assert_eq!(result, Err(Ok(TreasuryError::InvalidPagination)));
     }
 
     #[test]
@@ -810,9 +917,7 @@ mod tests {
         let signer = soroban_sdk::Address::generate(&e);
         c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
         c.propose_settlement(&signer, &token, &100u64, &merchant);
-        let page = c
-            .get_pending_settlements(&Some(10u32), &Some(5u32))
-            .unwrap();
+        let page = c.get_pending_settlements(&Some(10u32), &Some(5u32));
         assert!(page.is_empty());
     }
 
@@ -918,7 +1023,7 @@ mod tests {
         let res = c.try_execute_settlement(&s1, &sid, &token);
         assert_eq!(res, Err(Ok(TreasuryError::InsufficientApprovals)));
         // settlement must still be Pending
-        let pending = c.get_pending_settlements(&None, &None).unwrap();
+        let pending = c.get_pending_settlements(&None, &None);
         assert!(pending.contains(&sid));
     }
 
@@ -936,7 +1041,7 @@ mod tests {
         c.approve_settlement(&signer, &sid);
         c.execute_settlement(&signer, &sid, &token);
         // settlement no longer pending
-        let pending = c.get_pending_settlements(&None, &None).unwrap();
+        let pending = c.get_pending_settlements(&None, &None);
         assert!(!pending.contains(&sid));
     }
 
@@ -953,7 +1058,7 @@ mod tests {
         let sid = c.propose_settlement(&signer, &token, &500u64, &merchant);
         c.approve_settlement(&signer, &sid);
         c.execute_settlement(&signer, &sid, &token);
-        let pending = c.get_pending_settlements(&None, &None).unwrap();
+        let pending = c.get_pending_settlements(&None, &None);
         assert!(!pending.contains(&sid));
     }
 
@@ -1061,7 +1166,7 @@ mod tests {
         // s2 approves: weight=3 == 3, can execute
         c.approve_settlement(&s2, &sid);
         c.execute_settlement(&s1, &sid, &token);
-        let pending = c.get_pending_settlements(&None, &None).unwrap();
+        let pending = c.get_pending_settlements(&None, &None);
         assert!(!pending.contains(&sid));
     }
 
@@ -1141,6 +1246,132 @@ mod tests {
         assert_eq!(c.try_unpause(&non_admin), Err(Ok(TreasuryError::Unauthorized)));
         assert_eq!(c.try_update_threshold(&non_admin, &2u32), Err(Ok(TreasuryError::Unauthorized)));
         assert_eq!(c.try_withdraw(&non_admin, &non_admin, &100u64), Err(Ok(TreasuryError::Unauthorized)));
+    }
+
+    // ── simulate_settlement ───────────────────────────────────────────────────
+
+    /// Minimal token stub exposing the standard `balance(id) -> i128` read used by
+    /// `simulate_settlement` to check treasury funds, with a test-only setter.
+    mod token_stub {
+        use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+
+        #[contracttype]
+        pub enum StubKey {
+            Balance(Address),
+        }
+
+        #[contract]
+        pub struct TokenStub;
+
+        #[contractimpl]
+        impl TokenStub {
+            pub fn set_balance(e: Env, id: Address, amount: i128) {
+                e.storage().instance().set(&StubKey::Balance(id), &amount);
+            }
+
+            pub fn balance(e: Env, id: Address) -> i128 {
+                e.storage()
+                    .instance()
+                    .get(&StubKey::Balance(id))
+                    .unwrap_or(0)
+            }
+        }
+    }
+
+    use token_stub::{TokenStub, TokenStubClient};
+
+    #[test]
+    fn test_simulate_settlement_would_succeed_when_quorum_and_balance_ok() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token_id = e.register(TokenStub, ());
+        let token_client = TokenStubClient::new(&e, &token_id);
+
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
+        token_client.set_balance(&id, &1000i128);
+
+        let sid = c.propose_settlement(&signer, &token_id, &500u64, &merchant);
+        c.approve_settlement(&signer, &sid);
+
+        let sim = c.simulate_settlement(&sid);
+        assert!(sim.would_succeed);
+        assert_eq!(sim.approval_weight, 1u64);
+        assert_eq!(sim.threshold, 1u64);
+        assert_eq!(sim.treasury_balance, 1000i128);
+        assert_eq!(sim.settlement_amount, 500u64);
+        assert_eq!(sim.projected_balance, 500i128);
+
+        // Simulation must not mutate state: the settlement is still Pending and a
+        // real execute_settlement still succeeds afterwards.
+        let unchanged = c.get_pending_settlements(&None, &None);
+        assert_eq!(unchanged.len(), 1);
+        c.execute_settlement(&signer, &sid, &token_id);
+    }
+
+    #[test]
+    fn test_simulate_settlement_false_when_quorum_not_reached() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let signer2 = soroban_sdk::Address::generate(&e);
+        let token_id = e.register(TokenStub, ());
+        let token_client = TokenStubClient::new(&e, &token_id);
+
+        // Total signer weight (2) meets the threshold (2), but only one signer
+        // approves, so the settlement itself is short of quorum.
+        c.initialize(
+            &soroban_sdk::vec![&e, (signer.clone(), 1u64), (signer2.clone(), 1u64)],
+            &2,
+            &admin,
+        );
+        token_client.set_balance(&id, &1000i128);
+
+        let sid = c.propose_settlement(&signer, &token_id, &500u64, &merchant);
+        c.approve_settlement(&signer, &sid);
+
+        let sim = c.simulate_settlement(&sid);
+        assert!(!sim.would_succeed);
+        assert_eq!(sim.approval_weight, 1u64);
+        assert_eq!(sim.threshold, 2u64);
+    }
+
+    #[test]
+    fn test_simulate_settlement_false_when_balance_insufficient() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token_id = e.register(TokenStub, ());
+        let token_client = TokenStubClient::new(&e, &token_id);
+
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
+        token_client.set_balance(&id, &100i128);
+
+        let sid = c.propose_settlement(&signer, &token_id, &500u64, &merchant);
+        c.approve_settlement(&signer, &sid);
+
+        let sim = c.simulate_settlement(&sid);
+        assert!(!sim.would_succeed);
+        assert_eq!(sim.treasury_balance, 100i128);
+        assert_eq!(sim.projected_balance, -400i128);
+    }
+
+    #[test]
+    fn test_simulate_settlement_nonexistent_returns_error() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer, 1u64)], &1, &admin);
+
+        let result = c.try_simulate_settlement(&999u64);
+        assert_eq!(result, Err(Ok(TreasuryError::SettlementNotFound)));
     }
 }
 

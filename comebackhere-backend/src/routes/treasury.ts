@@ -3,6 +3,7 @@ import { Keypair, nativeToScVal, Address } from "stellar-sdk"
 import {
   buildSorobanClient,
   getOnChainSettlement,
+  getSettlementSimulation,
   getTokenBalance,
   submitContractCall,
   type SorobanClient,
@@ -366,6 +367,151 @@ router.post("/execute-settlement", validateBody(executeSettlementSchema), async 
     )
     // #212 — balance changed; evict the cache so the next GET /balances is fresh
     invalidateBalanceCache()
+    res.json(result)
+  } catch (err: unknown) {
+    const status = (err as { status?: number })?.status ?? 500
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(status).json({ error: message })
+  }
+})
+
+export interface SimulateSettlementBody {
+  settlement_id: number
+}
+
+export interface SimulateSettlementDeps {
+  getSettlementSimulation: typeof getSettlementSimulation
+}
+
+const defaultSimulateSettlementDeps: SimulateSettlementDeps = {
+  getSettlementSimulation,
+}
+
+/**
+ * Previews whether `execute_settlement` would succeed for `settlement_id` right now
+ * (quorum reached, treasury balance sufficient) without submitting or mutating any
+ * on-chain state.
+ */
+export async function simulateSettlement(
+  body: SimulateSettlementBody,
+  env: {
+    rpcUrl: string
+    treasuryContractId: string
+    signerSecret: string
+    networkPassphrase: string
+  },
+  clientOverride?: SorobanClient,
+  deps: SimulateSettlementDeps = defaultSimulateSettlementDeps,
+): Promise<{
+  settlement_id: number
+  status: string
+  would_succeed: boolean
+  approval_weight: string
+  threshold: string
+  settlement_amount: string
+  treasury_balance: string
+  projected_balance: string
+}> {
+  const client = clientOverride ?? buildSorobanClient(env.rpcUrl)
+  const keypair = Keypair.fromSecret(env.signerSecret)
+
+  const simulation = await deps.getSettlementSimulation(
+    client,
+    env.treasuryContractId,
+    BigInt(body.settlement_id),
+    keypair.publicKey(),
+    env.networkPassphrase,
+  )
+
+  return {
+    settlement_id: body.settlement_id,
+    status: simulation.status,
+    would_succeed: simulation.wouldSucceed,
+    approval_weight: simulation.approvalWeight.toString(),
+    threshold: simulation.threshold.toString(),
+    settlement_amount: simulation.settlementAmount.toString(),
+    treasury_balance: simulation.treasuryBalance.toString(),
+    projected_balance: simulation.projectedBalance.toString(),
+  }
+}
+
+/**
+ * @openapi
+ * /api/treasury/simulate-settlement:
+ *   post:
+ *     tags: [Treasury]
+ *     summary: Preview whether execute-settlement would succeed, without mutating state
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [settlement_id]
+ *             properties:
+ *               settlement_id:
+ *                 type: integer
+ *                 description: Positive integer settlement ID
+ *                 example: 1
+ *     responses:
+ *       200:
+ *         description: Simulation result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 settlement_id:
+ *                   type: integer
+ *                   example: 1
+ *                 status:
+ *                   type: string
+ *                   example: "Pending"
+ *                 would_succeed:
+ *                   type: boolean
+ *                   example: true
+ *                 approval_weight:
+ *                   type: string
+ *                   example: "2"
+ *                 threshold:
+ *                   type: string
+ *                   example: "2"
+ *                 settlement_amount:
+ *                   type: string
+ *                   example: "5000000"
+ *                 treasury_balance:
+ *                   type: string
+ *                   example: "10000000"
+ *                 projected_balance:
+ *                   type: string
+ *                   example: "5000000"
+ *       400:
+ *         description: settlement_id is not a positive integer
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       422:
+ *         description: Soroban simulation failure (e.g. settlement not found)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *       503:
+ *         description: Service misconfiguration
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
+router.post("/simulate-settlement", validateBody(settlementIdSchema), async (req: Request, res: Response) => {
+  const env = requireEnv(res)
+  if (!env) return
+
+  const settlementId = req.body.settlement_id
+
+  try {
+    const result = await simulateSettlement({ settlement_id: settlementId }, env)
     res.json(result)
   } catch (err: unknown) {
     const status = (err as { status?: number })?.status ?? 500

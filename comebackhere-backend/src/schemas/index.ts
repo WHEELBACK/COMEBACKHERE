@@ -37,6 +37,10 @@ export const createInvoiceSchema = z.object({
     .number({ message: "amount must be a positive number" })
     .positive("amount must be a positive number"),
   due_date: futureTimestamp,
+  reference: z
+    .string()
+    .refine((val) => Buffer.byteLength(val, "utf8") <= 64, "reference must not exceed 64 bytes")
+    .optional(),
 })
 
 export const invoiceIdParamSchema = z.object({
