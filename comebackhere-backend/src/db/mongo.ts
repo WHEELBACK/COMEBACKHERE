@@ -19,6 +19,7 @@ export interface InvoiceRecord {
   token: string
   amount: number
   due_date: number
+  reference?: string
   status: InvoiceStatus
   created_at: Date
   updated_at: Date
@@ -60,33 +61,6 @@ export interface IndexerCursor {
   updated_at: Date
   /** Event IDs already applied — used for reorg / replay deduplication. */
   processed_event_ids?: string[]
-}
-
-export type InvoiceStatus =
-  | "Pending"
-  | "Paid"
-  | "Expired"
-  | "Cancelled"
-  | "RefundRequested"
-  | "Released"
-
-export interface InvoiceRecord {
-  invoice_id: string
-  merchant_address: string
-  payer_address: string | null
-  token: string
-  amount: string
-  status: InvoiceStatus
-  created_at: number | null   // Unix timestamp (seconds)
-  expires_at: number | null   // Unix timestamp (seconds)
-  paid_at: number | null      // Unix timestamp (seconds)
-  tx_hash: string | null
-  updated_at: Date
-}
-
-export interface InvoiceSearchFilter {
-  status?: InvoiceStatus
-  merchant_address?: string
 }
 
 export const DEFAULT_PAGE_SIZE = 20
