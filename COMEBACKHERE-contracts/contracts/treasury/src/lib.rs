@@ -303,8 +303,10 @@ impl TreasuryContract {
     /// * `Ok(u64)` - The auto-incremented settlement ID for the created proposal.
     ///
     /// # Errors
-    /// * Returns [`TreasuryError::ContractPaused`] if contract operations are paused.
     /// * Returns [`TreasuryError::TokenNotAllowed`] if token allowlist is non-empty and `token` is not allowed.
+    ///   Checked first, before the pause and signer-auth checks, so a disallowed token is
+    ///   rejected without paying for the rest of a full validation pass.
+    /// * Returns [`TreasuryError::ContractPaused`] if contract operations are paused.
     pub fn propose_settlement(
         e: Env,
         signer: Address,
@@ -312,9 +314,6 @@ impl TreasuryContract {
         amount: u64,
         merchant: Address,
     ) -> Result<u64, TreasuryError> {
-        check_not_paused(&e)?;
-        signer.require_auth();
-
         let allowlist: Vec<Address> = e
             .storage()
             .instance()
@@ -323,6 +322,9 @@ impl TreasuryContract {
         if !allowlist.is_empty() && !allowlist.contains(&token) {
             return Err(TreasuryError::TokenNotAllowed);
         }
+
+        check_not_paused(&e)?;
+        signer.require_auth();
 
         let settlement_id: u64 = e
             .storage()
@@ -1390,6 +1392,29 @@ mod tests {
         c.remove_token_from_allowlist(&admin, &token1);
         let s2 = c.propose_settlement(&signer, &token2, &100u64, &merchant);
         assert_eq!(s2, 2u64);
+    }
+
+    #[test]
+    fn test_token_allowlist_checked_before_paused() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token1 = soroban_sdk::Address::generate(&e);
+        let token2 = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
+        c.add_token_to_allowlist(&admin, &token1);
+        c.pause(&admin);
+
+        // With the contract paused AND the token disallowed, TokenNotAllowed
+        // must win: the allowlist check runs before the pause check.
+        let err = c.try_propose_settlement(&signer, &token2, &100u64, &merchant);
+        assert_eq!(err, Err(Ok(TreasuryError::TokenNotAllowed)));
+
+        // An allowed token still correctly surfaces ContractPaused.
+        let err = c.try_propose_settlement(&signer, &token1, &100u64, &merchant);
+        assert_eq!(err, Err(Ok(TreasuryError::ContractPaused)));
     }
 
     #[test]
