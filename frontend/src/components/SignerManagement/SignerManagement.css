@@ -61,6 +61,21 @@
   font-family: ui-monospace, "Cascadia Code", monospace;
 }
 
+/* Identicon + address inline wrapper */
+.signer-td__address-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.signer-identicon {
+  flex-shrink: 0;
+  display: inline-flex;
+  border-radius: 4px;
+  overflow: hidden;
+  line-height: 0;
+}
+
 .address-full {
   display: none;
 }
