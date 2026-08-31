@@ -168,6 +168,76 @@ npm install && npm run dev
 
 Frontend runs on `http://localhost:5173`.
 
+## Full Environment Variable Reference
+
+The tables below list every environment variable used across the repository.
+Variables marked **Required** must be set for the service to start.
+Variables marked **Optional** have sensible defaults or are only needed for
+specific features.
+
+### Backend — `comebackhere-backend` (TypeScript/Express)
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `SOROBAN_RPC_URL` | Yes | — | Soroban RPC endpoint (e.g. `http://localhost:8000/soroban/rpc`) |
+| `INVOICE_CONTRACT_ID` | Yes* | — | Deployed invoice contract address |
+| `TREASURY_CONTRACT_ID` | Yes* | — | Deployed treasury contract address |
+| `USDC_CONTRACT_ID` | Yes* | — | USDC token contract address |
+| `SETTLEMENT_CONTRACT_ID` | Yes* | — | Settlement contract address (disputes) |
+| `SIGNER_SECRET_KEY` | Yes | — | Stellar secret key for signing transactions |
+| `NETWORK_PASSPHRASE` | No | `Standalone Network ; February 2025` | Stellar network passphrase |
+| `MONGODB_URI` | No | `mongodb://localhost:27017` | MongoDB connection string |
+| `MONGODB_DB` | No | `comebackhere` | MongoDB database name |
+| `REDIS_URL` | No | `redis://localhost:6379` | Redis connection string for rate limiting and caching |
+| `WEBHOOK_URL` | No | — | Merchant endpoint that receives webhook POSTs |
+| `WEBHOOK_SIGNING_SECRET` | No | — | HMAC-SHA256 signing secret for outbound webhooks |
+| `PORT` | No | `3000` | HTTP server port |
+| `SHUTDOWN_TIMEOUT_MS` | No | `10000` | Graceful shutdown timeout in milliseconds |
+| `RATE_LIMIT_POINTS` | No | `60` | Max requests per IP per window |
+| `RATE_LIMIT_DURATION` | No | `60` | Rate limit window in seconds |
+| `DISPUTE_VOTE_THRESHOLD` | No | `2` | Minimum votes to resolve a dispute |
+| `INDEXER_START_CURSOR` | No | `0` | Starting cursor for the event indexer |
+| `ADMIN_KEY` | No | — | Admin public key for compliance and escrow operations |
+
+* Required when the corresponding contract route is called; the backend
+  returns 503 if the variable is missing at request time.
+
+### Backend — `backend` (Rust/Axum, legacy)
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `SOROBAN_RPC_URL` | Yes | — | Soroban RPC endpoint |
+| `STELLAR_NETWORK` | No | `standalone` | Stellar network name (`standalone`, `testnet`, `mainnet`) |
+| `HORIZON_URL` | No | — | Horizon server URL |
+| `REDIS_URL` | No | `redis://localhost:6379` | Redis connection string |
+| `ADMIN_PUBLIC_KEY` | Yes* | — | Admin public key |
+| `INVOICE_CONTRACT_ID` | Yes* | — | Invoice contract address |
+| `TREASURY_CONTRACT_ID` | Yes* | — | Treasury contract address |
+| `COMPLIANCE_CONTRACT_ID` | Yes* | — | Compliance contract address |
+| `USDC_CONTRACT_ID` | Yes* | — | USDC token contract address |
+| `HOST` | No | `0.0.0.0` | Server bind address |
+| `PORT` | No | `3000` | Server port |
+| `RATE_LIMIT_POINTS` | No | `60` | Max requests per IP per window |
+| `RATE_LIMIT_DURATION` | No | `60` | Rate limit window in seconds |
+
+### Frontend — `comebackhere-frontend` (React/Vite)
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `VITE_API_URL` | Yes | — | Backend API base URL (e.g. `http://localhost:3000`) |
+| `VITE_SOROBAN_RPC` | Yes | — | Soroban RPC endpoint for wallet interactions |
+| `VITE_HORIZON_URL` | No | — | Horizon server URL |
+| `VITE_NETWORK_PASSPHRASE` | No | `Standalone Network ; February 2025` | Stellar network passphrase |
+
+### Root-level configuration files
+
+| File | Purpose |
+| --- | --- |
+| `.env.local.example` | Local development (standalone sandbox) |
+| `.env.testnet.example` | Stellar testnet configuration |
+| `.env.mainnet.example` | Stellar mainnet configuration (manual, requires multisig approval) |
+| `backend/.env.example` | Legacy Rust backend configuration |
+
 ## Running Contract Tests
 
 ```sh

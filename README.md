@@ -20,6 +20,71 @@ COMEBACKHERE provides the infrastructure needed to build seamless payment experi
 
 ---
 
+## Quickstart for Merchants
+
+Integrate COMEBACKHERE payments in three steps: create an invoice, set up
+webhooks, and process the payment. This section links to the full reference
+docs rather than duplicating them.
+
+### 1. Create an invoice
+
+```bash
+curl -X POST http://localhost:3000/invoices \
+  -H "Content-Type: application/json" \
+  -d '{
+    "merchant_address": "G...",
+    "token": "USDC",
+    "amount": 1000000,
+    "due_date": 1720000000
+  }'
+```
+
+The response includes `invoice_id` — share this with your payer.
+
+> Full request/response shapes: [docs/api-reference.md](docs/api-reference.md#post-invoices)
+
+### 2. Set up webhooks
+
+Configure `WEBHOOK_URL` and `WEBHOOK_SIGNING_SECRET` in your environment so
+the backend can notify your system when payments land.
+
+All outbound webhook POSTs are signed with HMAC-SHA256. Verify the
+`X-COMEBACKHERE-Signature` header before processing:
+
+```typescript
+import { createHmac, timingSafeEqual } from "crypto"
+
+function verifyWebhook(rawBody: string, signature: string, secret: string): boolean {
+  const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex")
+  return timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(signature, "hex"))
+}
+```
+
+> Webhook events and configuration: [docs/api-reference.md](docs/api-reference.md#webhooks)
+
+### 3. Minimal payment flow
+
+```text
+Merchant            Backend              Payer
+  |                   |                    |
+  |-- create_invoice ->|                    |
+  |                   |                    |
+  |  (share invoice_id with payer)         |
+  |                   |                    |
+  |                   |<-- pay off-chain ---|
+  |                   |                    |
+  |<-- webhook POST --|                    |
+  |  (settlement_executed)                 |
+```
+
+For the full end-to-end testnet walkthrough (funding accounts, deploying
+contracts, paying with USDC, and executing a settlement), see
+[docs/TESTNET_ONBOARDING.md](docs/TESTNET_ONBOARDING.md).
+
+> Rate limits apply to all API endpoints. See [docs/rate-limits.md](docs/rate-limits.md).
+
+---
+
 ## Architecture
 
 The diagram below illustrates the primary payment flow through the COMEBACKHERE Protocol.

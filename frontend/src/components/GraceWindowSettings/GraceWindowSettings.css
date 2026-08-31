@@ -38,6 +38,18 @@
   margin-bottom: 0;
 }
 
+.grace-window-form__zero-warning {
+  margin-top: 0.25rem;
+  margin-bottom: 0;
+  color: var(--color-warning, #92400e);
+  background: var(--color-warning-soft-bg, #fef3c7);
+  border: 1px solid var(--color-warning-border, #fcd34d);
+  border-radius: var(--radius, 6px);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
 .form-input--error {
   border-color: var(--color-danger);
 }

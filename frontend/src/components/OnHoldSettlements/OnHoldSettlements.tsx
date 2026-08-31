@@ -2,6 +2,11 @@ import { useState, useEffect, useCallback } from 'react'
 import { Settlement } from '../../types'
 import { EmptyState, EmptyStateIcon } from '../EmptyState/EmptyState'
 
+interface OnHoldSettlementsProps {
+  /** Optional callback invoked when the user clicks the empty-state CTA */
+  onNavigateToSettlements?: () => void
+}
+
 const API_BASE = '/api'
 
 type HoldReason = 'ComplianceReview' | 'FraudCheck' | 'KycPending' | 'AdminHold'
