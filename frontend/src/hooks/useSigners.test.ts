@@ -293,4 +293,116 @@ describe('useSigners', () => {
       expect(result.current.signers.length).toBe(1)
     })
   })
+
+  // ---------------------------------------------------------------------------
+  // invalidate – refetch-after-mutation
+  // ---------------------------------------------------------------------------
+  describe('invalidate', () => {
+    it('should expose an invalidate function on the hook result', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => [] })
+
+      const { result } = renderHook(() => useSigners())
+
+      await waitFor(() => expect(result.current.loading).toBe(false))
+
+      expect(typeof result.current.invalidate).toBe('function')
+    })
+
+    it('should re-fetch signers when invalidate is called', async () => {
+      const initialSigners = [makeSigner({ address: 'GABC...SIGNER1' })]
+      mockFetch.mockResolvedValue({ ok: true, json: async () => initialSigners })
+
+      const { result } = renderHook(() => useSigners())
+
+      await waitFor(() => expect(result.current.signers.length).toBe(1))
+
+      const callCountBefore = mockFetch.mock.calls.length
+
+      await act(async () => {
+        await result.current.invalidate()
+      })
+
+      expect(mockFetch.mock.calls.length).toBeGreaterThan(callCountBefore)
+      expect(mockFetch).toHaveBeenCalledWith('/api/treasury/signers')
+    })
+
+    it('should update the signer list after calling invalidate following an external mutation', async () => {
+      // Scenario: a rotate_signer transaction was submitted elsewhere in the
+      // app.  The hook's stale list has SIGNER1; after invalidate the server
+      // returns the rotated list with SIGNER2 only.
+      const staleSigners = [makeSigner({ address: 'GABC...SIGNER1' })]
+      const freshSigners = [makeSigner({ address: 'GDEF...SIGNER2' })]
+
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => staleSigners })  // initial fetch
+        .mockResolvedValueOnce({ ok: true, json: async () => freshSigners })  // post-invalidate fetch
+
+      const { result } = renderHook(() => useSigners())
+
+      await waitFor(() => {
+        expect(result.current.signers).toEqual(staleSigners)
+      })
+
+      await act(async () => {
+        await result.current.invalidate()
+      })
+
+      expect(result.current.signers).toEqual(freshSigners)
+    })
+
+    it('should set loading to true during the invalidate re-fetch', async () => {
+      let resolveSecondFetch!: (v: unknown) => void
+      const secondFetchPromise = new Promise(res => { resolveSecondFetch = res })
+
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => [] })
+        .mockReturnValueOnce(secondFetchPromise)
+
+      const { result } = renderHook(() => useSigners())
+
+      await waitFor(() => expect(result.current.loading).toBe(false))
+
+      // Start invalidate but don't resolve yet.
+      act(() => { void result.current.invalidate() })
+
+      await waitFor(() => expect(result.current.loading).toBe(true))
+
+      // Let the fetch resolve.
+      resolveSecondFetch({ ok: true, json: async () => [] })
+      await waitFor(() => expect(result.current.loading).toBe(false))
+    })
+
+    it('should handle errors during invalidate gracefully', async () => {
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => [] })
+        .mockResolvedValueOnce({ ok: false, status: 503 })
+
+      const { result } = renderHook(() => useSigners())
+
+      await waitFor(() => expect(result.current.loading).toBe(false))
+
+      await act(async () => {
+        await result.current.invalidate()
+      })
+
+      expect(result.current.error).toBe('HTTP 503')
+    })
+
+    it('invalidate and refresh should both trigger a fetch of the same endpoint', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => [] })
+
+      const { result } = renderHook(() => useSigners())
+
+      await waitFor(() => expect(result.current.loading).toBe(false))
+
+      await act(async () => { await result.current.invalidate() })
+      await act(async () => { await result.current.refresh() })
+
+      const signerCalls = mockFetch.mock.calls.filter(
+        (call) => call[0] === '/api/treasury/signers'
+      )
+      // initial + invalidate + refresh = at least 3
+      expect(signerCalls.length).toBeGreaterThanOrEqual(3)
+    })
+  })
 })
