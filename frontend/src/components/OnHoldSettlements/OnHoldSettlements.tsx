@@ -2,6 +2,11 @@ import { useState, useEffect, useCallback } from 'react'
 import { Settlement } from '../../types'
 import { EmptyState, EmptyStateIcon } from '../EmptyState/EmptyState'
 
+interface OnHoldSettlementsProps {
+  /** Optional callback invoked when the user clicks the empty-state CTA */
+  onNavigateToSettlements?: () => void
+}
+
 const API_BASE = '/api'
 
 type HoldReason = 'ComplianceReview' | 'FraudCheck' | 'KycPending' | 'AdminHold'
@@ -58,7 +63,7 @@ async function performAdminAction(settlementId: number, action: AdminAction): Pr
   return res.json()
 }
 
-export default function OnHoldSettlements() {
+export default function OnHoldSettlements({ onNavigateToSettlements }: OnHoldSettlementsProps = {}) {
   const [settlements, setSettlements] = useState<Settlement[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -129,6 +134,10 @@ export default function OnHoldSettlements() {
           icon={<EmptyStateIcon />}
           title="No On-Hold Settlements"
           description="There are currently no settlements on hold. All settlements are processing normally."
+          action={onNavigateToSettlements ? {
+            label: 'Propose a Settlement',
+            onClick: onNavigateToSettlements,
+          } : undefined}
         />
       ) : (
         <>

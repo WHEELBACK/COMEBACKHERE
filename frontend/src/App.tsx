@@ -5,6 +5,7 @@ import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
 import SignerManagement from "./components/SignerManagement/SignerManagement";
 import ABIExplorer from "./components/ABIExplorer";
 import InvoiceSearchFilter from "./components/InvoiceSearchFilter";
+import { EmptyState, EmptyStateIcon } from "./components/EmptyState/EmptyState";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import OnboardingWizard from "./components/OnboardingWizard/OnboardingWizard";
 import GraceWindowSettings from "./components/GraceWindowSettings/GraceWindowSettings";
@@ -20,6 +21,23 @@ import { Invoice } from "./types";
 const MOCK_INVOICES: Invoice[] = [];
 
 function InvoicesPage() {
+  const navigate = useNavigate();
+  if (MOCK_INVOICES.length === 0) {
+    return (
+      <section>
+        <h3 style={{ marginBottom: 16 }}>Invoices</h3>
+        <EmptyState
+          icon={<EmptyStateIcon />}
+          title="No Invoices Yet"
+          description="No invoices have been created. Propose your first settlement to get started."
+          action={{
+            label: "Propose a Settlement",
+            onClick: () => navigate("/settlements"),
+          }}
+        />
+      </section>
+    );
+  }
   return (
     <section>
       <h3 style={{ marginBottom: 16 }}>Invoices</h3>
@@ -49,9 +67,10 @@ function SettlementDetailPage() {
 }
 
 function DisputesPage() {
+  const navigate = useNavigate();
   return (
     <ErrorBoundary fallbackTitle="Failed to load disputes">
-      <DisputeVotingPanel />
+      <DisputeVotingPanel onNavigateToSettlements={() => navigate("/settlements")} />
     </ErrorBoundary>
   );
 }
@@ -65,9 +84,10 @@ function SignersPage() {
 }
 
 function OnHoldPage() {
+  const navigate = useNavigate();
   return (
     <ErrorBoundary fallbackTitle="Failed to load on-hold settlements">
-      <OnHoldSettlements />
+      <OnHoldSettlements onNavigateToSettlements={() => navigate("/settlements")} />
     </ErrorBoundary>
   );
 }
