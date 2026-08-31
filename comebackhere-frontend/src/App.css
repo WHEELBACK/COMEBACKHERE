@@ -328,6 +328,14 @@ h3 {
   color: var(--color-success);
 }
 
+/* OnHold — visually distinct from Pending so payers understand the invoice
+   is blocked by an external hold rather than simply awaiting payment. */
+.badge--on-hold {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+  border: 1px solid #fcd34d;
+}
+
 .message {
   padding: 12px 16px;
   border-radius: var(--radius);

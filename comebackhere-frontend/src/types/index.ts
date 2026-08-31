@@ -5,6 +5,8 @@ export enum InvoiceStatus {
   Cancelled = "Cancelled",
   RefundRequested = "RefundRequested",
   Released = "Released",
+  /** Invoice is blocked because its underlying settlement is on hold. */
+  OnHold = "OnHold",
 }
 
 export type TransactionEventType =
