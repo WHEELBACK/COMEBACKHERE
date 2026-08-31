@@ -9,9 +9,9 @@ const STATUS_COLORS = {
   Released: 'badge-released',
 };
 
-// Fallback badge class applied when a status is not present in STATUS_COLORS
-// (e.g. a new status added to the contract without updating this static dashboard).
-const DEFAULT_BADGE_CLASS = 'badge-unknown';
+// Ordered list of statuses used for deterministic status-column sorting.
+// A status not in this list sorts after all known statuses.
+const STATUS_ORDER = Object.keys(STATUS_COLORS);
 
 let invoices = [];
 let sortField = 'id';
@@ -72,6 +72,12 @@ function render() {
     if (sortField === 'id' || sortField === 'amount') {
       va = Number(va);
       vb = Number(vb);
+    } else if (sortField === 'status') {
+      // Sort by the defined STATUS_ORDER; unknown statuses sort to the end
+      const ia = STATUS_ORDER.indexOf(va);
+      const ib = STATUS_ORDER.indexOf(vb);
+      va = ia === -1 ? STATUS_ORDER.length : ia;
+      vb = ib === -1 ? STATUS_ORDER.length : ib;
     }
     if (va < vb) return sortAsc ? -1 : 1;
     if (va > vb) return sortAsc ? 1 : -1;

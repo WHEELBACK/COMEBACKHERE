@@ -201,6 +201,9 @@ impl SettlementContract {
 }
 
 #[cfg(test)]
+mod integration_settlement_multisig;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, Env};
@@ -403,6 +406,8 @@ mod tests {
         // Cancelling an already-cancelled (or executed) settlement fails with NotPending
         let res = c.try_cancel(&proposer, &sid);
         assert_eq!(res, Err(Ok(SettlementError::NotPending)));
+    }
+
     use proptest::prelude::*;
     extern crate std;
     use std::collections::HashSet;

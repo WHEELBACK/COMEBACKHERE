@@ -21,7 +21,7 @@ function formatDuration(seconds: number): string {
 
 function parseDurationInput(value: string, unit: "seconds" | "minutes" | "hours" | "days"): number | null {
   const n = Number(value)
-  if (!value || Number.isNaN(n) || n <= 0 || !Number.isInteger(n)) return null
+  if (!value || Number.isNaN(n) || n < 0 || !Number.isInteger(n)) return null
 
   switch (unit) {
     case "seconds":
@@ -103,17 +103,23 @@ export default function GraceWindowSettings() {
     if (!inputValue) {
       return null // No error if field is empty (just disabled save)
     }
-    if (!parsedSeconds) {
-      return "Enter a valid positive duration"
+    if (parsedSeconds === null) {
+      return "Enter a valid non-negative integer duration"
     }
     return null
   }
 
   const validationError = getValidationError()
 
+  /** Non-blocking warning shown when the value is zero. */
+  const zeroWarning: string | null =
+    parsedSeconds === 0
+      ? "Setting the grace window to zero disables the waiting period entirely. Escrow can be released immediately after a refund request — make sure this is intentional."
+      : null
+
   const handleSave = async () => {
-    if (!parsedSeconds) {
-      setError("Enter a valid positive duration")
+    if (parsedSeconds === null) {
+      setError("Enter a valid non-negative integer duration")
       return
     }
 
@@ -147,7 +153,7 @@ export default function GraceWindowSettings() {
 
   const confirmMessage =
     parsedSeconds != null
-      ? `This will change the invoice grace window to ${formatDuration(parsedSeconds)} (${parsedSeconds} seconds) for all future escrow releases. Continue?`
+      ? `This will change the invoice grace window to ${parsedSeconds === 0 ? "zero seconds (no grace period)" : `${formatDuration(parsedSeconds)} (${parsedSeconds} seconds)`} for all future escrow releases. Continue?`
       : ""
 
   return (
@@ -183,7 +189,10 @@ export default function GraceWindowSettings() {
               }}
               disabled={loading || saving}
               aria-invalid={!!validationError}
-              aria-describedby={validationError ? "grace-validation-error" : undefined}
+              aria-describedby={
+                validationError ? "grace-validation-error" :
+                zeroWarning ? "grace-zero-warning" : undefined
+              }
             />
             <select
               className="form-input grace-window-form__unit"
@@ -201,6 +210,16 @@ export default function GraceWindowSettings() {
           {validationError && (
             <p id="grace-validation-error" className="form-error grace-window-form__inline-error">
               {validationError}
+            </p>
+          )}
+          {zeroWarning && !validationError && (
+            <p
+              id="grace-zero-warning"
+              className="grace-window-form__zero-warning"
+              role="alert"
+              aria-live="polite"
+            >
+              ⚠ {zeroWarning}
             </p>
           )}
         </div>

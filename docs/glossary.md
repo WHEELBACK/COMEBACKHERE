@@ -152,6 +152,32 @@ See _Token Allowlist_ under Settlement Terms.
 
 ---
 
+## API Terms
+
+**Idempotency Key**
+A client-supplied token that ensures a request is processed at most once.
+The key is passed in the `Idempotency-Key` header. The backend stores the
+response against a namespaced key and returns the cached result on
+subsequent requests with the same idempotency key, preventing duplicate
+side-effects from retries or network glitches.
+
+**Idempotency Key Scoping**
+Keys are scoped as `{endpoint}:{invoice_id}:{idempotency_key}`. This means
+the same `Idempotency-Key` header value used on two different endpoints
+(or for two different invoice IDs) never collides. Each (endpoint, invoice,
+key) triple is an independent entry in the idempotency store.
+
+**Idempotency TTL**
+Cached idempotency entries expire after a configurable time-to-live (default:
+24 hours in production). Expired entries are evicted both lazily on lookup
+and periodically by a background sweeper, so memory usage stays bounded.
+
+> **Source:** `backend/src/idempotency.rs` (Rust/Axum backend).
+> The TypeScript backend (`comebackhere-backend`) does not currently
+> implement idempotency keys.
+
+---
+
 ## Cross-Contract Workflow Summary
 
 ```
