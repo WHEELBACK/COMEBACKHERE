@@ -117,6 +117,29 @@
   gap: 10px;
 }
 
+/* Finalized state — replaces vote buttons when an outcome is set */
+.dispute-card--finalized {
+  opacity: 0.85;
+}
+
+.dispute-card__finalized-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--color-muted-bg, #f3f4f6);
+  color: var(--color-text-muted, #6b7280);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.dispute-card__finalized-icon {
+  font-size: 1rem;
+  color: var(--color-success, #16a34a);
+  font-weight: 700;
+}
+
 .dispute-card__voted {
   font-size: 0.85rem;
   color: var(--color-text-muted);
