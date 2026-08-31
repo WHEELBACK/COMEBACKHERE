@@ -159,6 +159,55 @@ brew services stop redis     # macOS
 
 Or remap the Docker Redis port as shown above.
 
+## Stale ABI Snapshots
+
+### CI failure: `abi-snapshot-hygiene`
+
+After modifying a contract interface (adding/removing a public function,
+changing a type, or editing `events.rs`), the ABI metadata files in `abis/`
+go out of sync with the source. The `abi-snapshot-hygiene` CI check detects
+this and fails with a message like:
+
+```text
+ABI snapshot hygiene check failed.
+abis/invoice.json does not match COMEBACKHERE-contracts/contracts/invoice/
+```
+
+**Fix:**
+
+```sh
+# Regenerate ABI snapshots from the canonical contract source
+make update-abi-snapshots
+# or
+just snapshot
+```
+
+Then verify the diff looks correct and commit the updated `abis/*.json` files
+alongside your contract changes:
+
+```sh
+git diff abis/
+git add abis/
+```
+
+> **Why this happens:** The `abis/` directory contains committed metadata
+> generated from `COMEBACKHERE-contracts/`. CI verifies that these files
+> are consistent with the contract source on every PR. If you edit a contract
+> but forget to regenerate the snapshots, the hygiene check fails.
+
+### How to avoid this in the future
+
+Run the verification command before pushing:
+
+```sh
+make check-abi-snapshots
+# or
+just check-snapshot
+```
+
+This prints a clear error if the snapshots are stale, letting you fix them
+locally before CI catches them.
+
 ## General Tips
 
 - **Reset everything**: `docker compose down -v && docker compose up -d && ./scripts/deploy_testnet.sh`
