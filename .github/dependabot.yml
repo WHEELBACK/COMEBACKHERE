@@ -1,0 +1,72 @@
+version: 2
+
+updates:
+  # Keep GitHub Actions SHAs up to date.
+  # Dependabot will open PRs to update pinned commit SHAs whenever a new
+  # version tag is published, preserving the SHA-pinning security posture
+  # while still receiving upstream updates.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+      - "ci"
+
+  # Keep npm dependencies up to date for comebackhere-frontend.
+  - package-ecosystem: "npm"
+    directory: "/comebackhere-frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+
+  # Keep npm dependencies up to date for comebackhere-backend.
+  - package-ecosystem: "npm"
+    directory: "/comebackhere-backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+
+  # Keep npm dependencies up to date for frontend.
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+
+  # Keep Cargo dependencies up to date for the contracts tree.
+  - package-ecosystem: "cargo"
+    directory: "/contracts"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+
+  # Keep Cargo dependencies up to date for the COMEBACKHERE-contracts tree.
+  - package-ecosystem: "cargo"
+    directory: "/COMEBACKHERE-contracts"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"

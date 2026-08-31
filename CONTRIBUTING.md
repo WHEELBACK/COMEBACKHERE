@@ -57,13 +57,23 @@ The `main` branch is protected. Direct pushes are not allowed; all changes must 
 
 ### Required status checks
 
-All of the following checks must pass before a PR can be merged:
+Only **one** check must be listed in branch protection: **`all-checks-passed`**
+(from `.github/workflows/ci-summary.yml`).
 
-- `contract-build` — Soroban contract compilation
-- `contract-tests` — contract unit and integration tests
-- `abi-snapshot-hygiene` — ABI metadata in `abis/` is consistent with contract source
-- `markdown-lint` — documentation linting
-- `frontend-build` — frontend build succeeds
+That workflow fans in every other CI workflow via `needs:`, so a single green
+check means all of the following have passed:
+
+- `ci / frontend build-and-lint` — TypeScript type check, lint, and build
+- `ci / contract tests` — Soroban contract compilation and unit tests
+- `ci / abi metadata` — ABI metadata consistent with contract source
+- `ci / abi snapshots` — ABI snapshot files are up to date
+- `ci / contract coverage` — contract line coverage above threshold
+- `ci / error docs sync` — error-code variants are all documented
+- `ci / backend tests` — Rust and TypeScript backend test suites
+- `ci / lint docs` — Markdown documentation linting
+
+When adding a new workflow, wire it into `ci-summary.yml` rather than
+adding it directly to branch protection.
 
 ### Required reviews
 

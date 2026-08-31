@@ -3,6 +3,7 @@ name: Backend Tests
 on:
   pull_request:
     branches: [main]
+  workflow_call: # called by ci-summary.yml
 
 permissions:
   contents: read
@@ -12,35 +13,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── Rust backend (backend/) ─────────────────────────────────────────────
   unit:
+    name: rust / unit tests (contracts/)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
         with:
           toolchain: stable
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.cargo/registry
           key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-registry-
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: contracts/target
           key: cargo-target-${{ hashFiles('**/Cargo.lock') }}-${{ runner.os }}
           restore-keys: cargo-target-
 
-      - name: Run unit tests
+      - name: Run unit tests (Rust backend)
         run: cargo test -p comebackhere-invoice
         working-directory: contracts
 
   integration:
+    name: rust / integration tests (contracts/)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Start Soroban sandbox
         run: docker compose up -d soroban
@@ -54,22 +58,54 @@ jobs:
             sleep 3
           done
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
         with:
           toolchain: stable
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.cargo/registry
           key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-registry-
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: contracts/target
           key: cargo-target-${{ hashFiles('**/Cargo.lock') }}-${{ runner.os }}
           restore-keys: cargo-target-
 
-      - name: Run API integration tests
+      - name: Run API integration tests (Rust backend)
         run: cargo test -p api-integration-tests -- --test-threads=1
         working-directory: contracts
+
+  # ── TypeScript backend (comebackhere-backend/) ─────────────────────────
+  # Previously missing: this job covers the Node/TS backend tree that was
+  # not exercised by the original workflow. Fixes #493.
+  ts-backend:
+    name: typescript / unit tests (comebackhere-backend/)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: comebackhere-backend
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: comebackhere-backend/node_modules
+          key: node-modules-ts-backend-${{ runner.os }}-${{ hashFiles('comebackhere-backend/package-lock.json') }}
+          restore-keys: node-modules-ts-backend-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        run: npm test

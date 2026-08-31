@@ -9,6 +9,7 @@ on:
       - 'docs/error-codes.md'
       - 'scripts/check_error_docs_sync.sh'
       - '.github/workflows/ci-error-docs.yml'
+  workflow_call: # called by ci-summary.yml
 
 permissions:
   contents: read
@@ -23,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Verify contract error variants are documented
         run: ./scripts/check_error_docs_sync.sh
