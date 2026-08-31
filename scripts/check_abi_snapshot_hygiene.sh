@@ -13,6 +13,14 @@ REQUIRED_ABIS=(
   abis/compliance.json
 )
 
+# Check if abis/ directory exists
+if [ ! -d "$REPO_ROOT/abis" ]; then
+  echo "ERROR: abis/ directory is missing or misconfigured" >&2
+  echo "This may indicate a bad checkout or missing repository structure." >&2
+  echo "Restore the directory or clone the repository properly." >&2
+  exit 1
+fi
+
 missing=0
 for abi_file in "${REQUIRED_ABIS[@]}"; do
   if [ ! -f "$REPO_ROOT/$abi_file" ]; then
