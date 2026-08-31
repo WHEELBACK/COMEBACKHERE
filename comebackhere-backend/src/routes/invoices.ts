@@ -13,6 +13,7 @@ export interface CreateInvoiceBody {
   token: string
   amount: number
   due_date: number // Unix timestamp (seconds)
+  reference?: string // Optional merchant-supplied reference, max 64 bytes
 }
 
 // Soroban interaction extracted so it can be replaced in tests
@@ -53,7 +54,9 @@ export async function createInvoice(
     nativeToScVal(body.amount, { type: "u64" }),
     nativeToScVal(expiresInSeconds, { type: "u64" }),
     nativeToScVal(null, { type: "void" }),
-    nativeToScVal(null, { type: "void" }),
+    body.reference
+      ? nativeToScVal(body.reference, { type: "string" })
+      : nativeToScVal(null, { type: "void" }),
   ]
 
   const account = await client.getAccount(keypair.publicKey())
@@ -316,6 +319,11 @@ router.get("/:id", validateParams(invoiceIdParamSchema), async (req: Request, re
  *                 type: integer
  *                 description: Future Unix timestamp (seconds)
  *                 example: 1720000000
+ *               reference:
+ *                 type: string
+ *                 description: Optional merchant-supplied reference (e.g. an order ID), max 64 bytes
+ *                 maxLength: 64
+ *                 example: "order-12345"
  *     responses:
  *       201:
  *         description: Invoice created
@@ -381,6 +389,7 @@ router.post("/", validateBody(createInvoiceSchema), async (req: Request, res: Re
       token: body.token,
       amount: body.amount,
       due_date: body.due_date,
+      reference: body.reference,
       status: "Pending",
       created_at: now,
       updated_at: now,

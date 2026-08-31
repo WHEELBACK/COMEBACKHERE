@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Dispute, DisputeOutcome } from '../../types/dispute'
 import { useDisputes } from '../../hooks/useDisputes'
+import { EmptyState, EmptyStateIcon } from '../EmptyState/EmptyState'
 import './DisputeVotingPanel.css'
 
 const CURRENT_SIGNER = import.meta.env.VITE_SIGNER_1 ?? ''
@@ -100,7 +101,7 @@ function formatTime(date: Date): string {
   return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
-export default function DisputeVotingPanel() {
+export default function DisputeVotingPanel({ onNavigateToSettlements }: { onNavigateToSettlements?: () => void } = {}) {
   const { disputes, loading, error, voteDispute, lastUpdated, weightChanged } = useDisputes()
 
   if (loading && disputes.length === 0) return <div className="dispute-panel"><p>Loading disputes...</p></div>
@@ -129,7 +130,17 @@ export default function DisputeVotingPanel() {
         </div>
       </div>
 
-      {open.length === 0 && resolved.length === 0 && <p>No disputes found.</p>}
+      {open.length === 0 && resolved.length === 0 && (
+        <EmptyState
+          icon={<EmptyStateIcon />}
+          title="No Active Disputes"
+          description="There are no open or resolved disputes. All settlements are running normally."
+          action={onNavigateToSettlements ? {
+            label: 'View Settlements',
+            onClick: onNavigateToSettlements,
+          } : undefined}
+        />
+      )}
       {open.length > 0 && (
         <section>
           <h3 className="dispute-panel__section-title">Open Disputes</h3>
