@@ -314,3 +314,117 @@ describe('fetchInvoices() error handling', () => {
     expect(summary.querySelectorAll('.summary-card').length).toBe(7);
   });
 });
+
+// ── Issue 2: Sortable Amount and Status columns ──────────────────────────────
+
+/**
+ * Helper: click a column header by its data-sort value.
+ * The first click on a new field sorts ascending; a second click reverses.
+ * Requires loadAppScriptWithHandlers() to register th click listeners.
+ */
+function clickSortHeader(field) {
+  const th = document.querySelector(`thead th[data-sort="${field}"]`);
+  if (th) th.click();
+}
+
+/**
+ * Load app.js and dispatch DOMContentLoaded so that the header click handlers
+ * registered inside the DOMContentLoaded callback are wired up to the current
+ * DOM elements. Must be called after setupDOM().
+ */
+function loadAppScriptWithHandlers() {
+  loadAppScript();
+  // readyState is 'complete' in jsdom, so DOMContentLoaded never fires
+  // automatically; dispatch it manually to register th click listeners.
+  document.dispatchEvent(new Event('DOMContentLoaded'));
+}
+
+describe('sort by amount (numeric)', () => {
+  beforeEach(async () => {
+    setupDOM();
+    loadAppScriptWithHandlers();
+    await populateInvoices();
+  });
+
+  it('sorts invoices by amount ascending (numeric, not lexicographic)', () => {
+    clickSortHeader('amount');
+    const rows = document.querySelectorAll('#invoiceBody tr');
+    const amounts = Array.from(rows).map(r => {
+      const cell = r.querySelectorAll('td')[3];
+      return parseFloat(cell.textContent);
+    });
+    for (let i = 1; i < amounts.length; i++) {
+      expect(amounts[i]).toBeGreaterThanOrEqual(amounts[i - 1]);
+    }
+  });
+
+  it('sorts invoices by amount descending', () => {
+    clickSortHeader('amount'); // ascending
+    clickSortHeader('amount'); // toggle to descending
+    const rows = document.querySelectorAll('#invoiceBody tr');
+    const amounts = Array.from(rows).map(r => {
+      const cell = r.querySelectorAll('td')[3];
+      return parseFloat(cell.textContent);
+    });
+    for (let i = 1; i < amounts.length; i++) {
+      expect(amounts[i]).toBeLessThanOrEqual(amounts[i - 1]);
+    }
+  });
+
+  it('correctly orders amounts numerically: smallest first is 1200, largest is 8000', () => {
+    clickSortHeader('amount');
+    const rows = document.querySelectorAll('#invoiceBody tr');
+    const first = parseFloat(rows[0].querySelectorAll('td')[3].textContent);
+    const last  = parseFloat(rows[rows.length - 1].querySelectorAll('td')[3].textContent);
+    expect(first).toBeLessThan(last);
+    expect(first).toBe(1200);
+    expect(last).toBe(8000);
+  });
+});
+
+describe('sort by status (defined STATUS_ORDER)', () => {
+  beforeEach(async () => {
+    setupDOM();
+    loadAppScriptWithHandlers();
+    await populateInvoices();
+  });
+
+  it('sorts invoices by status following STATUS_ORDER ascending', () => {
+    clickSortHeader('status');
+    const rows = document.querySelectorAll('#invoiceBody tr');
+    const statuses = Array.from(rows).map(r => {
+      const cell = r.querySelectorAll('td')[4];
+      const badge = cell.querySelector('.badge');
+      const text = badge ? badge.textContent.trim() : '';
+      return text === 'Refund Requested' ? 'RefundRequested' : text;
+    });
+    const ORDER = ['Pending', 'Paid', 'Expired', 'Cancelled', 'RefundRequested', 'Released'];
+    for (let i = 1; i < statuses.length; i++) {
+      const prev = ORDER.indexOf(statuses[i - 1]);
+      const curr = ORDER.indexOf(statuses[i]);
+      if (prev !== -1 && curr !== -1) {
+        expect(curr).toBeGreaterThanOrEqual(prev);
+      }
+    }
+  });
+
+  it('sorts invoices by status descending', () => {
+    clickSortHeader('status'); // ascending
+    clickSortHeader('status'); // toggle to descending
+    const rows = document.querySelectorAll('#invoiceBody tr');
+    const statuses = Array.from(rows).map(r => {
+      const cell = r.querySelectorAll('td')[4];
+      const badge = cell.querySelector('.badge');
+      const text = badge ? badge.textContent.trim() : '';
+      return text === 'Refund Requested' ? 'RefundRequested' : text;
+    });
+    const ORDER = ['Pending', 'Paid', 'Expired', 'Cancelled', 'RefundRequested', 'Released'];
+    for (let i = 1; i < statuses.length; i++) {
+      const prev = ORDER.indexOf(statuses[i - 1]);
+      const curr = ORDER.indexOf(statuses[i]);
+      if (prev !== -1 && curr !== -1) {
+        expect(curr).toBeLessThanOrEqual(prev);
+      }
+    }
+  });
+});
