@@ -3,6 +3,8 @@
 This document maps every `InvoiceError`, `ContractError`, `SettlementError`, and `TreasuryError` variant (and other contract error codes) to its numeric value, the condition that triggers it, and the recommended remediation steps for integrators.
 
 > Cross-reference: see [docs/api-reference.md](./api-reference.md) for HTTP-level error shapes returned by the backend.
+>
+> Cross-reference: see [ARCHITECTURE.md § Invoice state machine](../ARCHITECTURE.md#invoice-state-machine) for a diagram of every legal `InvoiceStatus` transition and the function that triggers it — useful context for knowing which `InvalidStateTransition` / `NotPending` cases below are expected versus a real bug.
 
 ---
 
@@ -47,6 +49,10 @@ Defined in `COMEBACKHERE-contracts/contracts/invoice/src/lib.rs`. Shares some va
 | 12 | `GraceWindowNotExpired` | `release_escrow` was called before `created_at + grace_window`. | Wait until `ledger.timestamp() >= created_at + grace_window`. Admin may reduce `GraceWindow` via `set_grace_window` (default 86 400 seconds). |
 | 13 | `DuplicateNonce` | The (merchant, nonce) pair has already been used by a previous invoice. | Generate a fresh nonce for each invoice. Different merchants may reuse the same nonce value without collision. |
 | 14 | `TreasuryNotConfigured` | `raise_dispute` was called before the admin ran `set_treasury`. | Admin must call `set_treasury` once before disputes can be raised. |
+| 15 | `NotAParty` | `raise_dispute` was called by an address that is neither the invoice's merchant nor its customer. | Sign with the merchant or customer key associated with the invoice. |
+| 16 | `Overflow` | An internal counter (invoice ID, or `created_at + grace_window`) would overflow `u64`. | Practically unreachable outside of adversarial ledger state; not user-actionable. |
+| 17 | `AddressBlocked` | `mark_paids` was called for a customer that the configured compliance contract reports as not allowed. | Confirm the customer's compliance status with `ComplianceContract.is_allowed` before retrying. |
+| 18 | `InvalidStateTransition` | `mark_paids` was called on an invoice in `RefundRequested`, `Released`, `Cancelled`, or `Expired` status — see [ARCHITECTURE.md § Invoice state machine](../ARCHITECTURE.md#invoice-state-machine) for the full legal-transition diagram. | Fetch the current status with `get_invoice_status` first. A refund already in progress must not be overridden by a stale payment confirmation. |
 
 ---
 
@@ -60,6 +66,29 @@ Defined in `COMEBACKHERE-contracts/contracts/compliance/src/lib.rs`.
 | 2 | `ContractPaused` | A state-changing call was made while the compliance contract is paused. | Compliance check calls return early on pause; defer the user action or have the admin unpause. |
 | 3 | `AlreadyInitialized` | `initialize` was called on a contract that is already set up. | Deployment-time error. The compliance contract can only be initialised once. |
 | 4 | `AddressNotFound` | A status query (or block/unblock flow) referenced an address that has not been recorded in `Status(Address)`. | Register the address via `set_status` first, or use the `Cleared` default if no entry exists. |
+| 5 | `PastExpiry` | `allow_address_until` or `batch_allow_addresses` was called with `until <= env.ledger().timestamp()`. | Pass a `until` timestamp strictly greater than the current ledger time. An already-expired entry is rejected rather than silently created as a no-op. |
+| 6 | `BatchTooLarge` | `batch_allow_addresses` was called with more than 50 addresses in a single invocation. | Split the address list into batches of 50 or fewer and submit multiple `batch_allow_addresses` calls. |
+
+> Note: the enum in `COMEBACKHERE-contracts/contracts/compliance/src/lib.rs` is named `ContractError`, matching the naming convention used by the invoice and treasury contracts in this repo. It is sometimes referred to informally as `ComplianceError` in design discussions — they are the same type.
+
+See [Compliance events](#compliance-events) below for the event shapes emitted by `batch_allow_addresses` and the other compliance entry points.
+
+---
+
+## Compliance events
+
+Defined in `COMEBACKHERE-contracts/contracts/compliance/src/lib.rs`. Every state-changing compliance call emits one or more Soroban events so an off-chain indexer can reconstruct allowlist state without re-reading contract storage.
+
+| Event topic | Emitted by | Data payload | Notes |
+| ------------- | ------------ | --------------- | ------- |
+| `address_allowed` | `allow_address` | `Address` | Permanent allow, no expiry. |
+| `address_allowed` | `batch_allow_addresses` | `(Address, u64)` — address and its `until` timestamp | One event per address processed. Same topic as `allow_address`, but the payload additionally carries the `until` value shared by the whole batch. |
+| `address_allowed_until` | `allow_address_until` | `(Address, u64)` — address and its `until` timestamp | Single-address, time-bounded allow. |
+| `address_blocked` | `block_address` | `Address` | |
+| `address_cleared` | `clear_address` | `(Address, AddressStatus)` — address and the status it held immediately before clearing | Never emitted when the address was already `Cleared` (that call fails with `AddressNotFound` instead). |
+| `compliance_batch_processed` | `batch_allow_addresses` | `(Address, u32)` — the calling admin and the number of addresses processed | Emitted once per `batch_allow_addresses` call, after all per-address `address_allowed` events for that call. Lets an indexer confirm a batch operation has fully landed (`processed_count` matches the number of `address_allowed` events it should have seen in that transaction) without treating event counting as the sole source of truth. |
+
+`batch_allow_addresses` caps `addresses` at 50 entries per call (`ContractError::BatchTooLarge` above that) and validates `until` the same way `allow_address_until` does (`ContractError::PastExpiry` if `until <= env.ledger().timestamp()`). Both checks run before any storage writes or events, so a rejected call has no partial effects.
 
 ---
 

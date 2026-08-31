@@ -4,26 +4,21 @@
   "functions": [
     "initialize",
     "create_invoice",
-    "mark_paid",
     "get_invoice",
     "get_invoice_status",
-    "cancel_invoice",
+    "get_invoices_by_merchant",
+    "mark_paids",
+    "cancel_invoiced",
     "request_refund",
-    "batch_expire(offset: u32, limit: u32, returns: u32)",
+    "release_escrow",
+    "batch_expire",
+    "set_treasury",
+    "get_treasury",
+    "raise_dispute",
     "pause",
     "unpause",
     "set_grace_window",
-    "get_grace_window",
-    "release_escrow"
+    "get_grace_window"
   ],
-  "events": [
-    "invoice_created",
-    "invoice_paid",
-    "invoice_expired",
-    "invoice_cancelled",
-    "invoice_refund_req",
-    "escrow_released",
-    "contract_paused",
-    "contract_unpaused"
-  ]
+  "events": ["invoice_created", "invoice_paid", "invoice_expired", "invoice_cancelled", "invoice_refund_req", "escrow_released", "contract_paused", "contract_unpaused", "dispute_raised"]
 }

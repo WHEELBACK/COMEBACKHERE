@@ -1,5 +1,13 @@
 import './EmptyState.css'
 
+interface EmptyStateAction {
+  label: string
+  /** Called when the action button is clicked (mutually exclusive with href). */
+  onClick?: () => void
+  /** Navigate to this path instead of using an onClick handler. */
+  href?: string
+}
+
 interface EmptyStateProps {
   /**
    * Title shown in the empty state
@@ -14,12 +22,10 @@ interface EmptyStateProps {
    */
   icon?: React.ReactNode
   /**
-   * Optional action button configuration
+   * Optional action button/link configuration.
+   * Supply `onClick` for a callback-driven CTA or `href` for a navigation link.
    */
-  action?: {
-    label: string
-    onClick: () => void
-  }
+  action?: EmptyStateAction
 }
 
 export function EmptyState({
@@ -34,13 +40,24 @@ export function EmptyState({
       <h3 className="empty-state__title">{title}</h3>
       {description && <p className="empty-state__description">{description}</p>}
       {action && (
-        <button
-          className="empty-state__action"
-          onClick={action.onClick}
-          aria-label={action.label}
-        >
-          {action.label}
-        </button>
+        action.href ? (
+          <a
+            className="empty-state__action"
+            href={action.href}
+            aria-label={action.label}
+          >
+            {action.label}
+          </a>
+        ) : (
+          <button
+            className="empty-state__action"
+            onClick={action.onClick}
+            type="button"
+            aria-label={action.label}
+          >
+            {action.label}
+          </button>
+        )
       )}
     </div>
   )

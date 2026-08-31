@@ -382,6 +382,99 @@ soroban contract invoke \
 
 ---
 
+### Check whether an address is allowed (`is_allowed`)
+
+`is_allowed` returns `true` only when an address has been explicitly allowed
+**and** its allowance has not expired.  Three distinct scenarios produce a
+`false` result, and integrators must not treat them as equivalent — the
+appropriate response differs in each case.
+
+#### Scenario 1 — Address was never allowed
+
+The address has never been passed to `allow_address`.  `is_allowed` returns
+`false` immediately.  The correct action is to route the payer through your
+KYC/onboarding flow before retrying.
+
+```sh
+# The address GNEW... has never been allowed.
+soroban contract invoke \
+  --id $COMPLIANCE_CONTRACT \
+  --source $SECRET_KEY \
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- is_allowed \
+  --address GNEWADDRESSNEVERALLOWED...
+# → false
+```
+
+Expected response: `false`
+
+The backend maps this to error code `COMPLIANCE_NOT_ALLOWED`.  Return HTTP 403
+to the caller with a message indicating that the address must complete
+onboarding before transacting.
+
+#### Scenario 2 — Address was allowed but the allowance has expired
+
+`allow_address` was called with an `expires_at` timestamp that has since
+passed.  `is_allowed` returns `false` because the allowance window closed.
+The address is not blocked — it simply needs to be re-allowed (e.g., after
+a periodic compliance re-check).
+
+```sh
+# GEXPIRED... was allowed until ledger time 1700000000, which has passed.
+soroban contract invoke \
+  --id $COMPLIANCE_CONTRACT \
+  --source $SECRET_KEY \
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- is_allowed \
+  --address GEXPIREDADDRESS...
+# → false  (allowance window closed)
+```
+
+Expected response: `false`
+
+The backend maps this to error code `COMPLIANCE_ALLOWANCE_EXPIRED`.  Return
+HTTP 403 with a message telling the caller that their compliance approval has
+lapsed and they must renew it.  Do **not** present this to the user as a block
+— it is a renewal prompt.
+
+#### Scenario 3 — Address is explicitly blocked
+
+`block_address` was called for this address.  `is_allowed` returns `false`
+regardless of any prior allowance.  A blocked address must not transact until
+the block is explicitly lifted by a compliance admin.
+
+```sh
+# GBLOCKED... was explicitly blocked via block_address.
+soroban contract invoke \
+  --id $COMPLIANCE_CONTRACT \
+  --source $SECRET_KEY \
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- is_allowed \
+  --address GBLOCKEDADDRESS...
+# → false  (explicit block in effect)
+```
+
+Expected response: `false`
+
+The backend maps this to error code `COMPLIANCE_BLOCKED`.  Return HTTP 403
+with a message indicating that the address is blocked from transacting.  Do
+**not** expose details about why it was blocked to the end-user; log the event
+for compliance audit purposes and direct the user to your support channel.
+
+#### Summary of `is_allowed` return values
+
+| State | `is_allowed` result | Error code | Suggested HTTP status |
+| ----- | ------------------- | ---------- | --------------------- |
+| Never allowed | `false` | `COMPLIANCE_NOT_ALLOWED` | 403 |
+| Allowance expired | `false` | `COMPLIANCE_ALLOWANCE_EXPIRED` | 403 |
+| Explicitly blocked | `false` | `COMPLIANCE_BLOCKED` | 403 |
+| Allowed and within window | `true` | — | proceed |
+
+---
+
 ## Invoice grace window
 
 ### Read

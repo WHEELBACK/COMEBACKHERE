@@ -3,8 +3,15 @@
 mod events;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, String, Symbol,
+    Vec,
 };
+
+/// Maximum length, in bytes, allowed for the optional `reference` field on an invoice.
+const MAX_REFERENCE_LEN: u32 = 64;
+
+/// Minimum invoice amount, in stroops (10,000,000 stroops == 1 USDC given 7 decimals).
+const MIN_AMOUNT_USDC: i128 = 10_000_000;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -24,6 +31,13 @@ pub enum ContractError {
     DuplicateNonce = 13,
     TreasuryNotConfigured = 14,
     NotAParty = 15,
+    Overflow = 16,
+    AddressBlocked = 17,
+    /// A state-changing call was rejected because the invoice is in a terminal
+    /// or refund-related state that does not permit the requested transition
+    /// (e.g. `mark_paids` called on an invoice that is `RefundRequested`,
+    /// `Released`, `Cancelled`, or `Expired`).
+    InvalidStateTransition = 18,
 }
 
 #[contracttype]
@@ -48,6 +62,9 @@ pub struct Invoice {
     pub status: InvoiceStatus,
     pub created_at: u64,
     pub expires_at: u64,
+    /// Optional merchant-supplied reference (e.g. an order or invoice number
+    /// from the merchant's own system), capped at `MAX_REFERENCE_LEN` bytes.
+    pub reference: Option<String>,
 }
 
 #[contracttype]
@@ -139,13 +156,18 @@ impl InvoiceContract {
     /// - `expires_at`: Absolute ledger timestamp (seconds since Unix epoch) after which
     ///   the invoice can no longer be paid.
     /// - `nonce`: A per-merchant unique value used to prevent duplicate submissions.
+    /// - `reference`: An optional merchant-supplied reference (e.g. an order ID from the
+    ///   merchant's own system), capped at `MAX_REFERENCE_LEN` (64) bytes.
     ///
     /// # Returns
     /// The newly assigned invoice ID (a `u64` counter starting at 1).
     ///
     /// # Errors
     /// - [`ContractError::ContractPaused`] if the contract is currently paused.
+    /// - [`ContractError::AmountPrecision`] if `amount` is below `MIN_AMOUNT_USDC`
+    ///   (10,000,000 stroops, i.e. 1 USDC).
     /// - [`ContractError::DuplicateNonce`] if `(merchant, nonce)` has already been used.
+    /// - [`ContractError::ReferenceTooLong`] if `reference` exceeds `MAX_REFERENCE_LEN` bytes.
     ///
     /// # Events
     /// Emits `invoice_created(merchant, invoice_id)` on success.
@@ -157,9 +179,20 @@ impl InvoiceContract {
         token: Address,
         expires_at: u64,
         nonce: u64,
+        reference: Option<String>,
     ) -> Result<u64, ContractError> {
         check_not_paused(&env)?;
         merchant.require_auth();
+
+        if amount < MIN_AMOUNT_USDC {
+            return Err(ContractError::AmountPrecision);
+        }
+
+        if let Some(ref r) = reference {
+            if r.len() > MAX_REFERENCE_LEN {
+                return Err(ContractError::ReferenceTooLong);
+            }
+        }
 
         let nonce_key = DataKey::Nonce(merchant.clone(), nonce);
         if env.storage().persistent().has(&nonce_key) {
@@ -187,6 +220,7 @@ impl InvoiceContract {
             status: InvoiceStatus::Pending,
             created_at: now,
             expires_at,
+            reference,
         };
         env.storage()
             .persistent()
@@ -227,6 +261,68 @@ impl InvoiceContract {
         Ok(invoice.status)
     }
 
+    /// Returns a paginated list of invoice IDs belonging to a given merchant, most useful
+    /// for callers (e.g. the backend indexer) that need to enumerate a merchant's invoices
+    /// without tracking IDs off-chain.
+    ///
+    /// Follows the same pagination shape as [`Self::get_pending_settlements`]-style calls
+    /// on the treasury contract: `start_after` is the number of matching invoices to skip,
+    /// and `limit` bounds the page size.
+    ///
+    /// # Parameters
+    /// - `merchant`: The merchant address to filter invoices by.
+    /// - `start_after`: Number of matching invoices to skip before collecting the page
+    ///   (defaults to 0 when `None`).
+    /// - `limit`: Maximum number of invoice IDs to return. Capped at 100 regardless of the
+    ///   value passed in.
+    ///
+    /// # Returns
+    /// A `Vec<u64>` of invoice IDs belonging to `merchant`, oldest first.
+    pub fn get_invoices_by_merchant(
+        env: Env,
+        merchant: Address,
+        start_after: Option<u32>,
+        limit: u32,
+    ) -> Vec<u64> {
+        const MAX_PAGE_SIZE: u32 = 100;
+        let cap: u32 = if limit > MAX_PAGE_SIZE {
+            MAX_PAGE_SIZE
+        } else {
+            limit
+        };
+        let skip: u32 = start_after.unwrap_or(0);
+
+        let count: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::InvoiceCount)
+            .unwrap_or(0);
+
+        let mut result: Vec<u64> = Vec::new(&env);
+        let mut matched: u32 = 0;
+        let mut collected: u32 = 0;
+
+        for id in 1..=count {
+            if let Some(invoice) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Invoice>(&DataKey::Invoice(id))
+            {
+                if invoice.merchant == merchant {
+                    if matched >= skip {
+                        if collected >= cap {
+                            break;
+                        }
+                        result.push_back(id);
+                        collected += 1;
+                    }
+                    matched += 1;
+                }
+            }
+        }
+        result
+    }
+
     /// Marks a batch of invoices as [`InvoiceStatus::Paid`] in a single transaction.
     ///
     /// Each invoice in the batch must be in `Pending` status and must not have expired.
@@ -239,7 +335,10 @@ impl InvoiceContract {
     /// # Errors
     /// - [`ContractError::ContractPaused`] if the contract is currently paused.
     /// - [`ContractError::InvoiceNotFound`] if any ID in the batch does not exist.
-    /// - [`ContractError::InvoiceAlreadyPaid`] if any invoice is not in `Pending` status.
+    /// - [`ContractError::InvalidStateTransition`] if any invoice is `RefundRequested`,
+    ///   `Released`, `Cancelled`, or `Expired` — a payment confirmation must never
+    ///   silently override a refund already in progress or a closed invoice.
+    /// - [`ContractError::InvoiceAlreadyPaid`] if any invoice is already `Paid`.
     /// - [`ContractError::InvoiceExpired`] if any invoice's `expires_at` has passed.
     ///
     /// # Events
@@ -260,6 +359,20 @@ impl InvoiceContract {
                 .persistent()
                 .get::<DataKey, Invoice>(&DataKey::Invoice(id))
                 .ok_or(ContractError::InvoiceNotFound)?;
+            // Terminal and refund-related states must never be silently
+            // overridden by a stale payment confirmation: a payer's refund
+            // request (or an already-settled/cancelled/expired invoice) is
+            // rejected with a distinct error rather than falling through to
+            // the generic "already paid" case below.
+            if matches!(
+                invoice.status,
+                InvoiceStatus::RefundRequested
+                    | InvoiceStatus::Released
+                    | InvoiceStatus::Cancelled
+                    | InvoiceStatus::Expired
+            ) {
+                return Err(ContractError::InvalidStateTransition);
+            }
             if invoice.status != InvoiceStatus::Pending {
                 return Err(ContractError::InvoiceAlreadyPaid);
             }
@@ -641,7 +754,7 @@ impl InvoiceContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger};
     use soroban_sdk::Env;
 
     fn setup_contract(ts: u64) -> (Env, Address, Address) {
@@ -661,7 +774,7 @@ mod tests {
         let merchant = Address::generate(&env);
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
-        let invoice_id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let invoice_id = client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &1, &None);
         assert_eq!(invoice_id, 1);
     }
 
@@ -673,9 +786,9 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
 
-        client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &1, &None);
 
-        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let result = client.try_create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &1, &None);
         assert_eq!(result, Err(Ok(ContractError::DuplicateNonce)));
     }
 
@@ -697,8 +810,8 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
 
-        client.create_invoice(&merchant_a, &customer, &1000i128, &token, &5000, &1);
-        client.create_invoice(&merchant_b, &customer, &1000i128, &token, &5000, &1);
+        client.create_invoice(&merchant_a, &customer, &10_000_000i128, &token, &5000, &1, &None);
+        client.create_invoice(&merchant_b, &customer, &10_000_000i128, &token, &5000, &1, &None);
 
         let invoice_a = client.get_invoice(&1);
         let invoice_b = client.get_invoice(&2);
@@ -722,7 +835,7 @@ mod tests {
 
         client.pause(&admin);
 
-        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let result = client.try_create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &1, &None);
         assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
     }
 
@@ -741,7 +854,7 @@ mod tests {
         let merchant = Address::generate(&env);
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
-        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let result = client.try_create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &1, &None);
         assert_eq!(result, Err(Ok(ContractError::Overflow)));
     }
 
@@ -758,7 +871,7 @@ mod tests {
         let merchant = Address::generate(&env);
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
-        let invoice_id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let invoice_id = client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &1, &None);
         client.mark_paids(&soroban_sdk::vec![&env, invoice_id]);
         client.request_refund(&invoice_id, &customer);
         let result = client.try_release_escrow(&invoice_id, &merchant);
@@ -780,11 +893,11 @@ mod tests {
         client.initialize(&admin);
 
         client.pause(&admin);
-        let result = client.try_create_invoice(&merchant, &customer, &1000i128, &token, &5000, &1);
+        let result = client.try_create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &1, &None);
         assert_eq!(result, Err(Ok(ContractError::ContractPaused)));
 
         client.unpause(&admin);
-        let invoice_id = client.create_invoice(&merchant, &customer, &1000i128, &token, &5000, &2);
+        let invoice_id = client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &2, &None);
         assert_eq!(invoice_id, 1);
     }
 
@@ -874,13 +987,8 @@ mod tests {
         invoice_client.initialize(&admin);
         invoice_client.set_treasury(&admin, &treasury_cid);
         env.ledger().with_mut(|li| li.timestamp = ts);
-        (
-            env,
-            invoice_cid,
-            treasury_cid,
-            admin,
-            Address::generate(&env),
-        )
+        let customer = Address::generate(&env);
+        (env, invoice_cid, treasury_cid, admin, customer)
     }
 
     #[test]
@@ -893,7 +1001,7 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
         let invoice_id =
-            invoice_client.create_invoice(&merchant, &customer, &1000i128, &token, &9999, &1);
+            invoice_client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &9999, &1, &None);
 
         invoice_client.raise_dispute(&invoice_id, &1u64, &merchant, &1u32);
 
@@ -912,7 +1020,7 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
         let invoice_id =
-            invoice_client.create_invoice(&merchant, &customer, &500i128, &token, &9999, &1);
+            invoice_client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &9999, &1, &None);
 
         invoice_client.raise_dispute(&invoice_id, &2u64, &merchant, &1u32);
 
@@ -948,7 +1056,7 @@ mod tests {
         let token = Address::generate(&env);
         let claimant = Address::generate(&env);
         let invoice_id =
-            invoice_client.create_invoice(&merchant, &customer, &100i128, &token, &9999, &1);
+            invoice_client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &9999, &1, &None);
 
         let result = invoice_client.try_raise_dispute(&invoice_id, &1u64, &claimant, &1u32);
         assert_eq!(result, Err(Ok(ContractError::TreasuryNotConfigured)));
@@ -963,7 +1071,7 @@ mod tests {
         let customer = Address::generate(&env);
         let token = Address::generate(&env);
         let invoice_id =
-            invoice_client.create_invoice(&merchant, &customer, &100i128, &token, &9999, &1);
+            invoice_client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &9999, &1, &None);
 
         invoice_client.pause(&admin);
 
@@ -980,7 +1088,7 @@ mod tests {
         let merchant = Address::generate(env);
         let customer = Address::generate(env);
         let token = Address::generate(env);
-        let id = client.create_invoice(&merchant, &customer, &1_000_000i128, &token, &9999, &1);
+        let id = client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &9999, &1, &None);
         (merchant, customer, id)
     }
 
@@ -1096,5 +1204,69 @@ mod tests {
         client.pause(&admin);
         let res = client.try_cancel_invoiced(&id, &merchant);
         assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    // ── mark_paids terminal/refund-state guard tests ─────────────────────────
+
+    /// A stale mark_paids call must not silently override a refund already
+    /// requested by the customer — it should be rejected, not re-marked Paid.
+    #[test]
+    fn test_mark_paids_on_refund_requested_returns_invalid_state_transition() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let (_merchant, customer, id) = create_test_invoice(&client, &env);
+
+        client.mark_paids(&soroban_sdk::vec![&env, id]);
+        client.request_refund(&id, &customer);
+
+        let res = client.try_mark_paids(&soroban_sdk::vec![&env, id]);
+        assert_eq!(res, Err(Ok(ContractError::InvalidStateTransition)));
+
+        // The refund request must survive the stale confirmation untouched.
+        let invoice = client.get_invoice(&id);
+        assert_eq!(invoice.status, InvoiceStatus::RefundRequested);
+    }
+
+    /// mark_paids on a Released (escrow already released) invoice is rejected.
+    #[test]
+    fn test_mark_paids_on_released_returns_invalid_state_transition() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let (merchant, customer, id) = create_test_invoice(&client, &env);
+
+        client.mark_paids(&soroban_sdk::vec![&env, id]);
+        client.request_refund(&id, &customer);
+        client.set_grace_window(&admin, &0u64);
+        client.release_escrow(&id, &merchant);
+
+        let res = client.try_mark_paids(&soroban_sdk::vec![&env, id]);
+        assert_eq!(res, Err(Ok(ContractError::InvalidStateTransition)));
+    }
+
+    /// mark_paids on a Cancelled invoice is rejected with the same distinct error.
+    #[test]
+    fn test_mark_paids_on_cancelled_returns_invalid_state_transition() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let (merchant, _customer, id) = create_test_invoice(&client, &env);
+
+        client.cancel_invoiced(&id, &merchant);
+
+        let res = client.try_mark_paids(&soroban_sdk::vec![&env, id]);
+        assert_eq!(res, Err(Ok(ContractError::InvalidStateTransition)));
+    }
+
+    /// mark_paids on an already-Paid invoice still returns the more specific
+    /// InvoiceAlreadyPaid error, distinct from the terminal/refund-state guard.
+    #[test]
+    fn test_mark_paids_on_already_paid_returns_invoice_already_paid() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let (_merchant, _customer, id) = create_test_invoice(&client, &env);
+
+        client.mark_paids(&soroban_sdk::vec![&env, id]);
+
+        let res = client.try_mark_paids(&soroban_sdk::vec![&env, id]);
+        assert_eq!(res, Err(Ok(ContractError::InvoiceAlreadyPaid)));
     }
 }

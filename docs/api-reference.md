@@ -8,6 +8,10 @@ All responses are JSON.
 > **Machine-readable spec:** A Swagger/OpenAPI 3.0 spec is served at
 > [`GET /api-docs/swagger.json`](http://localhost:3000/api-docs/swagger.json) (raw JSON)
 > and [`GET /api-docs`](http://localhost:3000/api-docs) (interactive Swagger UI).
+>
+> **Rate limits:** All endpoints are subject to per-IP rate limiting. See
+> [docs/rate-limits.md](./rate-limits.md) for default limits, configuration,
+> and the 429 response shape.
 
 ---
 

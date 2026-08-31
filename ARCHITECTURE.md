@@ -64,9 +64,38 @@ A working clone for end-to-end development looks like this (see `docs/dev-enviro
 
 When working inside this repository alone, the in-tree `COMEBACKHERE-contracts/` checkout acts as the canonical contracts tree; the sibling-clone step is optional for backend/frontend contributors.
 
+## Invoice state machine
+
+The invoice contract (`COMEBACKHERE-contracts/contracts/invoice/src/lib.rs`, mirrored at `contracts/invoice/src/lib.rs`) is the source of truth every other layer reads from: backend status displays, the indexer, and both frontend apps all ultimately derive their view of an invoice from this state machine. The diagram below shows every `InvoiceStatus` value and the function whose call transitions an invoice into it. Any transition not shown here is illegal and the calling function returns an `InvalidStateTransition` / `NotPending` style error (see [docs/error-codes.md](docs/error-codes.md) for the exact variant and code per contract).
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: create_invoice
+
+    Pending --> Paid: mark_paids / pay_invoice
+    Pending --> Expired: batch_expire
+    Pending --> Cancelled: cancel_invoiced / cancel_invoice
+
+    Paid --> RefundRequested: request_refund
+    Paid --> RefundRequested: cancel_invoiced / cancel_invoice
+
+    RefundRequested --> Released: release_escrow (after grace window)
+
+    Expired --> [*]
+    Cancelled --> [*]
+    Released --> [*]
+```
+
+Notes on edges that are deliberately absent from this diagram:
+
+- **`Paid` is never re-entered.** Once an invoice leaves `Pending`, no function transitions it back to `Paid`. In particular, `mark_paids` guards against being called on an invoice that is `RefundRequested`, `Released`, `Cancelled`, or `Expired`, so a stale or replayed payment confirmation can never silently override a refund already in progress.
+- **`RefundRequested`, `Released`, `Cancelled`, and `Expired` are terminal with respect to payment and cancellation** — `cancel_invoiced`, `request_refund`, and `mark_paids` all reject calls made once an invoice has reached one of these states.
+- **`release_escrow` is time-gated**, not just state-gated: it additionally requires `ledger.timestamp() >= invoice.created_at + grace_window`.
+
 ## Further reading
 
 - [docs/dev-environment.md](docs/dev-environment.md) — full local setup.
 - [docs/abi-snapshot-workflow.md](docs/abi-snapshot-workflow.md) — when and how to regenerate `abis/`.
+- [docs/adr-0001-dual-source-trees.md](docs/adr-0001-dual-source-trees.md) — why the dual source trees exist and the plan to remove them.
 - [docs/error-codes.md](docs/error-codes.md) — contract error enums and their meanings.
 - [SECURITY.md](SECURITY.md) — which paths handle fund-safety-critical code.

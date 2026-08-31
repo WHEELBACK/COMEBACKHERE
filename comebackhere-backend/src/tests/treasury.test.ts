@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import request from "supertest"
 import { createApp } from "../app.js"
-import { executeSettlementWithBalanceCheck } from "../routes/treasury.js"
+import { executeSettlementWithBalanceCheck, simulateSettlement } from "../routes/treasury.js"
 import { setGraceWindow } from "../routes/invoice-settings.js"
 import type { SorobanClient } from "../lib/soroban.js"
 import { SorobanRpc, SorobanDataBuilder, xdr } from "stellar-sdk"
@@ -341,6 +341,116 @@ describe("executeSettlementWithBalanceCheck — #205 additional cases", () => {
       expect.any(String),
       NETWORK,
     )
+  })
+})
+
+describe("simulateSettlement", () => {
+  const env = {
+    rpcUrl: ENV.SOROBAN_RPC_URL,
+    treasuryContractId: TREASURY_CONTRACT,
+    signerSecret: SIGNER_SECRET,
+    networkPassphrase: NETWORK,
+  }
+
+  const mockClient = makeMockClient()
+
+  it("returns would_succeed: true without submitting or mutating state", async () => {
+    const getSettlementSimulation = vi.fn().mockResolvedValue({
+      settlementId: 1n,
+      status: "Pending",
+      wouldSucceed: true,
+      approvalWeight: 2n,
+      threshold: 2n,
+      settlementAmount: 5_000_000n,
+      treasuryBalance: 10_000_000n,
+      projectedBalance: 5_000_000n,
+    })
+
+    const result = await simulateSettlement({ settlement_id: 1 }, env, mockClient, {
+      getSettlementSimulation,
+    })
+
+    expect(result).toEqual({
+      settlement_id: 1,
+      status: "Pending",
+      would_succeed: true,
+      approval_weight: "2",
+      threshold: "2",
+      settlement_amount: "5000000",
+      treasury_balance: "10000000",
+      projected_balance: "5000000",
+    })
+    expect(getSettlementSimulation).toHaveBeenCalledWith(
+      mockClient,
+      TREASURY_CONTRACT,
+      1n,
+      expect.any(String),
+      NETWORK,
+    )
+  })
+
+  it("returns would_succeed: false when quorum or balance checks fail", async () => {
+    const getSettlementSimulation = vi.fn().mockResolvedValue({
+      settlementId: 2n,
+      status: "Pending",
+      wouldSucceed: false,
+      approvalWeight: 1n,
+      threshold: 2n,
+      settlementAmount: 5_000_000n,
+      treasuryBalance: 1_000_000n,
+      projectedBalance: -4_000_000n,
+    })
+
+    const result = await simulateSettlement({ settlement_id: 2 }, env, mockClient, {
+      getSettlementSimulation,
+    })
+
+    expect(result.would_succeed).toBe(false)
+    expect(result.projected_balance).toBe("-4000000")
+  })
+
+  it("propagates a 422 when the settlement does not exist", async () => {
+    const getSettlementSimulation = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("Soroban simulation failed: Error(Contract, #10)"), { status: 422 }))
+
+    await expect(
+      simulateSettlement({ settlement_id: 999 }, env, mockClient, { getSettlementSimulation }),
+    ).rejects.toMatchObject({ status: 422 })
+  })
+})
+
+describe("POST /api/treasury/simulate-settlement", () => {
+  const app = createApp()
+  let envBackup: Record<string, string | undefined>
+
+  beforeEach(() => {
+    envBackup = {}
+    for (const key of Object.keys(ENV)) {
+      envBackup[key] = process.env[key]
+      process.env[key] = ENV[key as keyof typeof ENV]
+    }
+  })
+
+  afterEach(() => {
+    for (const [key, val] of Object.entries(envBackup)) {
+      if (val === undefined) delete process.env[key]
+      else process.env[key] = val
+    }
+  })
+
+  it("400 when settlement_id is missing", async () => {
+    const res = await request(app).post("/api/treasury/simulate-settlement").send({})
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/settlement_id/)
+  })
+
+  it("503 when required env vars are missing", async () => {
+    delete process.env.TREASURY_CONTRACT_ID
+    const res = await request(app)
+      .post("/api/treasury/simulate-settlement")
+      .send({ settlement_id: 1 })
+    expect(res.status).toBe(503)
   })
 })
 
