@@ -170,7 +170,7 @@
         const returnsHtml = returns
           ? `<span class="fn-returns">${returns}</span>`
           : '';
-        return `<div class="fn-row">
+        return `<div class="fn-row" tabindex="-1" role="row">
           <span class="fn-name">${name}</span>
           <span class="fn-params">${paramsHtml}</span>
           ${returnsHtml}
@@ -184,7 +184,7 @@
           <span class="badge" style="background:#e0e7ff;color:#3730a3">${abi.functions.length} functions</span>
           <span class="chevron" aria-hidden="true">▶</span>
         </div>
-        <div class="fn-list" id="${id}" role="region" aria-labelledby="${id}-title">${fnRows}</div>
+        <div class="fn-list" id="${id}" role="rowgroup" aria-label="${abi.contract} functions" aria-labelledby="${id}-title">${fnRows}</div>
       </div>`;
     }
 
@@ -195,12 +195,79 @@
       header.setAttribute('aria-expanded', String(isOpen));
     }
 
-    // Keyboard support: Enter / Space to toggle the collapsible sections
+    // Keyboard support: Enter / Space to toggle the collapsible sections;
+    // ArrowDown / ArrowUp to move between contract headers or fn-rows.
     document.getElementById('explorer').addEventListener('keydown', (e) => {
       const btn = e.target.closest('.contract-header');
+      const row = e.target.closest('.fn-row');
+
       if (btn && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault();
         toggleSection(btn);
+        return;
+      }
+
+      // Arrow navigation between contract headers
+      if (btn && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        const headers = Array.from(document.querySelectorAll('.contract-header'));
+        const idx = headers.indexOf(btn);
+        if (e.key === 'ArrowDown' && idx < headers.length - 1) {
+          headers[idx + 1].focus();
+        } else if (e.key === 'ArrowUp' && idx > 0) {
+          headers[idx - 1].focus();
+        }
+        return;
+      }
+
+      // When a contract header is focused, ArrowRight opens the section
+      // and moves focus to the first fn-row; ArrowLeft closes it.
+      if (btn && e.key === 'ArrowRight') {
+        e.preventDefault();
+        const target = document.getElementById(btn.dataset.target);
+        if (!btn.classList.contains('open')) toggleSection(btn);
+        const firstRow = target && target.querySelector('.fn-row');
+        if (firstRow) firstRow.focus();
+        return;
+      }
+
+      if (btn && e.key === 'ArrowLeft') {
+        e.preventDefault();
+        if (btn.classList.contains('open')) toggleSection(btn);
+        return;
+      }
+
+      // Arrow navigation inside a fn-list
+      if (row) {
+        const list = row.closest('.fn-list');
+        const rows = list ? Array.from(list.querySelectorAll('.fn-row')) : [];
+        const idx = rows.indexOf(row);
+
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          if (idx < rows.length - 1) {
+            rows[idx + 1].focus();
+          }
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          if (idx > 0) {
+            rows[idx - 1].focus();
+          } else {
+            // Move focus back to the parent contract header
+            const section = list.closest('.contract-section');
+            const header = section && section.querySelector('.contract-header');
+            if (header) header.focus();
+          }
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          // Collapse the section and return focus to the header
+          const section = list.closest('.contract-section');
+          const header = section && section.querySelector('.contract-header');
+          if (header) {
+            if (header.classList.contains('open')) toggleSection(header);
+            header.focus();
+          }
+        }
       }
     });
 
