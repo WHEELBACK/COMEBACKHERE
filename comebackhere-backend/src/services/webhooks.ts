@@ -7,10 +7,15 @@
  * `signingSecret` argument when called directly).
  *
  * Consumers verify authenticity by:
- *   1. Reading the raw request body (before JSON.parse).
- *   2. Computing HMAC-SHA256(secret, rawBody).
+ *   1. Reading the raw request body as bytes (before JSON.parse).
+ *   2. Computing HMAC-SHA256(secret, rawBody) over those exact bytes.
  *   3. Comparing the hex digest to the `X-COMEBACKHERE-Signature` header
  *      using a constant-time comparison to prevent timing attacks.
+ *
+ * The signature is computed over the raw body bytes (Buffer/Uint8Array), not a
+ * decoded string. This keeps verification stable when the body contains
+ * non-UTF-8 characters or when a proxy preserves the raw payload without
+ * re-encoding it.
  *
  * Header name: `X-COMEBACKHERE-Signature`
  * Algorithm:   HMAC-SHA256
@@ -35,14 +40,31 @@ export interface WebhookDeliveryResult {
 }
 
 /**
+ * Normalize the raw body into the exact bytes that should be signed.
+ *
+ * HMAC input must be the exact raw bytes of the request body. Passing a
+ * `Buffer` or `Uint8Array` preserves the original bytes verbatim, which keeps
+ * signatures stable even when the body contains non-UTF-8 characters or when a
+ * proxy preserves the raw payload without re-encoding it. Supplying a string
+ * still works for backward compatibility and is encoded to its UTF-8 bytes.
+ */
+function toRawBytes(rawBody: string | Buffer | Uint8Array): Buffer {
+  if (Buffer.isBuffer(rawBody)) return rawBody
+  if (rawBody instanceof Uint8Array) {
+    return Buffer.from(rawBody.buffer, rawBody.byteOffset, rawBody.byteLength)
+  }
+  return Buffer.from(rawBody)
+}
+
+/**
  * Compute an HMAC-SHA256 signature over `rawBody` using `secret`.
  *
  * @param secret  - The per-merchant signing secret (minimum 32 chars recommended).
- * @param rawBody - The exact bytes that will be sent as the request body.
+ * @param rawBody - The exact bytes (or string) that will be sent as the request body.
  * @returns Lowercase hex-encoded HMAC-SHA256 digest.
  */
-export function signPayload(secret: string, rawBody: string): string {
-  return createHmac("sha256", secret).update(rawBody, "utf8").digest("hex")
+export function signPayload(secret: string, rawBody: string | Buffer | Uint8Array): string {
+  return createHmac("sha256", secret).update(toRawBytes(rawBody)).digest("hex")
 }
 
 /**
@@ -51,7 +73,11 @@ export function signPayload(secret: string, rawBody: string): string {
  *
  * @returns `true` if the signature is valid, `false` otherwise.
  */
-export function verifySignature(secret: string, rawBody: string, signature: string): boolean {
+export function verifySignature(
+  secret: string,
+  rawBody: string | Buffer | Uint8Array,
+  signature: string,
+): boolean {
   try {
     const expected = signPayload(secret, rawBody)
     // Both buffers must have the same length for timingSafeEqual

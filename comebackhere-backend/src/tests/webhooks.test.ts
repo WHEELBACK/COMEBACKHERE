@@ -97,6 +97,35 @@ describe("verifySignature", () => {
     // Truncated hex — different byte length
     expect(verifySignature(TEST_SECRET, body, "abcd")).toBe(false)
   })
+
+  it("signs raw non-UTF-8 bytes without data loss", () => {
+    // Body containing raw bytes that are not valid UTF-8 (e.g. latin-1 payload
+    // passed through by a proxy). Signing the raw bytes must match a signature
+    // produced from the identical byte buffer.
+    const rawBody = Buffer.from([0x7b, 0x22, 0x61, 0x22, 0x3a, 0x22, 0xe9, 0x22, 0x7d])
+    const sig = signPayload(TEST_SECRET, rawBody)
+    expect(verifySignature(TEST_SECRET, rawBody, sig)).toBe(true)
+  })
+
+  it("accepts a Uint8Array body for signing and verification", () => {
+    const bodyBytes = Buffer.from('{"event":"test"}')
+    const asUint8 = new Uint8Array(bodyBytes.buffer, bodyBytes.byteOffset, bodyBytes.byteLength)
+    const sig = signPayload(TEST_SECRET, asUint8)
+    expect(verifySignature(TEST_SECRET, asUint8, sig)).toBe(true)
+  })
+
+  it("buffer signature matches the string signature for the same UTF-8 payload", () => {
+    const body = '{"event":"test"}'
+    const bodyBuf = Buffer.from(body)
+    expect(signPayload(TEST_SECRET, bodyBuf)).toBe(signPayload(TEST_SECRET, body))
+  })
+
+  it("tampered raw bytes fail verification", () => {
+    const original = Buffer.from('{"event":"test"}')
+    const tampered = Buffer.from('{"event":"other"}')
+    const sig = signPayload(TEST_SECRET, original)
+    expect(verifySignature(TEST_SECRET, tampered, sig)).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------
