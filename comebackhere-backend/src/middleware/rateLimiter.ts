@@ -62,8 +62,29 @@ export function resetLimiter(): void {
 }
 
 /**
+ * Attaches standard rate-limit headers to the response.
+ *
+ * X-RateLimit-Limit     – total requests allowed per window
+ * X-RateLimit-Remaining – requests remaining in the current window
+ * X-RateLimit-Reset     – Unix timestamp (seconds) when the window resets
+ */
+function setRateLimitHeaders(
+  res: Response,
+  points: number,
+  remainingPoints: number,
+  msBeforeNext: number
+): void {
+  const resetTimestamp = Math.ceil((Date.now() + msBeforeNext) / 1000)
+  res.set("X-RateLimit-Limit", String(points))
+  res.set("X-RateLimit-Remaining", String(Math.max(0, remainingPoints)))
+  res.set("X-RateLimit-Reset", String(resetTimestamp))
+}
+
+/**
  * Express middleware: enforces per-IP rate limiting.
  * Returns 429 with a Retry-After header when the limit is exceeded.
+ * On every response (success or 429) attaches:
+ *   X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
  */
 export function rateLimitMiddleware(
   req: Request,
@@ -76,11 +97,18 @@ export function rateLimitMiddleware(
     req.socket.remoteAddress ??
     "unknown"
 
-  getLimiter()
+  const limiter = getLimiter()
+  const { points } = getConfig()
+
+  limiter
     .consume(ip)
-    .then(() => next())
+    .then((rateLimiterRes) => {
+      setRateLimitHeaders(res, points, rateLimiterRes.remainingPoints, rateLimiterRes.msBeforeNext)
+      next()
+    })
     .catch((rateLimiterRes) => {
       const retrySecs = Math.ceil((rateLimiterRes?.msBeforeNext ?? 1000) / 1000)
+      setRateLimitHeaders(res, points, 0, rateLimiterRes?.msBeforeNext ?? 1000)
       res.set("Retry-After", String(retrySecs))
       res.status(429).json({
         error: "Too many requests. Please retry after the indicated number of seconds.",

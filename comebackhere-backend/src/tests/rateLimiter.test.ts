@@ -81,6 +81,57 @@ describe("Rate limiting — POST /invoices", () => {
     expect(typeof res.body.retryAfter).toBe("number")
     expect(res.body.retryAfter).toBeGreaterThan(0)
   })
+
+  it("includes X-RateLimit-Limit on normal (non-429) responses", async () => {
+    const app = createApp()
+    const res = await request(app).post("/invoices").send(VALID_BODY)
+    expect(res.status).not.toBe(429)
+    expect(res.headers["x-ratelimit-limit"]).toBe("2")
+  })
+
+  it("includes X-RateLimit-Remaining on normal (non-429) responses", async () => {
+    const app = createApp()
+    const res = await request(app).post("/invoices").send(VALID_BODY)
+    expect(res.status).not.toBe(429)
+    expect(res.headers["x-ratelimit-remaining"]).toBeDefined()
+    expect(Number(res.headers["x-ratelimit-remaining"])).toBeGreaterThanOrEqual(0)
+  })
+
+  it("decrements X-RateLimit-Remaining with each request", async () => {
+    const app = createApp()
+    const res1 = await request(app).post("/invoices").send(VALID_BODY)
+    const res2 = await request(app).post("/invoices").send(VALID_BODY)
+
+    expect(res1.status).not.toBe(429)
+    expect(res2.status).not.toBe(429)
+
+    const remaining1 = Number(res1.headers["x-ratelimit-remaining"])
+    const remaining2 = Number(res2.headers["x-ratelimit-remaining"])
+    expect(remaining2).toBeLessThan(remaining1)
+  })
+
+  it("includes X-RateLimit-Reset on normal (non-429) responses", async () => {
+    const beforeRequest = Math.floor(Date.now() / 1000)
+    const app = createApp()
+    const res = await request(app).post("/invoices").send(VALID_BODY)
+    expect(res.status).not.toBe(429)
+
+    const reset = Number(res.headers["x-ratelimit-reset"])
+    expect(reset).toBeGreaterThanOrEqual(beforeRequest)
+  })
+
+  it("includes X-RateLimit-* headers on 429 responses", async () => {
+    const app = createApp()
+    await request(app).post("/invoices").send(VALID_BODY)
+    await request(app).post("/invoices").send(VALID_BODY)
+
+    const res = await request(app).post("/invoices").send(VALID_BODY)
+    expect(res.status).toBe(429)
+    expect(res.headers["x-ratelimit-limit"]).toBe("2")
+    expect(res.headers["x-ratelimit-remaining"]).toBe("0")
+    expect(res.headers["x-ratelimit-reset"]).toBeDefined()
+    expect(Number(res.headers["x-ratelimit-reset"])).toBeGreaterThan(0)
+  })
 })
 
 describe("Rate limiting — GET /invoices/:id", () => {
@@ -114,5 +165,14 @@ describe("Rate limiting — GET /invoices/:id", () => {
     const res = await request(app).get("/invoices/1")
     expect(res.status).toBe(429)
     expect(res.headers["retry-after"]).toBeDefined()
+  })
+
+  it("includes X-RateLimit-* headers on normal GET responses", async () => {
+    const app = createApp()
+    const res = await request(app).get("/invoices/1")
+    expect(res.status).not.toBe(429)
+    expect(res.headers["x-ratelimit-limit"]).toBe("2")
+    expect(res.headers["x-ratelimit-remaining"]).toBeDefined()
+    expect(res.headers["x-ratelimit-reset"]).toBeDefined()
   })
 })

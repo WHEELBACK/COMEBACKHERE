@@ -46,6 +46,27 @@ The client IP is resolved in the following order:
 
 ---
 
+## Rate limit headers
+
+Every API response — whether the request succeeds or is rejected — includes the
+following headers so clients can proactively back off before hitting the limit:
+
+| Header | Type | Description |
+| --- | --- | --- |
+| `X-RateLimit-Limit` | integer | Total requests allowed per window. |
+| `X-RateLimit-Remaining` | integer | Requests remaining in the current window. |
+| `X-RateLimit-Reset` | integer | Unix timestamp (seconds) when the window resets. |
+
+Example headers on a successful response:
+
+```
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 57
+X-RateLimit-Reset: 1720000060
+```
+
+---
+
 ## 429 response
 
 When the limit is exceeded the backend returns **HTTP 429** with the following
@@ -63,7 +84,8 @@ shape:
 | `error` | string | Human-readable message. |
 | `retryAfter` | number | Seconds to wait before retrying. |
 
-The response also includes a `Retry-After` header with the same integer value.
+The response also includes a `Retry-After` header with the same integer value,
+plus `X-RateLimit-Limit`, `X-RateLimit-Remaining: 0`, and `X-RateLimit-Reset`.
 
 ---
 

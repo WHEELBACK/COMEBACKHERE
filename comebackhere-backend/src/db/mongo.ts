@@ -157,12 +157,6 @@ export async function connectMongo(): Promise<Db> {
   await complianceAudit.createIndex({ event_type: 1, ledger: -1 })
   await complianceAudit.createIndex({ ledger: -1 })
 
-  const invoices = db.collection<InvoiceRecord>("invoices")
-  await invoices.createIndex({ invoice_id: 1 }, { unique: true })
-  await invoices.createIndex({ status: 1 })
-  await invoices.createIndex({ merchant_address: 1 })
-  await invoices.createIndex({ created_at: -1 })
-
   return db
 }
 
