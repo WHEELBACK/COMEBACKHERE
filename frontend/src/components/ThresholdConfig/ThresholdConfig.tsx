@@ -177,6 +177,17 @@ export default function ThresholdConfig() {
           </p>
         )}
 
+        {/* Zero-signer edge case: show a clear placeholder instead of silently
+            rendering nothing, which could look like a loading or broken state. */}
+        {isValid && !signersLoading && signers.length === 0 && (
+          <div className="threshold-quorum-preview threshold-quorum-preview--empty">
+            <h4 className="threshold-quorum-preview__title">Quorum Preview</h4>
+            <p className="threshold-quorum-preview__warning">
+              ⚠️ No signers registered. Add signers before configuring a threshold.
+            </p>
+          </div>
+        )}
+
         {quorumPreview && (
           <div className="threshold-quorum-preview">
             <h4 className="threshold-quorum-preview__title">Quorum Preview</h4>
