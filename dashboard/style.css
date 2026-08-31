@@ -185,6 +185,12 @@ tbody td {
   color: #065f46;
 }
 
+/* Fallback badge for unrecognized/future contract statuses */
+.badge-unknown {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
 .legend {
   margin-top: 24px;
   padding: 16px;

@@ -47,7 +47,7 @@ function formatTimestamp(ts) {
 }
 
 function getStatusBadge(status) {
-  const cls = STATUS_COLORS[status] || 'badge-pending';
+  const cls = STATUS_COLORS[status] || DEFAULT_BADGE_CLASS;
   return `<span class="badge ${cls}">${status === 'RefundRequested' ? 'Refund Requested' : status}</span>`;
 }
 

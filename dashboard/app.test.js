@@ -135,9 +135,9 @@ describe('getStatusBadge()', () => {
     loadAppScript();
   });
 
-  it('returns a span with badge-pending for unknown statuses', () => {
+  it('returns a span with badge-unknown (the safe fallback) for unknown statuses', () => {
     const badge = getStatusBadge('Unknown');
-    expect(badge).toContain('badge-pending');
+    expect(badge).toContain('badge-unknown');
     expect(badge).toContain('<span class="badge');
   });
 
