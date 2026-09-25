@@ -18,7 +18,7 @@ jobs:
         working-directory: comebackhere-frontend
 
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -43,3 +43,14 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Test
+        run: npm test -- --run
+
+      - name: Upload coverage summary
+        if: always()
+        uses: actions/upload-artifact@a8a3f3ad30e987fea8aa2a54bccb630c0d519b66 # v4.7.0
+        with:
+          name: coverage-summary
+          path: comebackhere-frontend/coverage
+          retention-days: 7

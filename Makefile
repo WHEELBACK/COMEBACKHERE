@@ -26,3 +26,19 @@ deploy-testnet:
 
 abi-snapshot:
 	@$(MAKE) update-abi-snapshots
+
+verify:
+	@./scripts/verify.sh
+
+lint-docs:
+	@./scripts/lint-docs.sh
+
+snapshot:
+	@$(MAKE) update-abi-snapshots
+
+check-snapshot:
+	@$(MAKE) check-abi-snapshots
+
+default: verify
+
+.PHONY: default snapshot check-snapshot

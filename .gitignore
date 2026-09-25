@@ -52,6 +52,7 @@ Thumbs.db
 
 # Vite cache
 .vite/
+**/.vite/
 .vite-inspect/
 **/.vite/
 
@@ -59,9 +60,8 @@ Thumbs.db
 vitest-report/
 html/
 lcov.info
-**/lcov.info
-junit.xml
-**/junit.xml
+vitest-coverage/
+**/.vitest-cache/
 
 # Lock files — not committed (each sub-package manages its own lock locally)
 package-lock.json
@@ -91,20 +91,10 @@ vitest.config.ts.timestamp-*
 *.swo
 *~
 
-# Python
-__pycache__/
-**/__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.python-version
+# Coverage reports
+comebackhere-frontend/coverage/
+frontend/coverage/
+comebackhere-backend/coverage/
 
-# Docker
-.dockerignore
-
-# OS-specific
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
-.Spotlight-V100
-.Trashes
+# Playwright state
+playwright/.auth/

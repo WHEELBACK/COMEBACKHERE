@@ -11,7 +11,7 @@ import {
 } from "stellar-sdk"
 
 export type SorobanClient = {
-  getAccount: (publicKey: string) => Promise<Parameters<TransactionBuilder["constructor"]>[0]>
+  getAccount: (publicKey: string) => Promise<ConstructorParameters<typeof TransactionBuilder>[0]>
   simulateTransaction: (
     tx: Parameters<SorobanRpc.Server["simulateTransaction"]>[0],
   ) => ReturnType<SorobanRpc.Server["simulateTransaction"]>
@@ -23,6 +23,7 @@ export type SorobanClient = {
     params: Parameters<SorobanRpc.Server["getEvents"]>[0],
   ) => ReturnType<SorobanRpc.Server["getEvents"]>
   getLatestLedger: () => ReturnType<SorobanRpc.Server["getLatestLedger"]>
+  getHealth?: () => ReturnType<SorobanRpc.Server["getHealth"]>
 }
 
 export function buildSorobanClient(rpcUrl: string): SorobanClient {
@@ -34,6 +35,7 @@ export function buildSorobanClient(rpcUrl: string): SorobanClient {
     getTransaction: (hash) => server.getTransaction(hash),
     getEvents: (params) => server.getEvents(params),
     getLatestLedger: () => server.getLatestLedger(),
+    getHealth: () => server.getHealth(),
   }
 }
 
@@ -255,4 +257,60 @@ export async function submitContractCall(
   }
 
   throw Object.assign(new Error("Transaction confirmation timeout"), { status: 504 })
+}
+
+// ---------------------------------------------------------------------------
+// Event retention
+// ---------------------------------------------------------------------------
+
+export interface RetentionWindow {
+  oldestLedger: number
+  latestLedger?: number
+}
+
+/**
+ * Recognises the error Soroban RPC returns when getEvents is asked for a
+ * ledger outside its retention window, e.g.
+ *   "startLedger must be between the oldest ledger: 1200 and the latest ledger: 9800 for this rpc instance."
+ * Returns the window when it can be read from the message, `{ oldestLedger: NaN }`
+ * when the error is a retention error without numbers, and null otherwise.
+ */
+export function parseRetentionError(err: unknown): RetentionWindow | null {
+  const message =
+    typeof err === "string"
+      ? err
+      : ((err as { message?: string })?.message ??
+        (err as { error?: { message?: string } })?.error?.message ??
+        "")
+  if (!/oldest ledger|out of (the )?retention|ledger range|before the oldest/i.test(message)) {
+    return null
+  }
+  const oldest = message.match(/oldest ledger:?\s*(\d+)/i)
+  const latest = message.match(/latest ledger:?\s*(\d+)/i)
+  return {
+    oldestLedger: oldest ? Number(oldest[1]) : NaN,
+    ...(latest ? { latestLedger: Number(latest[1]) } : {}),
+  }
+}
+
+/**
+ * Oldest ledger the RPC node still retains, from getHealth (RPC >= 21
+ * reports oldestLedger there). Returns null when the node does not report it.
+ */
+export async function getOldestRetainedLedger(
+  client: { getHealth?: () => Promise<unknown> },
+): Promise<number | null> {
+  if (!client.getHealth) return null
+  const health = (await client.getHealth()) as { oldestLedger?: number }
+  return typeof health?.oldestLedger === "number" ? health.oldestLedger : null
+}
+
+/**
+ * Ledger sequence encoded in a Soroban event paging token. Tokens look like
+ * "<toid>-<event index>" where the TOID's upper 32 bits are the ledger.
+ */
+export function ledgerFromPagingToken(token: string): number | null {
+  const toid = token.split("-")[0]
+  if (!/^\d+$/.test(toid)) return null
+  return Number(BigInt(toid) >> 32n)
 }

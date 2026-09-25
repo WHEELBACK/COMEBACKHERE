@@ -10,6 +10,7 @@ import {
   type SettlementRecord,
 } from "../db/mongo.js"
 import { dispatchWebhook } from "./webhooks.js"
+import { invalidateBalanceCache } from "../lib/cache.js"
 
 const CURSOR_ID = "treasury_settlement_events"
 const POLL_INTERVAL_MS = 5_000
@@ -278,6 +279,10 @@ export async function processIndexerBatch(
       }
     } else if (eventType === "settlement_executed") {
       await processSettlementExecuted(settlements, settlementId, txHash)
+
+      // Treasury balances changed on-chain; drop the cached copy so the next
+      // GET /api/treasury/balances reads fresh data instead of waiting for TTL.
+      invalidateBalanceCache(`settlement_executed id=${settlementId} tx=${txHash}`)
 
       // Dispatch signed webhook for settlement_executed
       const webhookUrl = process.env.WEBHOOK_URL
