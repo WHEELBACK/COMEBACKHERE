@@ -30,6 +30,14 @@ jobs:
     name: ci / contract tests
     uses: ./.github/workflows/ci-contracts.yml
 
+  ci-legacy-contracts:
+    name: ci / legacy contract tests
+    uses: ./.github/workflows/ci-legacy-contracts.yml
+
+  ci-legacy-frontend:
+    name: ci / legacy frontend tests
+    uses: ./.github/workflows/ci-legacy-frontend.yml
+
   ci-abi-metadata:
     name: ci / abi metadata
     uses: ./.github/workflows/ci-abi-metadata.yml
@@ -72,6 +80,8 @@ jobs:
     needs:
       - ci-frontend
       - ci-contracts
+      - ci-legacy-contracts
+      - ci-legacy-frontend
       - ci-abi-metadata
       - ci-abi-snapshots
       - ci-coverage
