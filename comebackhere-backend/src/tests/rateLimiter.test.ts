@@ -66,7 +66,7 @@ describe("Rate limiting — POST /invoices", () => {
     // Third request must be rate-limited
     const res = await request(app).post("/invoices").send(VALID_BODY)
     expect(res.status).toBe(429)
-    expect(res.body.error).toMatch(/too many requests/i)
+    expect(res.body.error.message).toMatch(/too many requests/i)
     expect(res.headers["retry-after"]).toBeDefined()
     expect(Number(res.headers["retry-after"])).toBeGreaterThan(0)
   })
@@ -78,8 +78,9 @@ describe("Rate limiting — POST /invoices", () => {
 
     const res = await request(app).post("/invoices").send(VALID_BODY)
     expect(res.status).toBe(429)
-    expect(typeof res.body.retryAfter).toBe("number")
-    expect(res.body.retryAfter).toBeGreaterThan(0)
+    expect(res.body.error.code).toBe("RATE_LIMITED")
+    expect(typeof res.body.error.details.retryAfter).toBe("number")
+    expect(res.body.error.details.retryAfter).toBeGreaterThan(0)
   })
 
   it("includes X-RateLimit-Limit on normal (non-429) responses", async () => {

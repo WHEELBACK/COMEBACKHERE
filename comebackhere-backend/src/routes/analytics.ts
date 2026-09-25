@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express"
 import { connectMongo, getInvoicesCollection } from "../db/mongo.js"
 import { validateQuery } from "../middleware/validate.js"
+import { asyncHandler } from "../lib/errors.js"
 import { analyticsQuerySchema } from "../schemas/index.js"
 
 const router = Router()
@@ -223,6 +224,8 @@ router.get("/metrics", validateQuery(analyticsQuerySchema), async (req: Request,
     console.error("Error fetching analytics metrics:", error)
     res.status(500).json({ error: "Failed to fetch analytics metrics" })
   }
-})
+
+  res.json(analyticsData)
+}))
 
 export default router

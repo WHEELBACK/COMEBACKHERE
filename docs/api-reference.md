@@ -2,8 +2,24 @@
 
 Base URL: `http://localhost:3000` (local) or your deployed backend.
 
-All request bodies are JSON (`Content-Type: application/json`).
+All request bodies are JSON (`Content-Type: application/json`) and are limited
+to **100 kB**; larger bodies are rejected with `413 PAYLOAD_TOO_LARGE`.
 All responses are JSON.
+
+**CORS:** browsers may call the API only from origins listed in
+`CORS_ORIGINS`. Requests from any other origin, including preflights, get
+`403 CORS_ORIGIN_NOT_ALLOWED`. Preflight allows the `Content-Type`,
+`Authorization`, `Idempotency-Key`, `X-Request-Id` and `X-Admin-Key` request
+headers, and exposes `X-Request-Id`, `Retry-After` and the `X-RateLimit-*`
+response headers. Requests with no `Origin` header (server-to-server, curl)
+are unaffected.
+
+Every response carries a baseline of security headers (via
+[helmet](https://helmetjs.github.io/)), including `Strict-Transport-Security`,
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and a strict
+`Content-Security-Policy: default-src 'none'`. Swagger UI under `/api-docs`
+gets a relaxed CSP that allows its same-origin scripts, inline styles and
+`data:` images.
 
 > **Machine-readable spec:** A Swagger/OpenAPI 3.0 spec is served at
 > [`GET /api-docs/swagger.json`](http://localhost:3000/api-docs/swagger.json) (raw JSON)
@@ -12,6 +28,10 @@ All responses are JSON.
 > **Rate limits:** All endpoints are subject to per-IP rate limiting. See
 > [docs/rate-limits.md](./rate-limits.md) for default limits, configuration,
 > and the 429 response shape.
+>
+> **Errors:** Every error uses one envelope,
+> `{ "error": { "code", "message", "details", "correlationId" } }`. See
+> [Error response shape](#error-response-shape).
 
 ---
 
@@ -120,7 +140,7 @@ Create a new invoice by submitting `create_invoice` to the Soroban RPC.
 
 | Status | Description                                                    |
 | ------ | -------------------------------------------------------------- |
-| `400`  | Validation error — see `error` field for detail                |
+| `400`  | Validation error — see `error.details` for field-level detail  |
 | `422`  | Soroban simulation or transaction failure                      |
 | `503`  | Missing required environment variables                         |
 | `504`  | Transaction confirmation timeout                               |
@@ -208,9 +228,113 @@ Raise a dispute linked to a settlement, transitioning it to `OnHold`.
 
 | Status | Description                                                    |
 | ------ | -------------------------------------------------------------- |
-| `400`  | Validation error — see `error` field for detail                |
+| `400`  | Validation error — see `error.details` for field-level detail  |
 | `503`  | Missing required environment variables                         |
 | `500`  | Unexpected server error                                        |
+
+### `GET /disputes`
+
+List disputes with their current vote tallies, newest first.
+
+#### Query parameters
+
+| Parameter       | Type    | Default | Description                                   |
+| --------------- | ------- | ------- | --------------------------------------------- |
+| `status`        | string  | —       | `Raised` (open) or `Resolved`                 |
+| `settlement_id` | string  | —       | Only disputes for this settlement             |
+| `page`          | integer | `1`     | 1-based page number                           |
+| `limit`         | integer | `20`    | Page size, 1–100                              |
+
+Send `x-admin-key` to include voter identities (see
+[Voter visibility](#voter-visibility)).
+
+**Response `200`**
+
+```json
+{
+  "data": [
+    {
+      "dispute_id": "5-1720000000000",
+      "settlement_id": "5",
+      "claimant_address": "G...",
+      "reason": "Goods not delivered",
+      "status": "Raised",
+      "outcome": null,
+      "claimant_weight": 1,
+      "counterparty_weight": 0,
+      "resolution_weight": 1,
+      "threshold": 2,
+      "vote_count": 1,
+      "created_at": "2026-09-25T10:00:00.000Z",
+      "resolved_at": null
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "limit": 20,
+  "totalPages": 1
+}
+```
+
+#### Errors
+
+| Status | Description                                                   |
+| ------ | ------------------------------------------------------------- |
+| `400`  | Invalid query parameter — see `error.details`                 |
+| `401`  | `x-admin-key` supplied but invalid                            |
+
+### `GET /disputes/:id`
+
+Full details for one dispute: the same fields as a list item. For admins it
+also includes `votes`:
+
+```json
+{
+  "dispute_id": "5-1720000000000",
+  "status": "Resolved",
+  "outcome": "ResolvedClaimant",
+  "claimant_weight": 2,
+  "counterparty_weight": 1,
+  "resolution_weight": 3,
+  "threshold": 2,
+  "vote_count": 3,
+  "resolved_at": "2026-09-25T10:05:00.000Z",
+  "votes": [
+    { "signer": "G...", "vote": "ResolvedClaimant", "weight": 1, "voted_at": "2026-09-25T10:01:00.000Z" }
+  ]
+}
+```
+
+#### Errors
+
+| Status | Description                                   |
+| ------ | --------------------------------------------- |
+| `401`  | `x-admin-key` supplied but invalid            |
+| `404`  | No dispute with this ID                       |
+
+### `POST /disputes/:id/vote`
+
+Cast a weighted vote (`ResolvedClaimant` or `ResolvedCounterparty`). The
+dispute resolves as soon as either side's weight reaches the threshold
+(`DISPUTE_VOTE_THRESHOLD`, default `2`).
+
+| Status | Description                                                            |
+| ------ | ---------------------------------------------------------------------- |
+| `400`  | Validation error                                                       |
+| `404`  | No dispute with this ID                                                |
+| `409`  | Signer already voted, or dispute already resolved (`details.outcome`)  |
+
+### Voter visibility
+
+Tallies (`claimant_weight`, `counterparty_weight`, `resolution_weight`,
+`vote_count`, `outcome`) are public. **Who voted which way is visible only to
+admins** (a valid `x-admin-key` header), via the `votes` array.
+
+Signers are the treasury's multi-sig keys. Publishing each key's vote in a
+public API makes it easy to single out and pressure individual signers, and
+clients showing dispute progress only need the tallies. The API hides voter
+identities as a precaution: on-chain votes are still public on the ledger,
+so this is not a confidentiality guarantee.
 
 ---
 
@@ -745,11 +869,56 @@ webhook delivery is skipped silently (no error).
 
 ## Error response shape
 
-All error responses share this shape:
+Every non-2xx response, from every endpoint, uses the same envelope:
 
 ```json
-{ "error": "Human-readable description of the error." }
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "settlement_id: Must be a positive integer",
+    "details": [{ "field": "settlement_id", "message": "Must be a positive integer" }],
+    "correlationId": "5f1c9a8e-2b7d-4c1e-9a3f-0d2e6b7c8a91"
+  }
+}
 ```
+
+| Field           | Type           | Description                                                                                   |
+| --------------- | -------------- | --------------------------------------------------------------------------------------------- |
+| `code`          | string         | Stable, machine-readable error code (see below). Branch on this, not on `message`.            |
+| `message`       | string         | Human-readable description. May change between releases.                                      |
+| `details`       | any \| null    | Extra structured context; shape depends on `code`. `null` when there is nothing to add.        |
+| `correlationId` | string \| null | Same value as the `X-Request-Id` response header. Quote it when contacting support.           |
+
+Clients may send their own `X-Request-Id` header; it is echoed back as both the
+header and `correlationId`. Otherwise the server generates a UUID v4.
+
+### Error codes
+
+| HTTP | `code`                  | When                                                             | `details`                              |
+| ---- | ----------------------- | ---------------------------------------------------------------- | -------------------------------------- |
+| 400  | `VALIDATION_ERROR`      | Body, path or query parameters failed schema validation          | `[{ field, message }]`, one per issue  |
+| 400  | `INVALID_JSON`          | Request body is not valid JSON                                   | `null`                                 |
+| 401  | `UNAUTHORIZED`          | Missing or invalid `x-admin-key`                                 | `null`                                 |
+| 403  | `FORBIDDEN`             | Caller lacks permission                                          | `null`                                 |
+| 403  | `CORS_ORIGIN_NOT_ALLOWED` | Browser `Origin` is not in `CORS_ORIGINS`                      | `{ origin }`                           |
+| 404  | `NOT_FOUND`             | Resource or route does not exist                                 | `null`                                 |
+| 409  | `CONFLICT`              | Request conflicts with current state (e.g. dispute already resolved) | Endpoint-specific, e.g. `{ outcome }` |
+| 413  | `PAYLOAD_TOO_LARGE`     | JSON body exceeds 100 kB                                         | `{ limitBytes }`                       |
+| 4xx/5xx | `CONTRACT_ERROR`     | A Soroban contract returned `Error(Contract, #N)`                | `{ contractCode: N }` — see [error-codes.md](./error-codes.md) |
+| 422  | `UNPROCESSABLE_ENTITY`  | Soroban simulation / submission failed without a contract code   | `null`                                 |
+| 429  | `RATE_LIMITED`          | Per-IP rate limit exceeded                                       | `{ retryAfter }` (seconds)             |
+| 500  | `INTERNAL_ERROR`        | Unexpected server error                                          | `null`                                 |
+| 503  | `SERVICE_MISCONFIGURED` | Required environment variables are missing                       | `null`                                 |
+| 503  | `SERVICE_UNAVAILABLE`   | A dependency (e.g. MongoDB) is unreachable                       | `null`                                 |
+| 504  | `GATEWAY_TIMEOUT`       | Timed out waiting for Soroban transaction confirmation           | `null`                                 |
+
+### Server implementation
+
+Routes do not build error responses by hand. They throw a typed error from
+`comebackhere-backend/src/lib/errors.ts` (`ValidationError`, `NotFoundError`,
+`ConflictError`, `UnauthorizedError`, `ContractError`, …) and the central
+handler in `src/middleware/errorHandler.ts` renders the envelope. Async
+handlers are wrapped in `asyncHandler` so rejected promises reach it.
 
 ## Environment variables
 
@@ -765,3 +934,4 @@ All error responses share this shape:
 | `WEBHOOK_URL`          | Merchant webhook endpoint URL                             |
 | `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 signing secret for outbound webhooks        |
 | `PORT`                 | HTTP server port (default `3000`)                         |
+| `CORS_ORIGINS`         | Comma-separated allowlist of browser origins, e.g. `http://localhost:5173,https://app.example.com`. Bare origins only (no path, trailing slash or `*`); invalid entries fail startup. Unset = no cross-origin access. |

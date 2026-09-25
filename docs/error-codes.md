@@ -126,16 +126,23 @@ Defined in `COMEBACKHERE-contracts/contracts/treasury/src/lib.rs`.
 
 ## Error shape in API responses
 
-Backend endpoints return errors as JSON:
+Backend endpoints return errors in the standard envelope (see
+[api-reference.md § Error response shape](./api-reference.md#error-response-shape)).
+When a contract rejects a call, `code` is `CONTRACT_ERROR` and
+`details.contractCode` holds the numeric value from the tables above:
 
 ```json
 {
-  "error": "Human-readable message",
-  "code": 6
+  "error": {
+    "code": "CONTRACT_ERROR",
+    "message": "Soroban simulation failed: HostError: Error(Contract, #6) ...",
+    "details": { "contractCode": 6 },
+    "correlationId": "5f1c9a8e-2b7d-4c1e-9a3f-0d2e6b7c8a91"
+  }
 }
 ```
 
-`code` corresponds directly to the numeric values in the tables above. When `code` is `null` or absent the error originates from the RPC layer rather than the contract.
+Any other `code` means the error originates from validation, configuration, or the RPC layer rather than the contract.
 
 ---
 

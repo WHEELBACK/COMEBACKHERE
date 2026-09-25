@@ -9,6 +9,7 @@ import {
   type SorobanClient,
 } from "../lib/soroban.js"
 import { requireEnv } from "../lib/env.js"
+import { asyncHandler, NotFoundError } from "../lib/errors.js"
 import { connectMongo, getSettlementsCollection } from "../db/mongo.js"
 import { validateBody } from "../middleware/validate.js"
 import {
@@ -46,31 +47,26 @@ export { getBalanceCache, setBalanceCache, invalidateBalanceCache }
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get("/pending-settlements", async (_req: Request, res: Response) => {
-  try {
-    const database = await connectMongo()
-    const settlements = getSettlementsCollection(database)
-    const records = await settlements
-      .find({ status: "Pending" })
-      .sort({ id: 1 })
-      .toArray()
+router.get("/pending-settlements", asyncHandler(async (_req: Request, res: Response) => {
+  const database = await connectMongo()
+  const settlements = getSettlementsCollection(database)
+  const records = await settlements
+    .find({ status: "Pending" })
+    .sort({ id: 1 })
+    .toArray()
 
-    res.json(
-      records.map((s) => ({
-        id: s.id,
-        merchant_address: s.merchant_address,
-        amount: s.amount,
-        approvals: s.approvals,
-        approval_weight: s.approval_weight,
-        status: s.status,
-        hold_reason: s.hold_reason,
-      })),
-    )
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(500).json({ error: message })
-  }
-})
+  res.json(
+    records.map((s) => ({
+      id: s.id,
+      merchant_address: s.merchant_address,
+      amount: s.amount,
+      approvals: s.approvals,
+      approval_weight: s.approval_weight,
+      status: s.status,
+      hold_reason: s.hold_reason,
+    })),
+  )
+}))
 
 /**
  * @openapi
@@ -110,54 +106,47 @@ router.get("/pending-settlements", async (_req: Request, res: Response) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/approve-settlement", validateBody(settlementIdSchema), async (req: Request, res: Response) => {
-  const env = requireEnv(res, {
+router.post("/approve-settlement", validateBody(settlementIdSchema), asyncHandler(async (req: Request, res: Response) => {
+  const env = requireEnv({
     treasuryContractId: "TREASURY_CONTRACT_ID",
     usdcContractId: "USDC_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",
   })
-  if (!env) return
 
   const settlementId = req.body.settlement_id
 
-  try {
-    const client = buildSorobanClient(env.rpcUrl)
-    const keypair = Keypair.fromSecret(env.signerSecret)
+  const client = buildSorobanClient(env.rpcUrl)
+  const keypair = Keypair.fromSecret(env.signerSecret)
 
-    const txHash = await submitContractCall(
-      client,
-      env.treasuryContractId,
-      "approve_settlement",
-      [
-        nativeToScVal(keypair.publicKey(), { type: "address" }),
-        nativeToScVal(BigInt(settlementId), { type: "u64" }),
-      ],
-      env.signerSecret,
-      env.networkPassphrase,
-    )
+  const txHash = await submitContractCall(
+    client,
+    env.treasuryContractId,
+    "approve_settlement",
+    [
+      nativeToScVal(keypair.publicKey(), { type: "address" }),
+      nativeToScVal(BigInt(settlementId), { type: "u64" }),
+    ],
+    env.signerSecret,
+    env.networkPassphrase,
+  )
 
-    const database = await connectMongo()
-    const settlements = getSettlementsCollection(database)
-    const record = await settlements.findOne({ id: settlementId })
+  const database = await connectMongo()
+  const settlements = getSettlementsCollection(database)
+  const record = await settlements.findOne({ id: settlementId })
 
-    res.json(
-      record ?? {
-        id: settlementId,
-        merchant_address: "",
-        amount: "0",
-        approvals: [keypair.publicKey()],
-        approval_weight: 1,
-        status: "Pending",
-        hold_reason: null,
-        tx_hash: txHash,
-      },
-    )
-  } catch (err: unknown) {
-    const status = (err as { status?: number })?.status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(status).json({ error: message })
-  }
-})
+  res.json(
+    record ?? {
+      id: settlementId,
+      merchant_address: "",
+      amount: "0",
+      approvals: [keypair.publicKey()],
+      approval_weight: 1,
+      status: "Pending",
+      hold_reason: null,
+      tx_hash: txHash,
+    },
+  )
+}))
 
 export interface ExecuteSettlementBody {
   settlement_id: number
@@ -324,13 +313,12 @@ export async function executeSettlementWithBalanceCheck(
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/execute-settlement", validateBody(executeSettlementSchema), async (req: Request, res: Response) => {
-  const env = requireEnv(res, {
+router.post("/execute-settlement", validateBody(executeSettlementSchema), asyncHandler(async (req: Request, res: Response) => {
+  const env = requireEnv({
     treasuryContractId: "TREASURY_CONTRACT_ID",
     usdcContractId: "USDC_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",
   })
-  if (!env) return
 
   const { settlement_id: settlementId, token_contract } = req.body as { settlement_id: number; token_contract?: string }
 
@@ -478,21 +466,17 @@ export async function simulateSettlement(
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/simulate-settlement", validateBody(settlementIdSchema), async (req: Request, res: Response) => {
-  const env = requireEnv(res)
-  if (!env) return
+router.post("/simulate-settlement", validateBody(settlementIdSchema), asyncHandler(async (req: Request, res: Response) => {
+  const env = requireEnv({
+    treasuryContractId: "TREASURY_CONTRACT_ID",
+    signerSecret: "SIGNER_SECRET_KEY",
+  })
 
   const settlementId = req.body.settlement_id
 
-  try {
-    const result = await simulateSettlement({ settlement_id: settlementId }, env)
-    res.json(result)
-  } catch (err: unknown) {
-    const status = (err as { status?: number })?.status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(status).json({ error: message })
-  }
-})
+  const result = await simulateSettlement({ settlement_id: settlementId }, env)
+  res.json(result)
+}))
 
 /**
  * @openapi
@@ -519,31 +503,26 @@ router.post("/simulate-settlement", validateBody(settlementIdSchema), async (req
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get("/on-hold-settlements", async (_req: Request, res: Response) => {
-  try {
-    const database = await connectMongo()
-    const settlements = getSettlementsCollection(database)
-    const records = await settlements
-      .find({ status: "OnHold" })
-      .sort({ id: 1 })
-      .toArray()
+router.get("/on-hold-settlements", asyncHandler(async (_req: Request, res: Response) => {
+  const database = await connectMongo()
+  const settlements = getSettlementsCollection(database)
+  const records = await settlements
+    .find({ status: "OnHold" })
+    .sort({ id: 1 })
+    .toArray()
 
-    res.json(
-      records.map((s) => ({
-        id: s.id,
-        merchant_address: s.merchant_address,
-        amount: s.amount,
-        approvals: s.approvals,
-        approval_weight: s.approval_weight,
-        status: s.status,
-        hold_reason: s.hold_reason,
-      })),
-    )
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(500).json({ error: message })
-  }
-})
+  res.json(
+    records.map((s) => ({
+      id: s.id,
+      merchant_address: s.merchant_address,
+      amount: s.amount,
+      approvals: s.approvals,
+      approval_weight: s.approval_weight,
+      status: s.status,
+      hold_reason: s.hold_reason,
+    })),
+  )
+}))
 
 /**
  * @openapi
@@ -583,37 +562,31 @@ router.get("/on-hold-settlements", async (_req: Request, res: Response) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/release-hold", validateBody(settlementIdSchema), async (req: Request, res: Response) => {
+router.post("/release-hold", validateBody(settlementIdSchema), asyncHandler(async (req: Request, res: Response) => {
   const settlementId = req.body.settlement_id
 
-  try {
-    const database = await connectMongo()
-    const settlements = getSettlementsCollection(database)
-    const record = await settlements.findOneAndUpdate(
-      { id: settlementId, status: "OnHold" },
-      { $set: { status: "Pending", hold_reason: null, updated_at: new Date() } },
-      { returnDocument: "after" },
-    )
+  const database = await connectMongo()
+  const settlements = getSettlementsCollection(database)
+  const record = await settlements.findOneAndUpdate(
+    { id: settlementId, status: "OnHold" },
+    { $set: { status: "Pending", hold_reason: null, updated_at: new Date() } },
+    { returnDocument: "after" },
+  )
 
-    if (!record) {
-      res.status(404).json({ error: `Settlement #${settlementId} not found or not on hold` })
-      return
-    }
-
-    res.json({
-      id: record.id,
-      merchant_address: record.merchant_address,
-      amount: record.amount,
-      approvals: record.approvals,
-      approval_weight: record.approval_weight,
-      status: record.status,
-      hold_reason: record.hold_reason,
-    })
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(500).json({ error: message })
+  if (!record) {
+    throw new NotFoundError(`Settlement #${settlementId} not found or not on hold`)
   }
-})
+
+  res.json({
+    id: record.id,
+    merchant_address: record.merchant_address,
+    amount: record.amount,
+    approvals: record.approvals,
+    approval_weight: record.approval_weight,
+    status: record.status,
+    hold_reason: record.hold_reason,
+  })
+}))
 
 /**
  * @openapi
@@ -678,50 +651,43 @@ router.post("/release-hold", validateBody(settlementIdSchema), async (req: Reque
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/escalate-hold", validateBody(escalateHoldSchema), async (req: Request, res: Response) => {
+router.post("/escalate-hold", validateBody(escalateHoldSchema), asyncHandler(async (req: Request, res: Response) => {
   const settlementId = req.body.settlement_id
 
-  try {
-    const database = await connectMongo()
-    const settlements = getSettlementsCollection(database)
-    const record = await settlements.findOneAndUpdate(
-      { id: settlementId, status: "OnHold" },
-      { $set: { hold_reason: "AdminHold", updated_at: new Date() } },
-      { returnDocument: "after" },
-    )
+  const database = await connectMongo()
+  const settlements = getSettlementsCollection(database)
+  const record = await settlements.findOneAndUpdate(
+    { id: settlementId, status: "OnHold" },
+    { $set: { hold_reason: "AdminHold", updated_at: new Date() } },
+    { returnDocument: "after" },
+  )
 
-    if (!record) {
-      res.status(404).json({ error: `Settlement #${settlementId} not found or not on hold` })
-      return
-    }
-
-    res.json({
-      id: record.id,
-      merchant_address: record.merchant_address,
-      amount: record.amount,
-      approvals: record.approvals,
-      approval_weight: record.approval_weight,
-      status: record.status,
-      hold_reason: record.hold_reason,
-    })
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(500).json({ error: message })
+  if (!record) {
+    throw new NotFoundError(`Settlement #${settlementId} not found or not on hold`)
   }
-})
+
+  res.json({
+    id: record.id,
+    merchant_address: record.merchant_address,
+    amount: record.amount,
+    approvals: record.approvals,
+    approval_weight: record.approval_weight,
+    status: record.status,
+    hold_reason: record.hold_reason,
+  })
+}))
 
 /**
  * GET /api/treasury/balances
  * Returns token balances held by the treasury contract.
  * Results are cached for up to 5 seconds to reduce Soroban RPC load (#212).
  */
-router.get("/balances", async (_req: Request, res: Response) => {
-  const env = requireEnv(res, {
+router.get("/balances", asyncHandler(async (_req: Request, res: Response) => {
+  const env = requireEnv({
     treasuryContractId: "TREASURY_CONTRACT_ID",
     usdcContractId: "USDC_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",
   })
-  if (!env) return
 
   // #212 — serve from cache when available
   const cached = getBalanceCache()
@@ -730,27 +696,21 @@ router.get("/balances", async (_req: Request, res: Response) => {
     return
   }
 
-  try {
-    const client = buildSorobanClient(env.rpcUrl)
-    const keypair = Keypair.fromSecret(env.signerSecret)
-    const sourceAccount = keypair.publicKey()
+  const client = buildSorobanClient(env.rpcUrl)
+  const keypair = Keypair.fromSecret(env.signerSecret)
+  const sourceAccount = keypair.publicKey()
 
-    const balance = await getTokenBalance(
-      client,
-      env.usdcContractId,
-      env.treasuryContractId,
-      sourceAccount,
-      env.networkPassphrase,
-    )
+  const balance = await getTokenBalance(
+    client,
+    env.usdcContractId,
+    env.treasuryContractId,
+    sourceAccount,
+    env.networkPassphrase,
+  )
 
-    const data = [{ token: env.usdcContractId, balance: balance.toString() }]
-    setBalanceCache(data)
-    res.json(data)
-  } catch (err: unknown) {
-    const status = (err as { status?: number })?.status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(status).json({ error: message })
-  }
-})
+  const data = [{ token: env.usdcContractId, balance: balance.toString() }]
+  setBalanceCache(data)
+  res.json(data)
+}))
 
 export default router

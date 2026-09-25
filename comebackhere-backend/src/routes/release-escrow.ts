@@ -6,6 +6,7 @@ import {
   type SorobanClient,
 } from "../lib/soroban.js"
 import { requireEnv } from "../lib/env.js"
+import { asyncHandler, ContractError, parseContractErrorCode, UnauthorizedError } from "../lib/errors.js"
 import { validateBody, validateParams } from "../middleware/validate.js"
 import { releaseEscrowIdParamSchema } from "../schemas/index.js"
 
@@ -70,22 +71,20 @@ export async function releaseEscrow(
  *   503  required environment variables missing
  *   5xx  unexpected Soroban / network error
  */
-router.post("/:id/release-escrow", validateParams(releaseEscrowIdParamSchema), async (req: Request, res: Response) => {
+router.post("/:id/release-escrow", validateParams(releaseEscrowIdParamSchema), asyncHandler(async (req: Request, res: Response) => {
   // Admin-only authorization
   const adminKey = req.headers["x-admin-key"]
   if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
-    res.status(401).json({ error: "Unauthorized" })
-    return
+    throw new UnauthorizedError()
   }
 
   const { id } = req.params
 
   const invoiceId = parseInt(id, 10)
-  const env = requireEnv(res, {
+  const env = requireEnv({
     invoiceContractId: "INVOICE_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",
   })
-  if (!env) return
 
   try {
     const result = await releaseEscrow(invoiceId, env)
@@ -94,14 +93,11 @@ router.post("/:id/release-escrow", validateParams(releaseEscrowIdParamSchema), a
     const message = err instanceof Error ? err.message : String(err)
 
     // Contract error Unauthorized = 1 → 403
-    if (message.includes("Error(Contract, #1)") || message.toUpperCase().includes("UNAUTHORIZED")) {
-      res.status(403).json({ error: "Forbidden: caller is not authorised to release this escrow", code: 1 })
-      return
+    if (parseContractErrorCode(message) === 1 || message.toUpperCase().includes("UNAUTHORIZED")) {
+      throw new ContractError(1, "Forbidden: caller is not authorised to release this escrow", 403)
     }
-
-    const status = (err as { status?: number })?.status ?? 500
-    res.status(status).json({ error: message })
+    throw err
   }
-})
+}))
 
 export default router

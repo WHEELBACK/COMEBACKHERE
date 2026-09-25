@@ -8,6 +8,8 @@ import {
   SorobanRpc,
 } from "stellar-sdk"
 import { validateBody, validateQuery } from "../middleware/validate.js"
+import { requireEnv } from "../lib/env.js"
+import { asyncHandler, UnauthorizedError } from "../lib/errors.js"
 import { allowBodySchema, blockBodySchema, complianceAuditQuerySchema } from "../schemas/index.js"
 import { connectMongo, getComplianceAuditCollection } from "../db/mongo.js"
 
@@ -47,32 +49,27 @@ const router = Router()
  *         description: Database error
  * Returns the durable, normalized audit trail emitted by the compliance contract.
  */
-router.get("/audit", validateQuery(complianceAuditQuerySchema), async (req: Request, res: Response) => {
-  try {
-    const query = req.query as unknown as {
-      address?: string; event_type?: string; from_ledger?: number; to_ledger?: number; page: number; limit: number
-    }
-    const filter: Record<string, unknown> = {}
-    if (query.address) filter.address = query.address
-    if (query.event_type) filter.event_type = query.event_type
-    if (query.from_ledger !== undefined || query.to_ledger !== undefined) {
-      filter.ledger = {
-        ...(query.from_ledger !== undefined ? { $gte: query.from_ledger } : {}),
-        ...(query.to_ledger !== undefined ? { $lte: query.to_ledger } : {}),
-      }
-    }
-    const skip = (query.page - 1) * query.limit
-    const collection = getComplianceAuditCollection(await connectMongo())
-    const [events, total] = await Promise.all([
-      collection.find(filter).sort({ ledger: -1, _id: -1 }).skip(skip).limit(query.limit).toArray(),
-      collection.countDocuments(filter),
-    ])
-    res.json({ events, page: query.page, limit: query.limit, total, has_more: skip + events.length < total })
-  } catch (err: unknown) {
-    const status = (err as any)?.status ?? 500
-    res.status(status).json({ error: err instanceof Error ? err.message : String(err) })
+router.get("/audit", validateQuery(complianceAuditQuerySchema), asyncHandler(async (req: Request, res: Response) => {
+  const query = req.query as unknown as {
+    address?: string; event_type?: string; from_ledger?: number; to_ledger?: number; page: number; limit: number
   }
-})
+  const filter: Record<string, unknown> = {}
+  if (query.address) filter.address = query.address
+  if (query.event_type) filter.event_type = query.event_type
+  if (query.from_ledger !== undefined || query.to_ledger !== undefined) {
+    filter.ledger = {
+      ...(query.from_ledger !== undefined ? { $gte: query.from_ledger } : {}),
+      ...(query.to_ledger !== undefined ? { $lte: query.to_ledger } : {}),
+    }
+  }
+  const skip = (query.page - 1) * query.limit
+  const collection = getComplianceAuditCollection(await connectMongo())
+  const [events, total] = await Promise.all([
+    collection.find(filter).sort({ ledger: -1, _id: -1 }).skip(skip).limit(query.limit).toArray(),
+    collection.countDocuments(filter),
+  ])
+  res.json({ events, page: query.page, limit: query.limit, total, has_more: skip + events.length < total })
+}))
 
 // ---------------------------------------------------------------------------
 // Shared Soroban client type — mirrors invoices.ts convention
@@ -181,43 +178,35 @@ export interface AllowBody {
  * Body: { address: string, until?: number }
  * Returns: { address, status, hash }
  */
-router.post("/allow", validateBody(allowBodySchema), async (req: Request, res: Response) => {
+router.post("/allow", validateBody(allowBodySchema), asyncHandler(async (req: Request, res: Response) => {
   const adminKey = req.headers["x-admin-key"]
   if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
-    res.status(401).json({ error: "Unauthorized" })
-    return
+    throw new UnauthorizedError()
   }
 
   const { address, until } = req.body as { address: string; until?: number }
 
-  const env = requireEnv(res, {
+  const env = requireEnv({
     complianceContractId: "COMPLIANCE_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",
   })
-  if (!env) return
 
-  try {
-    const client = buildSorobanClient(env.rpcUrl)
-    const operation = until ? "allow_address_until" : "allow_address"
-    const args = until
-      ? [nativeToScVal(address, { type: "address" }), nativeToScVal(until, { type: "u64" })]
-      : [nativeToScVal(address, { type: "address" })]
+  const client = buildSorobanClient(env.rpcUrl)
+  const operation = until ? "allow_address_until" : "allow_address"
+  const args = until
+    ? [nativeToScVal(address, { type: "address" }), nativeToScVal(until, { type: "u64" })]
+    : [nativeToScVal(address, { type: "address" })]
 
-    const result = await callComplianceOp(
-      operation as "allow_address" | "allow_address_until",
-      args,
-      client,
-      env.complianceContractId,
-      env.signerSecret,
-      env.networkPassphrase
-    )
-    res.status(200).json(result)
-  } catch (err: unknown) {
-    const status = (err as any)?.status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(status).json({ error: message })
-  }
-})
+  const result = await callComplianceOp(
+    operation as "allow_address" | "allow_address_until",
+    args,
+    client,
+    env.complianceContractId,
+    env.signerSecret,
+    env.networkPassphrase
+  )
+  res.status(200).json(result)
+}))
 
 // ---------------------------------------------------------------------------
 // POST /compliance/block  (#68)
@@ -233,40 +222,32 @@ export interface BlockBody {
  * Body: { address: string }
  * Returns: { address, status, hash }
  */
-router.post("/block", validateBody(blockBodySchema), async (req: Request, res: Response) => {
+router.post("/block", validateBody(blockBodySchema), asyncHandler(async (req: Request, res: Response) => {
   const adminKey = req.headers["x-admin-key"]
   if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
-    res.status(401).json({ error: "Unauthorized" })
-    return
+    throw new UnauthorizedError()
   }
 
   const { address } = req.body as { address: string }
 
-  const env = requireEnv(res, {
+  const env = requireEnv({
     complianceContractId: "COMPLIANCE_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",
   })
-  if (!env) return
 
   // Audit log — admin identity + timestamp
   console.log(`[compliance] block_address admin="${adminKey}" address="${address}" ts="${new Date().toISOString()}"`)
 
-  try {
-    const client = buildSorobanClient(env.rpcUrl)
-    const result = await callComplianceOp(
-      "block_address",
-      [nativeToScVal(address, { type: "address" })],
-      client,
-      env.complianceContractId,
-      env.signerSecret,
-      env.networkPassphrase
-    )
-    res.status(200).json(result)
-  } catch (err: unknown) {
-    const status = (err as any)?.status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(status).json({ error: message })
-  }
-})
+  const client = buildSorobanClient(env.rpcUrl)
+  const result = await callComplianceOp(
+    "block_address",
+    [nativeToScVal(address, { type: "address" })],
+    client,
+    env.complianceContractId,
+    env.signerSecret,
+    env.networkPassphrase
+  )
+  res.status(200).json(result)
+}))
 
 export default router

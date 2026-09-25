@@ -201,6 +201,6 @@ describe("GET /api/treasury/pending-settlements — Mongo outage returns 5xx", (
     // whether the route catches the status property from the thrown error.
     expect(res.status).toBeGreaterThanOrEqual(500)
     expect(res.body).toHaveProperty("error")
-    expect(res.body.error).toMatch(/mongodb/i)
+    expect(res.body.error.message).toMatch(/mongodb/i)
   }, 10_000)
 })

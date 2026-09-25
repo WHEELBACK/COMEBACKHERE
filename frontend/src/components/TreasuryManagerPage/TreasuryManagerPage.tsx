@@ -33,7 +33,7 @@ async function postTreasuryAction(
     body: JSON.stringify(body),
   })
   const data = await res.json()
-  if (!res.ok) return { success: false, error: data.error ?? `HTTP ${res.status}` }
+  if (!res.ok) return { success: false, error: data.error?.message ?? `HTTP ${res.status}` }
   return { success: true, hash: data.tx_hash }
 }
 

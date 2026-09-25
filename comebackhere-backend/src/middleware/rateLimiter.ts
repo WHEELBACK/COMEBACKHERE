@@ -1,6 +1,7 @@
 import { type Request, type Response, type NextFunction } from "express"
 import { RateLimiterRedis, RateLimiterMemory, type RateLimiterAbstract } from "rate-limiter-flexible"
 import Redis from "ioredis"
+import { RateLimitError } from "../lib/errors.js"
 
 /**
  * Reads rate limit config from environment variables with sensible defaults.
@@ -82,7 +83,8 @@ function setRateLimitHeaders(
 
 /**
  * Express middleware: enforces per-IP rate limiting.
- * Returns 429 with a Retry-After header when the limit is exceeded.
+ * Returns 429 (standard error envelope, `details.retryAfter`) with a
+ * Retry-After header when the limit is exceeded.
  * On every response (success or 429) attaches:
  *   X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
  */
@@ -110,9 +112,6 @@ export function rateLimitMiddleware(
       const retrySecs = Math.ceil((rateLimiterRes?.msBeforeNext ?? 1000) / 1000)
       setRateLimitHeaders(res, points, 0, rateLimiterRes?.msBeforeNext ?? 1000)
       res.set("Retry-After", String(retrySecs))
-      res.status(429).json({
-        error: "Too many requests. Please retry after the indicated number of seconds.",
-        retryAfter: retrySecs,
-      })
+      next(new RateLimitError(retrySecs))
     })
 }

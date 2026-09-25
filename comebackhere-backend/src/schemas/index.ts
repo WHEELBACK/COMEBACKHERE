@@ -117,6 +117,23 @@ export const createDisputeSchema = z.object({
   reason: z.string().optional(),
 })
 
+export const disputeStatuses = ["Raised", "Resolved"] as const
+
+export const disputeListQuerySchema = z.object({
+  status: z.enum(disputeStatuses, { message: "status must be 'Raised' or 'Resolved'" }).optional(),
+  settlement_id: z
+    .string()
+    .regex(/^\d+$/, "settlement_id must be a positive integer string")
+    .optional(),
+  page: z.coerce.number().int("page must be a positive integer").positive("page must be a positive integer").default(1),
+  limit: z.coerce
+    .number()
+    .int("limit must be an integer between 1 and 100")
+    .positive("limit must be an integer between 1 and 100")
+    .max(100, "limit must be an integer between 1 and 100")
+    .default(20),
+})
+
 export const complianceAuditQuerySchema = z.object({
   address: stellarAddress.optional(),
   event_type: z.enum(["address_allowed", "address_allowed_until", "address_blocked", "address_cleared"]).optional(),

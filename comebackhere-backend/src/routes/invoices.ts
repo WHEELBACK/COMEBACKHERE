@@ -3,6 +3,7 @@ import type { FindCursor, WithId } from "mongodb"
 import { Keypair, TransactionBuilder, BASE_FEE, Contract, nativeToScVal, SorobanRpc, xdr } from "stellar-sdk"
 import { connectMongo, getInvoicesCollection, type InvoiceRecord, type InvoiceStatus } from "../db/mongo.js"
 import { requireEnv } from "../lib/env.js"
+import { asyncHandler, NotFoundError } from "../lib/errors.js"
 import { cacheGet, cacheSet } from "../lib/cache.js"
 import { validateBody, validateParams } from "../middleware/validate.js"
 import { createInvoiceSchema, invoiceIdParamSchema } from "../schemas/index.js"
@@ -357,7 +358,7 @@ router.get("/export.csv", async (req: Request, res: Response) => {
  *                 totalPages:
  *                   type: integer
  */
-router.get("/", async (req: Request, res: Response) => {
+router.get("/", asyncHandler(async (req: Request, res: Response) => {
   const page = Math.max(1, parseInt(req.query.page as string, 10) || 1)
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20))
   const { status, merchant: merchantFilter } = parseListFilters(req.query)
@@ -401,7 +402,10 @@ router.get("/", async (req: Request, res: Response) => {
     const message = err instanceof Error ? err.message : String(err)
     res.status(500).json({ error: message })
   }
-})
+
+  await cacheSet(cacheKey, result, 30)
+  res.json(result)
+}))
 
 /**
  * @openapi
@@ -448,43 +452,35 @@ router.get("/", async (req: Request, res: Response) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get("/:id", validateParams(invoiceIdParamSchema), async (req: Request, res: Response) => {
+router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params
 
-  const env = requireEnv(res, { invoiceContractId: "INVOICE_CONTRACT_ID" })
-  if (!env) return
+  const env = requireEnv({ invoiceContractId: "INVOICE_CONTRACT_ID" })
 
-  try {
-    const server = new SorobanRpc.Server(env.rpcUrl)
-    const contract = new Contract(env.invoiceContractId)
+  const server = new SorobanRpc.Server(env.rpcUrl)
+  const contract = new Contract(env.invoiceContractId)
 
-    // Build a read-only ledger entry query for the invoice
-    const ledgerKey = contract.getFootprint()
-    void ledgerKey // used below via getLedgerEntries
+  // Build a read-only ledger entry query for the invoice
+  const ledgerKey = contract.getFootprint()
+  void ledgerKey // used below via getLedgerEntries
 
-    // Query the contract's ledger entry directly
-    const entries = await server.getLedgerEntries(
-      xdr.LedgerKey.contractData(
-        new xdr.LedgerKeyContractData({
-          contract: new Contract(env.invoiceContractId).address().toScAddress(),
-          key: nativeToScVal(BigInt(id), { type: "u64" }),
-          durability: xdr.ContractDataDurability.persistent(),
-        })
-      )
+  // Query the contract's ledger entry directly
+  const entries = await server.getLedgerEntries(
+    xdr.LedgerKey.contractData(
+      new xdr.LedgerKeyContractData({
+        contract: new Contract(env.invoiceContractId).address().toScAddress(),
+        key: nativeToScVal(BigInt(id), { type: "u64" }),
+        durability: xdr.ContractDataDurability.persistent(),
+      })
     )
+  )
 
-    if (!entries.entries.length) {
-      res.status(404).json({ error: "Invoice not found" })
-      return
-    }
-
-    res.json({ invoice_id: id, status: "Pending" })
-  } catch (err: unknown) {
-    const status = (err as any)?.status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(status).json({ error: message })
+  if (!entries.entries.length) {
+    throw new NotFoundError("Invoice not found")
   }
-})
+
+  res.json({ invoice_id: id, status: "Pending" })
+}))
 
 /**
  * @openapi
@@ -558,45 +554,38 @@ router.get("/:id", validateParams(invoiceIdParamSchema), async (req: Request, re
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/", validateBody(createInvoiceSchema), async (req: Request, res: Response) => {
-  const env = requireEnv(res, {
+router.post("/", validateBody(createInvoiceSchema), asyncHandler(async (req: Request, res: Response) => {
+  const env = requireEnv({
     invoiceContractId: "INVOICE_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",
   })
-  if (!env) return
 
-  try {
-    const client = buildSorobanClient(env.rpcUrl)
-    const result = await createInvoice(
-      req.body as CreateInvoiceBody,
-      client,
-      env.invoiceContractId,
-      env.signerSecret,
-      env.networkPassphrase
-    )
+  const client = buildSorobanClient(env.rpcUrl)
+  const result = await createInvoice(
+    req.body as CreateInvoiceBody,
+    client,
+    env.invoiceContractId,
+    env.signerSecret,
+    env.networkPassphrase
+  )
 
-    const db = await connectMongo()
-    const collection = getInvoicesCollection(db)
-    const body = req.body as CreateInvoiceBody
-    const now = new Date()
-    await collection.insertOne({
-      invoice_id: result.invoice_id,
-      merchant_address: body.merchant_address,
-      token: body.token,
-      amount: body.amount,
-      due_date: body.due_date,
-      reference: body.reference,
-      status: "Pending",
-      created_at: now,
-      updated_at: now,
-    })
+  const db = await connectMongo()
+  const collection = getInvoicesCollection(db)
+  const body = req.body as CreateInvoiceBody
+  const now = new Date()
+  await collection.insertOne({
+    invoice_id: result.invoice_id,
+    merchant_address: body.merchant_address,
+    token: body.token,
+    amount: body.amount,
+    due_date: body.due_date,
+    reference: body.reference,
+    status: "Pending",
+    created_at: now,
+    updated_at: now,
+  })
 
-    res.status(201).json(result)
-  } catch (err: unknown) {
-    const status = (err as any)?.status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(status).json({ error: message })
-  }
-})
+  res.status(201).json(result)
+}))
 
 export default router
