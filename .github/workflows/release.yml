@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be0f245cb558a0176b # v4.1.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@0a5c61591373683505ea898e09a3ea4f39ef2b9c # v5.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Generate release notes
+        run: |
+          ./scripts/generate_release_notes.sh > /tmp/release_notes.md
+          cat /tmp/release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@69032c45a6f1f0f29ccf0b114b021659ca73a36e # v2.0.5
+        with:
+          body_path: /tmp/release_notes.md
+          files: abis/*.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
