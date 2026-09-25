@@ -44,12 +44,15 @@ Thumbs.db
 
 # Vite cache
 .vite/
+**/.vite/
 .vite-inspect/
 
 # Vitest / Jest output
 vitest-report/
 html/
 lcov.info
+vitest-coverage/
+**/.vitest-cache/
 
 # Lock files — not committed (each sub-package manages its own lock locally)
 package-lock.json
@@ -77,25 +80,10 @@ vitest.config.ts.timestamp-*
 *.swo
 *~
 
-# Playwright test artifacts
-**/blob-report/
-**/.playwright/
+# Coverage reports
+comebackhere-frontend/coverage/
+frontend/coverage/
+comebackhere-backend/coverage/
 
-# Vitest cache & results
-**/.vitest-cache/
-**/vitest-results/
-
-# Additional build/cache artefacts
-**/.cache/
-**/.temp/
-**/.tmp/
-**/storybook-static/
-
-# macOS extended attributes
-**/.DS_Store
-
-# pnpm debug log
-pnpm-debug.log*
-
-# Rust incremental compilation cache
-**/incremental/
+# Playwright state
+playwright/.auth/

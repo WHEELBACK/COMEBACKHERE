@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { getTransactionUrl } from '../../utils/explorer'
 
 const API_BASE = '/api'
 const ALLOWED_TOKENS: string[] = (import.meta.env.VITE_ALLOWED_TOKENS ?? 'USDC,XLM').split(',')
@@ -32,7 +33,7 @@ async function postTreasuryAction(
     body: JSON.stringify(body),
   })
   const data = await res.json()
-  if (!res.ok) return { success: false, error: data.error ?? `HTTP ${res.status}` }
+  if (!res.ok) return { success: false, error: data.error?.message ?? `HTTP ${res.status}` }
   return { success: true, hash: data.tx_hash }
 }
 
@@ -78,7 +79,8 @@ export default function TreasuryManagerPage() {
     try {
       const result = await postTreasuryAction(tab, token, amount, recipient)
       if (!result.success) throw new Error(result.error ?? 'Action failed')
-      setMessage(`${tab === 'deposit' ? 'Deposit' : 'Withdrawal'} submitted. Tx: ${result.hash}`)
+      const txUrl = result.hash ? getTransactionUrl(result.hash) : null
+      setMessage(`${tab === 'deposit' ? 'Deposit' : 'Withdrawal'} submitted. ${txUrl ? `Tx: ` : ''}${result.hash}`)
       setAmount('')
       setRecipient('')
       await handleLoadBalances()

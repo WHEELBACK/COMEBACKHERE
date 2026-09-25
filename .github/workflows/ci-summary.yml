@@ -54,6 +54,14 @@ jobs:
     name: ci / lint docs
     uses: ./.github/workflows/lint-docs.yml
 
+  ci-npm-audit:
+    name: ci / npm audit
+    uses: ./.github/workflows/npm-audit.yml
+
+  ci-playwright-e2e:
+    name: ci / playwright e2e
+    uses: ./.github/workflows/playwright-e2e.yml
+
   # ── Aggregator ────────────────────────────────────────────────────────
   # This is the *only* job that needs to be listed in branch protection
   # required status checks.  Its name is intentionally stable — rename the
@@ -70,6 +78,8 @@ jobs:
       - ci-error-docs
       - ci-backend-tests
       - ci-lint-docs
+      - ci-npm-audit
+      - ci-playwright-e2e
     steps:
       - name: All CI checks passed
         run: echo "All required CI checks passed."

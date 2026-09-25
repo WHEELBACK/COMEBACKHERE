@@ -1,7 +1,14 @@
-import { useCallback, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useWallet } from "../hooks/useWallet"
 import { usePolling } from "../hooks/usePolling"
-import { fetchBalances, type TreasuryBalance } from "../utils/treasury"
+import {
+  fetchBalances,
+  fetchPendingSettlements,
+  approveSettlement,
+  executeSettlement,
+  type TreasuryBalance,
+  type PendingSettlement,
+} from "../utils/treasury"
 import "./TreasuryManager.css"
 
 const TREASURY_CONTRACT = import.meta.env.VITE_TREASURY_CONTRACT_ID as string
@@ -136,6 +143,9 @@ export function TreasuryManager() {
   const [submitting, setSubmitting] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [settlements, setSettlements] = useState<PendingSettlement[]>([])
+  const [settlementsError, setSettlementsError] = useState<string | null>(null)
+  const [settlementSubmitting, setSettlementSubmitting] = useState<string | null>(null)
 
   const amountValid = isValidAmount(amount)
   const recipientValid =
@@ -164,6 +174,51 @@ export function TreasuryManager() {
   const handleManualRefresh = () => {
     if (!connected || !address) return
     loadBalances()
+  }
+
+  // ── Settlements ────────────────────────────────────────────────────────────
+  const loadSettlements = useCallback(async () => {
+    setSettlementsError(null)
+    try {
+      const data = await fetchPendingSettlements()
+      setSettlements(data)
+    } catch (err: unknown) {
+      setSettlementsError(
+        err instanceof Error ? err.message : "Failed to fetch settlements",
+      )
+    }
+  }, [])
+
+  useEffect(() => {
+    loadSettlements()
+  }, [loadSettlements, connected])
+
+  const handleApproveSettlement = async (settlementId: string) => {
+    if (!address) return
+    setSettlementSubmitting(settlementId)
+    try {
+      const result = await approveSettlement(settlementId, address)
+      if (!result.success) throw new Error(result.error ?? "Approve failed")
+      await loadSettlements()
+    } catch (err: unknown) {
+      setSettlementsError(err instanceof Error ? err.message : "Approve failed")
+    } finally {
+      setSettlementSubmitting(null)
+    }
+  }
+
+  const handleExecuteSettlement = async (settlementId: string) => {
+    if (!address) return
+    setSettlementSubmitting(settlementId)
+    try {
+      const result = await executeSettlement(settlementId, address)
+      if (!result.success) throw new Error(result.error ?? "Execute failed")
+      await loadSettlements()
+    } catch (err: unknown) {
+      setSettlementsError(err instanceof Error ? err.message : "Execute failed")
+    } finally {
+      setSettlementSubmitting(null)
+    }
   }
 
   // ── Deposit / withdraw submit ──────────────────────────────────────────────
@@ -379,12 +434,93 @@ export function TreasuryManager() {
               balances.map((b) => (
                 <tr key={b.token}>
                   <td>{b.token}</td>
-                  <td>{(Number(b.balance) / 10_000_000).toFixed(7)}</td>
+                  <td>{formatAmount(b.balance, STELLAR_DECIMALS, b.token)}</td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
+      </div>
+
+      {/* ── Pending Settlements ───────────────────────────────────────────── */}
+      <div className="managed-table-wrapper">
+        <h2>Pending Settlements</h2>
+
+        {settlementsError && (
+          <div className="message message--error" role="alert">
+            {settlementsError}
+          </div>
+        )}
+
+        {settlements.length === 0 ? (
+          <p className="empty-row">No pending settlements.</p>
+        ) : (
+          settlements.map((s) => {
+            const isReady = s.approval_weight >= s.threshold
+            const isSubmitting = settlementSubmitting === s.id
+            const alreadyApproved = address ? s.approvals.includes(address) : false
+
+            return (
+              <div key={s.id} className="settlement-card">
+                <div className="settlement-card__header">
+                  <span className="settlement-card__id">Settlement {s.id}</span>
+                  <span className="settlement-card__amount">{s.amount}</span>
+                  {isReady && (
+                    <span className="settlement-card__ready-badge" role="status">
+                      Ready to execute
+                    </span>
+                  )}
+                </div>
+
+                <div className="settlement-card__progress">
+                  <progress
+                    value={s.approval_weight}
+                    max={s.threshold}
+                    aria-label={`${s.approval_weight} of ${s.threshold} weight approved`}
+                  />
+                  <span className="settlement-card__progress-text">
+                    {s.approval_weight} of {s.threshold} weight approved
+                  </span>
+                </div>
+
+                {s.approvals.length > 0 && (
+                  <div className="settlement-card__approvers">
+                    <span className="settlement-card__approvers-label">Approvers:</span>
+                    <ul className="settlement-card__approvers-list">
+                      {s.approvals.map((addr) => (
+                        <li key={addr} className="settlement-card__approver">
+                          {addr.slice(0, 6)}…{addr.slice(-4)}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <div className="settlement-card__actions">
+                  <button
+                    className="btn btn--primary btn--sm"
+                    onClick={() => handleApproveSettlement(s.id)}
+                    disabled={isSubmitting || alreadyApproved || !connected}
+                    aria-label={`Approve settlement ${s.id}`}
+                  >
+                    {isSubmitting ? "Approving…" : "Approve"}
+                  </button>
+
+                  {isReady && (
+                    <button
+                      className="btn btn--secondary btn--sm"
+                      onClick={() => handleExecuteSettlement(s.id)}
+                      disabled={isSubmitting || !connected}
+                      aria-label={`Execute settlement ${s.id}`}
+                    >
+                      {isSubmitting ? "Executing…" : "Execute"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )
+          })
+        )}
       </div>
     </div>
   )

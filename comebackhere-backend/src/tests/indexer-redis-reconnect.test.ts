@@ -80,6 +80,7 @@ describe("loadCursor", () => {
       rpcUrl: "http://localhost:8000",
       contractId: "CCV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XMCW",
       _redisClient: null,
+      _db: null,
       onError: () => {/* suppress poll errors */},
     })
     stopIndexer()
@@ -98,6 +99,7 @@ describe("loadCursor", () => {
       rpcUrl: "http://localhost:8000",
       contractId: "CCV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XMCW",
       _redisClient: mockRedis as any,
+      _db: null,
       onError: () => {},
     })
     stopIndexer()
@@ -115,6 +117,7 @@ describe("loadCursor", () => {
       rpcUrl: "http://localhost:8000",
       contractId: "CCV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XMCW",
       _redisClient: mockRedis as any,
+      _db: null,
       onError: () => {},
     })
     stopIndexer()
@@ -139,11 +142,12 @@ describe("saveCursor", () => {
       rpcUrl: "http://localhost:8000",
       contractId: "CCV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XMCW",
       _redisClient: mockRedis as any,
+      _db: null,
       onError: () => {},
     })
-    stopIndexer()
 
     await saveCursor("new-token-123")
+    stopIndexer()
 
     expect(setMock).toHaveBeenCalledWith("invoice_indexer_cursor", "new-token-123")
     // In-memory cursor is also updated
@@ -161,6 +165,7 @@ describe("saveCursor", () => {
       rpcUrl: "http://localhost:8000",
       contractId: "CCV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XMCW",
       _redisClient: mockRedis as any,
+      _db: null,
       onError: () => {},
     })
     stopIndexer()
@@ -208,6 +213,7 @@ describe("indexer resilience — dropped Redis connection", () => {
       contractId: "CCV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XMCW",
       pollIntervalMs: 50,
       _redisClient: mockRedis as any,
+      _db: null,
       onError: (err) => {
         pollCount++
         errors.push(err)
@@ -236,6 +242,7 @@ describe("indexer resilience — dropped Redis connection", () => {
       rpcUrl: "http://localhost:8000",
       contractId: "CCV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XMCW",
       _redisClient: null,
+      _db: null,
       onError: () => {},
     })
     stopIndexer()

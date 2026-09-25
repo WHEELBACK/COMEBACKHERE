@@ -1,19 +1,20 @@
 import { z } from "zod"
 import type { Request, Response, NextFunction } from "express"
+import { ValidationError } from "../lib/errors.js"
 
 type RequestPart = "body" | "params" | "query"
 
 function makeValidator(part: RequestPart) {
   return (schema: z.ZodTypeAny) =>
-    (req: Request, res: Response, next: NextFunction) => {
+    (req: Request, _res: Response, next: NextFunction) => {
       const result = schema.safeParse(req[part])
       if (!result.success) {
         const details = result.error.issues.map((issue) => ({
           field: issue.path.join("."),
           message: issue.message,
         }))
-        const error = details.map((d) => `${d.field}: ${d.message}`).join("; ")
-        res.status(400).json({ error, details })
+        const message = details.map((d) => `${d.field}: ${d.message}`).join("; ")
+        next(new ValidationError(message, details))
         return
       }
       if (part === "body") {

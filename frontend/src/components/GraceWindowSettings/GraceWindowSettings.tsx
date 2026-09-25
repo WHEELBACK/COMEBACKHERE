@@ -81,7 +81,7 @@ export default function GraceWindowSettings() {
       const res = await fetch(`${API_BASE}/invoice/grace-window`)
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
-        throw new Error(body.error ?? `HTTP ${res.status}`)
+        throw new Error(body.error?.message ?? `HTTP ${res.status}`)
       }
       const data: { grace_window_seconds: number } = await res.json()
       setCurrentSeconds(data.grace_window_seconds)
@@ -135,7 +135,7 @@ export default function GraceWindowSettings() {
       })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) {
-        throw new Error(body.error ?? `HTTP ${res.status}`)
+        throw new Error(body.error?.message ?? `HTTP ${res.status}`)
       }
       setCurrentSeconds(body.grace_window_seconds)
       setSuccess(

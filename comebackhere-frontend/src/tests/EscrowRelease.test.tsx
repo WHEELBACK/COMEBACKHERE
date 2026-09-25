@@ -58,7 +58,7 @@ describe("EscrowRelease treasury balance", () => {
 
     await waitFor(() => expect(fetchBalancesMock).toHaveBeenCalled())
     expect(await screen.findByText("Treasury USDC Balance")).toBeInTheDocument()
-    expect(await screen.findByText("5000")).toBeInTheDocument()
+    expect(await screen.findByText("0.0005 USDC")).toBeInTheDocument()
   })
 
   it("does not fetch a treasury balance for a non-Paid invoice", () => {

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react"
 import type { Invoice } from "../types"
 import { StatusBadge } from "./StatusBadge"
+import { formatAmount, USDC_DECIMALS } from "../utils/format"
 
 interface CancelConfirmationModalProps {
   invoice: Invoice
@@ -98,8 +99,8 @@ export function CancelConfirmationModal({
             <span className="detail-value">#{invoice.id}</span>
           </div>
           <div className="detail-row">
-            <span className="detail-label">Amount (USDC)</span>
-            <span className="detail-value">{invoice.gross_usdc}</span>
+            <span className="detail-label">Amount</span>
+            <span className="detail-value">{formatAmount(invoice.gross_usdc, USDC_DECIMALS, "USDC")}</span>
           </div>
           <div className="detail-row">
             <span className="detail-label">Merchant</span>

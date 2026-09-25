@@ -14,6 +14,8 @@
  * single event across both the backend and their own logs.
  */
 
+import { connectMongo } from "../db/mongo.js"
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -131,19 +133,24 @@ export async function deliverWebhook(
   delayFn: (ms: number) => Promise<void> = defaultDelay,
   correlationId?: string,
 ): Promise<WebhookDeliveryRecord> {
+  const { signal, startAttempt = 0, onAttempt } = options
   const record: WebhookDeliveryRecord = {
     idempotency_key: payload.idempotency_key,
     endpoint,
     payload,
     status: "pending",
-    attempts: 0,
+    attempts: startAttempt,
     last_attempt_at: null,
     last_status_code: null,
     last_error: null,
     request_id: correlationId ?? null,
   }
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  for (let attempt = startAttempt; attempt < maxAttempts; attempt++) {
+    // Shutting down — leave the record "pending" so the caller can persist it.
+    if (signal?.aborted) return record
+
+    onAttempt?.(attempt + 1)
     record.attempts = attempt + 1
     record.last_attempt_at = new Date().toISOString()
 
@@ -207,3 +214,233 @@ export function buildWebhookPayload(
     data,
   }
 }
+
+// ---------------------------------------------------------------------------
+// Delivery queue with graceful drain
+// ---------------------------------------------------------------------------
+
+/** A delivery that has not finished yet, in a form that can be persisted. */
+export interface WebhookDeliveryJob {
+  endpoint: string
+  payload: WebhookPayload
+  /** Attempts already made; a resumed job continues from here. */
+  attempts: number
+}
+
+/** Durable storage for deliveries that did not finish before shutdown. */
+export interface PendingDeliveryStore {
+  save(jobs: WebhookDeliveryJob[]): Promise<void>
+  /** Returns every stored job and removes it from the store. */
+  takeAll(): Promise<WebhookDeliveryJob[]>
+}
+
+const PENDING_DELIVERIES_COLLECTION = "webhook_pending_deliveries"
+
+/** MongoDB-backed store, keyed by idempotency_key so re-saving is harmless. */
+export function createMongoPendingDeliveryStore(): PendingDeliveryStore {
+  return {
+    async save(jobs) {
+      const database = await connectMongo()
+      const collection = database.collection<WebhookDeliveryJob & { _id: string }>(
+        PENDING_DELIVERIES_COLLECTION,
+      )
+      await Promise.all(
+        jobs.map((job) =>
+          collection.replaceOne(
+            { _id: job.payload.idempotency_key },
+            job,
+            { upsert: true },
+          ),
+        ),
+      )
+    },
+    async takeAll() {
+      const database = await connectMongo()
+      const collection = database.collection<WebhookDeliveryJob & { _id: string }>(
+        PENDING_DELIVERIES_COLLECTION,
+      )
+      const docs = await collection.find().toArray()
+      if (docs.length > 0) {
+        await collection.deleteMany({ _id: { $in: docs.map((d) => d._id) } })
+      }
+      return docs.map(({ endpoint, payload, attempts }) => ({ endpoint, payload, attempts }))
+    },
+  }
+}
+
+/** Sleeps for `ms`, resolving early if `signal` aborts. */
+function abortableDelay(
+  delayFn: (ms: number) => Promise<void>,
+  ms: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const onAbort = () => resolve()
+    signal.addEventListener("abort", onAbort, { once: true })
+    delayFn(ms).then(() => {
+      signal.removeEventListener("abort", onAbort)
+      resolve()
+    })
+  })
+}
+
+export interface WebhookDeliveryQueueOptions {
+  store?: PendingDeliveryStore
+  maxAttempts?: number
+  fetchFn?: typeof fetch
+  delayFn?: (ms: number) => Promise<void>
+}
+
+export interface DrainResult {
+  /** In-flight deliveries that finished (delivered or failed) within the timeout. */
+  completed: number
+  /** Deliveries persisted for retry after restart. */
+  persisted: number
+  timedOut: boolean
+}
+
+export class WebhookDeliveryQueue {
+  private accepting = true
+  private readonly abort = new AbortController()
+  private readonly active = new Set<{ job: WebhookDeliveryJob; done: Promise<unknown> }>()
+  /** Jobs submitted after shutdown began; persisted rather than started. */
+  private deferred: WebhookDeliveryJob[] = []
+  private readonly store: PendingDeliveryStore
+  private readonly maxAttempts: number
+  private readonly fetchFn: typeof fetch
+  private readonly delayFn: (ms: number) => Promise<void>
+
+  constructor(options: WebhookDeliveryQueueOptions = {}) {
+    this.store = options.store ?? createMongoPendingDeliveryStore()
+    this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
+    this.fetchFn = options.fetchFn ?? ((...args) => fetch(...args))
+    this.delayFn = options.delayFn ?? defaultDelay
+  }
+
+  get isAccepting(): boolean {
+    return this.accepting
+  }
+
+  get inFlightCount(): number {
+    return this.active.size
+  }
+
+  /**
+   * Starts delivering `payload` to `endpoint`. Returns the delivery promise,
+   * or null when the queue is shutting down — the job is then kept and
+   * persisted for retry after restart instead of being started.
+   */
+  enqueue(
+    endpoint: string,
+    payload: WebhookPayload,
+    attempts = 0,
+  ): Promise<WebhookDeliveryRecord> | null {
+    const job: WebhookDeliveryJob = { endpoint, payload, attempts }
+
+    if (!this.accepting) {
+      console.warn(
+        `[webhook] queue closed — deferring key=${payload.idempotency_key} for retry after restart`,
+      )
+      if (this.abort.signal.aborted) {
+        // Drain already finished; persist straight away.
+        this.persist([job])
+      } else {
+        this.deferred.push(job)
+      }
+      return null
+    }
+
+    const entry = { job, done: Promise.resolve() as Promise<unknown> }
+    const done = deliverWebhook(
+      endpoint,
+      payload,
+      this.maxAttempts,
+      this.fetchFn,
+      (ms) => abortableDelay(this.delayFn, ms, this.abort.signal),
+      {
+        signal: this.abort.signal,
+        startAttempt: attempts,
+        onAttempt: (n) => {
+          job.attempts = n
+        },
+      },
+    ).then((record) => {
+      // A "pending" record was interrupted by drain; keep it tracked so it is
+      // persisted. Finished deliveries (delivered/failed) are dropped.
+      if (record.status !== "pending") this.active.delete(entry)
+      return record
+    })
+    entry.done = done
+    this.active.add(entry)
+    return done
+  }
+
+  /** Stops starting new deliveries; later enqueues are deferred for restart. */
+  stopAccepting(): void {
+    if (this.accepting) {
+      this.accepting = false
+      console.log("[webhook] queue stopped accepting new deliveries")
+    }
+  }
+
+  /**
+   * Stops accepting jobs, waits up to `timeoutMs` for in-flight deliveries,
+   * then halts retries and persists every unfinished job for retry.
+   */
+  async drain(timeoutMs: number): Promise<DrainResult> {
+    this.stopAccepting()
+    const startedWith = this.active.size
+    console.log(
+      `[webhook] draining ${startedWith} in-flight deliver${startedWith === 1 ? "y" : "ies"} (timeout ${timeoutMs}ms)`,
+    )
+
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timedOut = await Promise.race([
+      Promise.allSettled([...this.active].map((e) => e.done)).then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), timeoutMs)
+      }),
+    ])
+    clearTimeout(timer)
+
+    // Stop further attempts/backoff. Anything still tracked is unfinished.
+    this.abort.abort()
+    const unfinished = [...[...this.active].map((e) => ({ ...e.job })), ...this.deferred]
+    const completed = startedWith - this.active.size
+    this.active.clear()
+    this.deferred = []
+
+    if (unfinished.length > 0) await this.persist(unfinished)
+
+    console.log(
+      `[webhook] drain ${timedOut ? "timed out" : "complete"}: ` +
+        `${completed} finished, ${unfinished.length} persisted for retry`,
+    )
+    return { completed, persisted: unfinished.length, timedOut }
+  }
+
+  /** Re-enqueues deliveries persisted by a previous process. */
+  async resumePending(): Promise<number> {
+    const jobs = await this.store.takeAll()
+    for (const job of jobs) this.enqueue(job.endpoint, job.payload, job.attempts)
+    if (jobs.length > 0) {
+      console.log(`[webhook] resumed ${jobs.length} persisted deliver${jobs.length === 1 ? "y" : "ies"}`)
+    }
+    return jobs.length
+  }
+
+  private async persist(jobs: WebhookDeliveryJob[]): Promise<void> {
+    try {
+      await this.store.save(jobs)
+    } catch (err) {
+      console.error(
+        `[webhook] failed to persist ${jobs.length} unfinished deliver${jobs.length === 1 ? "y" : "ies"}:`,
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
+}
+
+/** Process-wide queue used by the backend entrypoint. */
+export const webhookDeliveryQueue = new WebhookDeliveryQueue()

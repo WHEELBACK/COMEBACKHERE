@@ -8,13 +8,11 @@ import { PayConfirmationModal } from "./PayConfirmationModal"
 import { CancelConfirmationModal } from "./CancelConfirmationModal"
 import { TransactionHistory } from "./TransactionHistory"
 import { InvoiceQRCode } from "./InvoiceQRCode"
-import { InvoiceTimeline } from "./InvoiceTimeline"
-import { PaymentReceipt } from "./PaymentReceipt"
+import { formatAmount, USDC_DECIMALS } from "../utils/format"
 
 export function InvoicePayment() {
   const { invoice, loading, error, loadInvoice, pay, cancel } = useInvoice()
-  const { address, connected, connecting, connect } = useWallet()
-  const t = useT()
+  const { address, connected, connecting, connect, notReadyReason } = useWallet()
   const [invoiceId, setInvoiceId] = useState("")
   const [showConfirm, setShowConfirm] = useState(false)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
@@ -235,8 +233,8 @@ export function InvoicePayment() {
 
           <div className="invoice-card__body">
             <div className="detail-row">
-              <span className="detail-label">{t("invoiceCard.amountUsdc")}</span>
-              <span className="detail-value">{invoice.amount_usdc}</span>
+              <span className="detail-label">Amount</span>
+              <span className="detail-value">{formatAmount(invoice.amount_usdc, USDC_DECIMALS, "USDC")}</span>
             </div>
             <div className="detail-row">
               <span className="detail-label">{t("invoiceCard.countdown")}</span>
@@ -256,8 +254,8 @@ export function InvoicePayment() {
               </span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">{t("invoiceCard.grossAmountUsdc")}</span>
-              <span className="detail-value">{invoice.gross_usdc}</span>
+              <span className="detail-label">Gross Amount</span>
+              <span className="detail-value">{formatAmount(invoice.gross_usdc, USDC_DECIMALS, "USDC")}</span>
             </div>
             <div className="detail-row">
               <span className="detail-label">{t("invoiceCard.merchant")}</span>
@@ -300,16 +298,29 @@ export function InvoicePayment() {
               <button
                 className="btn btn--primary"
                 onClick={handlePayClick}
-                aria-label={t("invoicePayment.payInvoiceAriaLabel", { id: invoice.id })}
+                disabled={!!notReadyReason}
+                aria-describedby={notReadyReason ? "payment-wallet-reason" : undefined}
+                aria-label={`Pay invoice #${invoice.id}`}
               >
-                {t("invoicePayment.payInvoice")}
+                Pay Invoice
               </button>
             )}
 
             {canCancel && (
-              <button className="btn btn--danger" onClick={handleCancelClick}>
-                {t("invoicePayment.cancelInvoice")}
+              <button
+                className="btn btn--danger"
+                onClick={handleCancelClick}
+                disabled={!!notReadyReason}
+                aria-describedby={notReadyReason ? "payment-wallet-reason" : undefined}
+              >
+                Cancel Invoice
               </button>
+            )}
+
+            {notReadyReason && (
+              <p id="payment-wallet-reason" className="wallet-required" data-testid="wallet-not-ready">
+                {notReadyReason}
+              </p>
             )}
 
             {connected && invoice.status !== "Pending" && !hasOpenDispute && (

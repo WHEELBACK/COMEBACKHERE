@@ -1,0 +1,36 @@
+name: npm audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'comebackhere-frontend/package.json'
+      - 'comebackhere-frontend/package-lock.json'
+      - 'comebackhere-backend/package.json'
+      - 'comebackhere-backend/package-lock.json'
+  workflow_call: # called by ci-summary.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+
+      - name: Audit comebackhere-frontend
+        working-directory: comebackhere-frontend
+        run: npm audit --audit-level=high
+
+      - name: Audit comebackhere-backend
+        working-directory: comebackhere-backend
+        run: npm audit --audit-level=high
