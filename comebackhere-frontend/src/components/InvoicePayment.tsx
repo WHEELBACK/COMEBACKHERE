@@ -1,16 +1,20 @@
 import { useState, useEffect } from "react"
 import { useInvoice } from "../hooks/useInvoice"
 import { useWallet } from "../hooks/useWallet"
+import { useT } from "../i18n"
 import { StatusBadge } from "./StatusBadge"
 import { CopyableText } from "./CopyableText"
 import { PayConfirmationModal } from "./PayConfirmationModal"
 import { CancelConfirmationModal } from "./CancelConfirmationModal"
 import { TransactionHistory } from "./TransactionHistory"
 import { InvoiceQRCode } from "./InvoiceQRCode"
+import { InvoiceTimeline } from "./InvoiceTimeline"
+import { PaymentReceipt } from "./PaymentReceipt"
 
 export function InvoicePayment() {
   const { invoice, loading, error, loadInvoice, pay, cancel } = useInvoice()
   const { address, connected, connecting, connect } = useWallet()
+  const t = useT()
   const [invoiceId, setInvoiceId] = useState("")
   const [showConfirm, setShowConfirm] = useState(false)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
@@ -25,6 +29,7 @@ export function InvoicePayment() {
     success: boolean
     hash?: string
     errorMsg?: string
+    paidAt?: number
   } | null>(null)
 
   useEffect(() => {
@@ -63,7 +68,6 @@ export function InvoicePayment() {
 
     updateTimer()
     const timer = window.setInterval(updateTimer, 1000)
-
     return () => window.clearInterval(timer)
   }, [invoice?.expires_at, invoice?.id, invoice?.status, loadInvoice])
 
@@ -87,6 +91,7 @@ export function InvoicePayment() {
       success: res.success,
       hash: res.transaction_hash,
       errorMsg: res.error,
+      paidAt: res.success ? Math.floor(Date.now() / 1000) : undefined,
     })
   }
 
@@ -108,8 +113,7 @@ export function InvoicePayment() {
     })
   }
 
-  const canPay =
-    connected && invoice?.status === "Pending"
+  const canPay = connected && invoice?.status === "Pending"
 
   const isMerchant =
     connected &&
@@ -121,35 +125,60 @@ export function InvoicePayment() {
 
   const hasOpenDispute = invoice?.status === "RefundRequested"
 
+  // Show receipt when payment succeeded and we have a tx hash
+  const showReceipt =
+    result?.success === true &&
+    result.hash != null &&
+    invoice != null &&
+    invoice.status !== "Cancelled"
+
   return (
     <div className="payment-flow">
-      <h1>Invoice Payment</h1>
+      <h1>{t("invoicePayment.title")}</h1>
 
-      <div className="invoice-lookup" role="search" aria-label="Invoice lookup">
-        <label htmlFor="payment-invoice-id" className="sr-only">Invoice ID</label>
+      <div
+        className="invoice-lookup"
+        role="search"
+        aria-label={t("invoicePayment.lookupAriaLabel")}
+      >
+        <label htmlFor="payment-invoice-id" className="sr-only">
+          {t("invoicePayment.invoiceIdLabel")}
+        </label>
         <input
           id="payment-invoice-id"
           type="number"
-          placeholder="Enter Invoice ID"
+          placeholder={t("invoicePayment.invoiceIdPlaceholder")}
           value={invoiceId}
           onChange={(e) => setInvoiceId(e.target.value)}
-          aria-label="Invoice ID for payment"
+          aria-label={t("invoicePayment.invoiceIdAriaLabel")}
         />
         <button
           className="btn btn--primary"
           onClick={handleLoadInvoice}
           disabled={!invoiceId || loading}
-          aria-label={loading ? "Loading invoice" : "Load invoice"}
+          aria-label={
+            loading
+              ? t("invoicePayment.loadingAriaLabel")
+              : t("invoicePayment.loadInvoiceAriaLabel")
+          }
         >
-          {loading ? "Loading..." : "Load Invoice"}
+          {loading ? t("invoicePayment.loading") : t("invoicePayment.loadInvoice")}
         </button>
       </div>
 
-      {loading && <p className="status-text" aria-live="polite">Loading invoice...</p>}
+      {loading && (
+        <p className="status-text" aria-live="polite">
+          {t("invoicePayment.loadingInvoice")}
+        </p>
+      )}
 
-      {error && <div className="message message--error" role="alert">{error}</div>}
+      {error && (
+        <div className="message message--error" role="alert">
+          {error}
+        </div>
+      )}
 
-      {result && (
+      {result && !showReceipt && (
         <div
           className={`message message--${result.success ? "success" : "error"}`}
           role="status"
@@ -157,43 +186,68 @@ export function InvoicePayment() {
         >
           {result.success ? (
             <>
-              {invoice?.status === "Cancelled" ? "Invoice cancelled successfully!" : "Payment successful!"}
+              {invoice?.status === "Cancelled"
+                ? t("invoicePayment.cancelSuccess")
+                : t("invoicePayment.paymentSuccess")}
               <br />
-              Transaction hash:{" "}
-              <code className="tx-hash"><CopyableText text={result.hash!} label="Copy transaction hash" /></code>
+              {t("invoicePayment.transactionHash")}{" "}
+              <code className="tx-hash">
+                <CopyableText
+                  text={result.hash!}
+                  label={t("common.copyTransactionHash")}
+                />
+              </code>
             </>
           ) : (
-            <>Operation failed: {result.errorMsg}</>
+            <>{t("invoicePayment.operationFailed", { error: result.errorMsg ?? "" })}</>
           )}
         </div>
+      )}
+
+      {/* Payment Receipt — shown after a successful pay, hides the status message */}
+      {showReceipt && invoice && result?.hash && (
+        <PaymentReceipt
+          invoice={invoice}
+          transactionHash={result.hash}
+          paidAt={result.paidAt ?? Math.floor(Date.now() / 1000)}
+        />
       )}
 
       {invoice && (
         <div className="invoice-card">
           <div className="invoice-card__header">
-            <h2>Invoice #<CopyableText text={String(invoice.id)} label="Copy invoice ID" /></h2>
+            <h2>
+              Invoice #
+              <CopyableText
+                text={String(invoice.id)}
+                label={t("invoiceCard.copyInvoiceId")}
+              />
+            </h2>
             <StatusBadge status={invoice.status} />
           </div>
 
           {hasOpenDispute && (
             <div className="message message--warning" role="status" aria-live="polite">
-              <strong>Dispute in progress.</strong> A refund has been requested for this
-              invoice, which opens an escrow dispute and holds the funds. Payment,
-              cancellation, and escrow release are unavailable until the dispute is
-              resolved.
+              <strong>{t("invoicePayment.disputeInProgress")}</strong>{" "}
+              {t("invoicePayment.disputeWarning")}
             </div>
           )}
 
           <div className="invoice-card__body">
             <div className="detail-row">
-              <span className="detail-label">Amount (USDC)</span>
+              <span className="detail-label">{t("invoiceCard.amountUsdc")}</span>
               <span className="detail-value">{invoice.amount_usdc}</span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">Countdown</span>
+              <span className="detail-label">{t("invoiceCard.countdown")}</span>
               <span className="detail-value">
-                {invoice.status === "Expired" || (timeLeft && timeLeft.days === 0 && timeLeft.hours === 0 && timeLeft.minutes === 0 && timeLeft.seconds === 0) ? (
-                  <span className="badge badge--expired">Expired</span>
+                {invoice.status === "Expired" ||
+                (timeLeft &&
+                  timeLeft.days === 0 &&
+                  timeLeft.hours === 0 &&
+                  timeLeft.minutes === 0 &&
+                  timeLeft.seconds === 0) ? (
+                  <span className="badge badge--expired">{t("invoiceCard.expired")}</span>
                 ) : timeLeft ? (
                   `${timeLeft.days}d ${timeLeft.hours}h ${timeLeft.minutes}m ${timeLeft.seconds}s`
                 ) : (
@@ -202,64 +256,74 @@ export function InvoicePayment() {
               </span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">Gross Amount (USDC)</span>
+              <span className="detail-label">{t("invoiceCard.grossAmountUsdc")}</span>
               <span className="detail-value">{invoice.gross_usdc}</span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">Merchant</span>
+              <span className="detail-label">{t("invoiceCard.merchant")}</span>
               <span className="detail-value detail-value--address">
-                <CopyableText text={invoice.merchant} label="Copy merchant address" />
+                <CopyableText
+                  text={invoice.merchant}
+                  label={t("invoiceCard.copyMerchantAddress")}
+                />
               </span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">Expiry</span>
+              <span className="detail-label">{t("invoiceCard.expiry")}</span>
               <span className="detail-value">
                 {new Date(invoice.expires_at * 1000).toLocaleString()}
               </span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">Status</span>
+              <span className="detail-label">{t("invoiceCard.status")}</span>
               <StatusBadge status={invoice.status} />
             </div>
           </div>
 
-          <div className="invoice-card__actions" role="group" aria-label="Invoice actions">
+          <div
+            className="invoice-card__actions"
+            role="group"
+            aria-label={t("invoicePayment.invoiceActionsAriaLabel")}
+          >
             {!connected && (
               <button
                 className="btn btn--primary"
                 onClick={connect}
                 disabled={connecting}
-                aria-label="Connect wallet to pay invoice"
+                aria-label={t("invoicePayment.connectToPayInvoice")}
               >
-                {connecting ? "Connecting..." : "Connect Wallet"}
+                {connecting ? t("wallet.connecting") : t("wallet.connect")}
               </button>
             )}
 
             {connected && canPay && (
-              <button className="btn btn--primary" onClick={handlePayClick} aria-label={`Pay invoice #${invoice.id}`}>
-                Pay Invoice
+              <button
+                className="btn btn--primary"
+                onClick={handlePayClick}
+                aria-label={t("invoicePayment.payInvoiceAriaLabel", { id: invoice.id })}
+              >
+                {t("invoicePayment.payInvoice")}
               </button>
             )}
 
             {canCancel && (
               <button className="btn btn--danger" onClick={handleCancelClick}>
-                Cancel Invoice
+                {t("invoicePayment.cancelInvoice")}
               </button>
             )}
 
             {connected && invoice.status !== "Pending" && !hasOpenDispute && (
               <p className="status-text">
-                This invoice is not available for payment
-                (status: {invoice.status}).
+                {t("invoicePayment.notAvailableForPayment", { status: invoice.status })}
               </p>
             )}
           </div>
         </div>
       )}
 
-      {invoice && (
-        <InvoiceQRCode invoiceId={invoice.id} />
-      )}
+      {invoice && <InvoiceQRCode invoiceId={invoice.id} />}
+
+      {invoice && <InvoiceTimeline invoiceId={invoice.id} />}
 
       {invoice && <TransactionHistory invoice={invoice} />}
 

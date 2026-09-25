@@ -5,9 +5,11 @@ import { ComplianceManager } from "./components/ComplianceManager"
 import { TokenAllowlist } from "./components/TokenAllowlist"
 import { BatchExpireInvoices } from "./components/BatchExpireInvoices"
 import { TreasuryManager } from "./components/TreasuryManager"
+import { LanguageSwitcher } from "./components/LanguageSwitcher"
 import { useInvoice } from "./hooks/useInvoice"
 import { useTheme } from "./hooks/useTheme"
 import { useWallet } from "./hooks/useWallet"
+import { useT } from "./i18n"
 import { CopyableText } from "./components/CopyableText"
 import "./App.css"
 import "./components/ErrorBoundary.css"
@@ -18,6 +20,7 @@ function RefundTab() {
   const { invoice, loading, error, loadInvoice, refund } = useInvoice()
   const { address } = useWallet()
   const [invoiceId, setInvoiceId] = useState("")
+  const t = useT()
 
   const handleLoadInvoice = async () => {
     await loadInvoice(Number(invoiceId))
@@ -25,25 +28,25 @@ function RefundTab() {
 
   return (
     <div className="refund-flow">
-      <h2>Request a Refund</h2>
+      <h2>{t("refundTab.title")}</h2>
 
-      <div className="invoice-lookup" role="search" aria-label="Invoice lookup">
-        <label htmlFor="refund-invoice-id" className="sr-only">Invoice ID</label>
+      <div className="invoice-lookup" role="search" aria-label={t("refundTab.lookupAriaLabel")}>
+        <label htmlFor="refund-invoice-id" className="sr-only">{t("refundTab.invoiceIdLabel")}</label>
         <input
           id="refund-invoice-id"
           type="number"
-          placeholder="Enter Invoice ID"
+          placeholder={t("refundTab.invoiceIdPlaceholder")}
           value={invoiceId}
           onChange={(e) => setInvoiceId(e.target.value)}
-          aria-label="Invoice ID for refund lookup"
+          aria-label={t("refundTab.invoiceIdAriaLabel")}
         />
         <button
           className="btn btn--primary"
           onClick={handleLoadInvoice}
           disabled={!invoiceId || loading}
-          aria-label={loading ? "Loading invoice" : "Load invoice for refund"}
+          aria-label={loading ? t("refundTab.loadingAriaLabel") : t("refundTab.loadAriaLabel")}
         >
-          {loading ? "Loading..." : "Load Invoice"}
+          {loading ? t("refundTab.loading") : t("refundTab.loadInvoice")}
         </button>
       </div>
 
@@ -52,27 +55,27 @@ function RefundTab() {
       {invoice && (
         <div className="invoice-card">
           <div className="invoice-card__header">
-            <h3>Invoice #<CopyableText text={String(invoice.id)} label="Copy invoice ID" /></h3>
+            <h3>{t("refundTab.invoiceNumber", { id: invoice.id })}<CopyableText text={String(invoice.id)} label={t("refundTab.copyInvoiceId")} /></h3>
           </div>
           <div className="invoice-card__body">
             <div className="detail-row">
-              <span className="detail-label">Amount (USDC)</span>
+              <span className="detail-label">{t("refundTab.amountUsdc")}</span>
               <span className="detail-value">{invoice.gross_usdc}</span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">Merchant</span>
+              <span className="detail-label">{t("refundTab.merchant")}</span>
               <span className="detail-value detail-value--address">
-                <CopyableText text={invoice.merchant} label="Copy merchant address" />
+                <CopyableText text={invoice.merchant} label={t("refundTab.copyMerchantAddress")} />
               </span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">Payer</span>
+              <span className="detail-label">{t("refundTab.payer")}</span>
               <span className="detail-value detail-value--address">
-                <CopyableText text={invoice.payer} label="Copy payer address" />
+                <CopyableText text={invoice.payer} label={t("refundTab.copyPayerAddress")} />
               </span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">Status</span>
+              <span className="detail-label">{t("refundTab.status")}</span>
               <span>{invoice.status}</span>
             </div>
           </div>
@@ -90,6 +93,7 @@ function RefundTab() {
 export default function App() {
   const { address, connected, connect, connecting, disconnect } = useWallet()
   useTheme()
+  const t = useT()
   const [tab, setTab] = useState<Tab>("payment")
 
   const handleDisconnect = useCallback(() => {
@@ -100,31 +104,34 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header" role="banner">
-        <h1>ComebackHere</h1>
-        <div className="wallet-bar">
-          {connected ? (
-            <>
-              <span className="wallet-address" aria-label={`Wallet connected: ${address}`}>
-                Connected: {address?.slice(0, 6)}...{address?.slice(-4)}
-              </span>
+        <h1>{t("app.title")}</h1>
+        <div className="header-actions">
+          <LanguageSwitcher />
+          <div className="wallet-bar">
+            {connected ? (
+              <>
+                <span className="wallet-address" aria-label={t("wallet.connectedAriaLabel", { address: address ?? "" })}>
+                  {t("wallet.connected", { address: `${address?.slice(0, 6)}...${address?.slice(-4)}` })}
+                </span>
+                <button
+                  className="btn btn--secondary btn--sm"
+                  onClick={handleDisconnect}
+                  aria-label={t("wallet.disconnectAriaLabel")}
+                >
+                  {t("wallet.disconnect")}
+                </button>
+              </>
+            ) : (
               <button
-                className="btn btn--secondary btn--sm"
-                onClick={handleDisconnect}
-                aria-label="Disconnect wallet"
+                className="btn btn--primary btn--sm"
+                onClick={connect}
+                disabled={connecting}
+                aria-label={t("wallet.connectAriaLabel")}
               >
-                Disconnect
+                {connecting ? t("wallet.connecting") : t("wallet.connect")}
               </button>
-            </>
-          ) : (
-            <button
-              className="btn btn--primary btn--sm"
-              onClick={connect}
-              disabled={connecting}
-              aria-label="Connect wallet"
-            >
-              {connecting ? "Connecting..." : "Connect Wallet"}
-            </button>
-          )}
+            )}
+          </div>
         </div>
       </header>
 
@@ -137,7 +144,7 @@ export default function App() {
           className={`tab ${tab === "payment" ? "tab--active" : ""}`}
           onClick={() => setTab("payment")}
         >
-          Pay Invoice
+          {t("nav.payInvoice")}
         </button>
         <button
           role="tab"
@@ -147,7 +154,7 @@ export default function App() {
           className={`tab ${tab === "refund" ? "tab--active" : ""}`}
           onClick={() => setTab("refund")}
         >
-          Request Refund
+          {t("nav.requestRefund")}
         </button>
         <button
           role="tab"
@@ -157,7 +164,7 @@ export default function App() {
           className={`tab ${tab === "compliance" ? "tab--active" : ""}`}
           onClick={() => setTab("compliance")}
         >
-          Compliance
+          {t("nav.compliance")}
         </button>
         <button
           role="tab"
@@ -167,7 +174,7 @@ export default function App() {
           className={`tab ${tab === "tokens" ? "tab--active" : ""}`}
           onClick={() => setTab("tokens")}
         >
-          Token Allowlist
+          {t("nav.tokenAllowlist")}
         </button>
         <button
           role="tab"
@@ -177,7 +184,7 @@ export default function App() {
           className={`tab ${tab === "batch-expire" ? "tab--active" : ""}`}
           onClick={() => setTab("batch-expire")}
         >
-          Batch Expire
+          {t("nav.batchExpire")}
         </button>
         <button
           role="tab"
@@ -187,7 +194,7 @@ export default function App() {
           className={`tab ${tab === "treasury" ? "tab--active" : ""}`}
           onClick={() => setTab("treasury")}
         >
-          Treasury
+          {t("nav.treasury")}
         </button>
       </nav>
 

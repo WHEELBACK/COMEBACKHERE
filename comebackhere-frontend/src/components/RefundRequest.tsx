@@ -1,5 +1,6 @@
 import { useState } from "react"
 import type { Invoice, InvoiceStatus } from "../types"
+import { useT } from "../i18n"
 import { StatusBadge } from "./StatusBadge"
 import { CopyableText } from "./CopyableText"
 import { RefundConfirmationModal } from "./RefundConfirmationModal"
@@ -26,6 +27,7 @@ export function RefundRequest({
   walletAddress,
   onRequestRefund,
 }: RefundRequestProps) {
+  const t = useT()
   const [showConfirm, setShowConfirm] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<{
@@ -36,21 +38,22 @@ export function RefundRequest({
   const [reason, setReason] = useState("")
   const [reasonError, setReasonError] = useState<string | null>(null)
 
-  const isPayer =
-    walletAddress?.toLowerCase() === invoice.payer.toLowerCase()
-  const canRequestRefund =
-    isPayer && invoice.status === "Paid"
+  const isPayer = walletAddress?.toLowerCase() === invoice.payer.toLowerCase()
+  const canRequestRefund = isPayer && invoice.status === "Paid"
 
-  // Validate reason field
   const validateReason = (value: string): string | null => {
     if (!value.trim()) {
-      return "Reason is required"
+      return t("refundRequest.reasonError.required")
     }
     if (value.length < REFUND_CONSTRAINTS.MIN_REASON_LENGTH) {
-      return `Reason must be at least ${REFUND_CONSTRAINTS.MIN_REASON_LENGTH} characters`
+      return t("refundRequest.reasonError.tooShort", {
+        min: REFUND_CONSTRAINTS.MIN_REASON_LENGTH,
+      })
     }
     if (value.length > REFUND_CONSTRAINTS.MAX_REASON_LENGTH) {
-      return `Reason must not exceed ${REFUND_CONSTRAINTS.MAX_REASON_LENGTH} characters`
+      return t("refundRequest.reasonError.tooLong", {
+        max: REFUND_CONSTRAINTS.MAX_REASON_LENGTH,
+      })
     }
     return null
   }
@@ -58,9 +61,7 @@ export function RefundRequest({
   const handleReasonChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value
     setReason(value)
-    // Validate as user types
-    const error = validateReason(value)
-    setReasonError(error)
+    setReasonError(validateReason(value))
   }
 
   const handleRefundClick = () => {
@@ -71,7 +72,6 @@ export function RefundRequest({
   }
 
   const handleConfirmRefund = async () => {
-    // Final validation before submission
     const error = validateReason(reason)
     if (error) {
       setReasonError(error)
@@ -87,8 +87,7 @@ export function RefundRequest({
       hash: res.transaction_hash,
       errorMsg: res.error,
     })
-    
-    // Clear form on success
+
     if (res.success) {
       setReason("")
       setReasonError(null)
@@ -105,13 +104,18 @@ export function RefundRequest({
         >
           {result.success ? (
             <>
-              Refund requested successfully!
+              {t("refundRequest.refundSuccess")}
               <br />
-              Transaction hash:{" "}
-              <code className="tx-hash"><CopyableText text={result.hash!} label="Copy transaction hash" /></code>
+              {t("refundRequest.transactionHash")}{" "}
+              <code className="tx-hash">
+                <CopyableText
+                  text={result.hash!}
+                  label={t("common.copyTransactionHash")}
+                />
+              </code>
             </>
           ) : (
-            <>Refund request failed: {result.errorMsg}</>
+            <>{t("refundRequest.refundFailed", { error: result.errorMsg ?? "" })}</>
           )}
         </div>
       )}
@@ -120,17 +124,24 @@ export function RefundRequest({
         <>
           <div className="refund-form">
             <label htmlFor="refund-reason" className="refund-form__label">
-              Reason for Refund <span className="required" aria-label="required">*</span>
+              {t("refundRequest.reasonLabel")}{" "}
+              <span className="required" aria-label={t("refundRequest.reasonRequired")}>
+                *
+              </span>
               <span className="refund-form__hint">
-                Full refund only. Provide a reason (minimum {REFUND_CONSTRAINTS.MIN_REASON_LENGTH} characters).
+                {t("refundRequest.reasonHint", {
+                  min: REFUND_CONSTRAINTS.MIN_REASON_LENGTH,
+                })}
               </span>
             </label>
             <textarea
               id="refund-reason"
-              className={`refund-form__textarea ${reasonError ? "refund-form__textarea--error" : ""}`}
+              className={`refund-form__textarea ${
+                reasonError ? "refund-form__textarea--error" : ""
+              }`}
               value={reason}
               onChange={handleReasonChange}
-              placeholder="e.g., Product was not as described, duplicate charge, etc."
+              placeholder={t("refundRequest.reasonPlaceholder")}
               maxLength={REFUND_CONSTRAINTS.MAX_REASON_LENGTH}
               disabled={submitting}
               aria-invalid={!!reasonError}
@@ -142,16 +153,19 @@ export function RefundRequest({
               </p>
             )}
             <p id="reason-hint" className="refund-form__counter">
-              {reason.length} / {REFUND_CONSTRAINTS.MAX_REASON_LENGTH} characters
+              {t("refundRequest.reasonCounter", {
+                count: reason.length,
+                max: REFUND_CONSTRAINTS.MAX_REASON_LENGTH,
+              })}
             </p>
           </div>
-          <button 
-            className="btn btn--danger" 
+          <button
+            className="btn btn--danger"
             onClick={handleRefundClick}
             disabled={!reason.trim() || !!reasonError || submitting}
-            aria-label={`Request refund for invoice #${invoice.id}`}
+            aria-label={t("refundRequest.requestRefundAriaLabel", { id: invoice.id })}
           >
-            Request Refund
+            {t("refundRequest.requestRefund")}
           </button>
         </>
       )}
@@ -159,16 +173,14 @@ export function RefundRequest({
       {invoice.status === "RefundRequested" && (
         <div className="status-info">
           <StatusBadge status={invoice.status as InvoiceStatus} />
-          <p>Your refund request has been submitted and is being processed.</p>
+          <p>{t("refundRequest.refundRequested")}</p>
         </div>
       )}
 
       {!canRequestRefund &&
         invoice.status !== "RefundRequested" &&
         isPayer && (
-          <p className="status-text">
-            Refund can only be requested on Paid invoices.
-          </p>
+          <p className="status-text">{t("refundRequest.canOnlyRefundPaid")}</p>
         )}
 
       {showConfirm && (

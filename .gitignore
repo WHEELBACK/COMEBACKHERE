@@ -76,3 +76,26 @@ vitest.config.ts.timestamp-*
 *.swp
 *.swo
 *~
+
+# Playwright test artifacts
+**/blob-report/
+**/.playwright/
+
+# Vitest cache & results
+**/.vitest-cache/
+**/vitest-results/
+
+# Additional build/cache artefacts
+**/.cache/
+**/.temp/
+**/.tmp/
+**/storybook-static/
+
+# macOS extended attributes
+**/.DS_Store
+
+# pnpm debug log
+pnpm-debug.log*
+
+# Rust incremental compilation cache
+**/incremental/

@@ -948,3 +948,245 @@ h3 {
     justify-content: center;
   }
 }
+
+/* Language Switcher */
+.language-switcher {
+  display: inline-flex;
+  align-items: center;
+}
+
+.language-switcher__select {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 0.85rem;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.language-switcher__select:focus {
+  border-color: var(--color-primary);
+}
+
+/* PaymentReceipt */
+.payment-receipt {
+  margin-top: 20px;
+  border: 1px solid var(--color-success-border);
+  border-radius: var(--radius);
+  background: var(--color-success-bg);
+  overflow: hidden;
+}
+
+.payment-receipt__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--color-success-border);
+}
+
+.payment-receipt__title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--color-success);
+  margin: 0;
+}
+
+.payment-receipt__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--color-success);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.payment-receipt__body {
+  padding: 16px 20px;
+}
+
+.payment-receipt__actions {
+  display: flex;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--color-success-border);
+  flex-wrap: wrap;
+}
+
+.payment-receipt__footer {
+  padding: 10px 20px;
+  border-top: 1px solid var(--color-success-border);
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+/* InvoiceTimeline */
+.invoice-timeline {
+  margin-top: 24px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 20px;
+}
+
+.invoice-timeline__title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.invoice-timeline__loading,
+.invoice-timeline__empty,
+.invoice-timeline__error {
+  color: var(--color-text-secondary);
+  font-size: 0.9rem;
+  padding: 12px 0;
+}
+
+.invoice-timeline__error {
+  color: var(--color-danger);
+}
+
+.timeline-list {
+  position: relative;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+/* vertical connecting line */
+.timeline-list::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-border);
+}
+
+.timeline-item {
+  position: relative;
+  padding-left: 32px;
+  padding-bottom: 20px;
+}
+
+.timeline-item:last-child {
+  padding-bottom: 0;
+}
+
+.timeline-item__dot {
+  position: absolute;
+  left: 4px;
+  top: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-border);
+  border: 2px solid var(--color-surface);
+  z-index: 1;
+}
+
+.timeline-item--current .timeline-item__dot {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.2);
+}
+
+.timeline-item__label {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.timeline-item__current-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-primary);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.timeline-item__timestamp {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 4px;
+}
+
+.timeline-item__tx {
+  font-size: 0.8rem;
+}
+
+.timeline-item__tx a {
+  color: var(--color-primary);
+  text-decoration: none;
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.timeline-item__tx a:hover {
+  text-decoration: underline;
+}
+
+/* Print styles */
+@media print {
+  .app-header,
+  .tabs,
+  .invoice-lookup,
+  .invoice-card__actions,
+  .history-panel,
+  .qr-code-section,
+  .invoice-timeline,
+  .btn,
+  nav {
+    display: none !important;
+  }
+
+  .payment-receipt {
+    border: 1px solid #ccc !important;
+    background: #fff !important;
+    box-shadow: none !important;
+    margin: 0 !important;
+  }
+
+  .payment-receipt__actions {
+    display: none !important;
+  }
+
+  .app-main {
+    box-shadow: none !important;
+    padding: 0 !important;
+  }
+
+  body {
+    background: #fff !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .payment-receipt__header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .payment-receipt__actions {
+    flex-direction: column;
+  }
+
+  .payment-receipt__actions .btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
