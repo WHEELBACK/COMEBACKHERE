@@ -100,9 +100,63 @@ def verify_webhook_signature(raw_body: bytes, signature: str, secret: str) -> bo
     return hmac.compare_digest(expected, signature)
 ```
 
+### Verification — Go
+
+```go
+package main
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"net/http"
+)
+
+// VerifyWebhookSignature returns true if the signature header is a valid
+// HMAC-SHA256 of the raw request body under the given secret.
+func VerifyWebhookSignature(rawBody []byte, signature, secret string) bool {
+	expected := hmac.New(sha256.New, []byte(secret))
+	expected.Write(rawBody)
+	expectedHex := hex.EncodeToString(expected.Sum(nil))
+
+	// Use constant-time comparison to prevent timing attacks
+	return hmac.Equal([]byte(expectedHex), []byte(signature))
+}
+
+// Example: verify webhook in an HTTP handler
+func HandleWebhook(w http.ResponseWriter, r *http.Request) {
+	// Read raw body before parsing JSON
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	signature := r.Header.Get("X-COMEBACKHERE-Signature")
+	secret := os.Getenv("WEBHOOK_SIGNING_SECRET")
+
+	if !VerifyWebhookSignature(rawBody, signature, secret) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	// Signature verified; parse and process the webhook
+	var event WebhookEvent
+	if err := json.Unmarshal(rawBody, &event); err != nil {
+		http.Error(w, "failed to parse webhook", http.StatusBadRequest)
+		return
+	}
+
+	// Process event...
+	w.WriteHeader(http.StatusOK)
+}
+```
+
 > **Always use a constant-time comparison.** Standard string equality (`===`,
-> `==`) leaks information about how many bytes match, which can be exploited
-> by a timing attack.
+> `==`, `==` in Go) leaks information about how many bytes match, which can be
+> exploited by a timing attack. Use `hmac.Equal()` (Go), `timingSafeEqual()`
+> (Node.js), or `hmac.compare_digest()` (Python).
 
 ---
 

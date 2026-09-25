@@ -89,7 +89,44 @@ contracts, paying with USDC, and executing a settlement), see
 
 The diagram below illustrates the primary payment flow through the COMEBACKHERE Protocol.
 
-> *(Insert architecture or sequence diagram here.)*
+```mermaid
+sequenceDiagram
+    participant Payer
+    participant Merchant as Merchant Backend
+    participant Invoice as Invoice Contract
+    participant Treasury
+    participant Compliance
+
+    Payer->>Merchant: Initiate payment
+    Merchant->>Invoice: create_invoice(amount, token)
+    activate Invoice
+    Invoice->>Treasury: deposit(amount)
+    activate Treasury
+    Treasury->>Payer: request authorization
+    Payer->>Treasury: authorize & transfer
+    Treasury->>Treasury: escrow tokens
+    Treasury-->>Invoice: deposit confirmed
+    deactivate Treasury
+    Invoice->>Compliance: verify_payer()
+    activate Compliance
+    Compliance-->>Invoice: compliance status
+    deactivate Compliance
+    Invoice-->>Merchant: invoice_id
+    deactivate Invoice
+
+    Merchant->>Payer: payment link
+    Payer->>Invoice: confirm_payment()
+    activate Invoice
+    Invoice->>Treasury: release(invoice_id)
+    activate Treasury
+    Treasury->>Treasury: transfer to merchant
+    Treasury-->>Invoice: transfer confirmed
+    deactivate Treasury
+    Invoice-->>Merchant: payment confirmed
+    deactivate Invoice
+
+    Merchant->>Payer: receipt
+```
 
 ---
 
