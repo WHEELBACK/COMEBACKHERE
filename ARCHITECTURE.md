@@ -31,9 +31,14 @@ These are in-tree copies of the canonical sources at earlier points in time. The
 - Process docs reference them by path. `docs/error-codes.md` calls out `contracts/invoice/src/lib.rs` as the source of `InvoiceError`; that file still lives here.
 - They give reviewers a familiar path while the migration to the `COMEBACKHERE-*` trees completes.
 
-These trees are valid PR targets, but they have a **gap in coverage**: only the `ci-*.yml` workflows that match their files run on a PR touching them. There is no independent `cargo test` for `contracts/Cargo.toml` or `backend/Cargo.toml`, and no independent frontend build for `frontend/`. So a green PR here will not, by itself, prove the change works against the toolchain pinned in the canonical workspace.
+These trees are valid PR targets. They have dedicated CI coverage:
 
-If your change is brand-new work, target the `COMEBACKHERE-*` tree to inherit full CI coverage. If your change is intentionally narrow (a doc tweak, a small Rust fix in a file the CI happens to cover), the mirrored tree is fine.
+- `ci-legacy-contracts.yml` runs `cargo test --manifest-path contracts/Cargo.toml` on changes to `contracts/**`.
+- `ci-legacy-frontend.yml` runs `npm test` for `frontend/` on changes to `frontend/**`.
+
+The legacy contract and frontend tests use the same toolchain and patterns as the canonical trees.
+
+If your change is brand-new work, target the `COMEBACKHERE-*` tree to inherit full CI coverage and ensure parity is maintained. If your change is intentionally narrow (a doc tweak, a small Rust fix to legacy contract files), the mirrored tree is fine and will still be tested.
 
 ## CI checkout behaviour
 

@@ -33,6 +33,25 @@ gets a relaxed CSP that allows its same-origin scripts, inline styles and
 > `{ "error": { "code", "message", "details", "correlationId" } }`. See
 > [Error response shape](#error-response-shape).
 
+## Deprecation Policy
+
+Some endpoints are marked as **deprecated** and will be removed in a future version. Deprecated endpoints receive standard HTTP deprecation headers:
+
+- `Deprecation: true` — indicates the endpoint is deprecated
+- `Sunset: <HTTP-date>` — the date when the endpoint will be permanently removed
+- `Link: <new-url>; rel="successor-version"` — the replacement endpoint to migrate to
+
+**Legacy routes** in `backend/src/legacy_routes.rs` and `backend/src/routes_auth_legacy.rs` carry these headers. Plan to migrate to the canonical routes before the sunset date.
+
+Current legacy routes (to be removed):
+- Old merchant endpoints under `/api/v1/merchant/*` — migrate to `/api/v2/merchant/*`
+- Old settlement endpoints under `/api/v1/settlement/*` — migrate to `/api/v2/settlement/*`
+- Old dispute endpoints under `/api/v1/dispute/*` — migrate to `/api/v2/dispute/*`
+- Old signer endpoints under `/api/v1/signer/*` — migrate to `/api/v2/signer/*`
+- Old admin endpoints under `/api/v1/admin/*` — migrate to `/api/v2/admin/*`
+
+Usage of deprecated endpoints is logged server-side; if you hit one, update your client to use the replacement endpoint.
+
 ---
 
 ## Health
