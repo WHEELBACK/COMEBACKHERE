@@ -4,6 +4,8 @@ import { createApp } from "../app.js"
 import { createInvoice, type SorobanClient } from "../routes/invoices.js"
 import { SorobanRpc, SorobanDataBuilder, xdr } from "stellar-sdk"
 import * as mongoModule from "../db/mongo.js"
+import { expectResponseShape } from "./helpers/response-schema.js"
+import { invoiceListResponseSchema } from "../schemas/index.js"
 
 // Pre-parsed success simulation result accepted by assembleTransaction without XDR parsing
 const PARSED_SIM_SUCCESS = {
@@ -265,6 +267,7 @@ describe("GET /invoices — pagination", () => {
 
     const res = await request(app).get("/invoices")
     expect(res.status).toBe(200)
+    expectResponseShape(res.body, invoiceListResponseSchema)
     expect(res.body).toMatchObject({ total: 35, limit: 20, offset: 0 })
     expect(res.body.data).toHaveLength(20)
     expect(col._cursor.skip).toHaveBeenCalledWith(0)

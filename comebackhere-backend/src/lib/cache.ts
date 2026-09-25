@@ -15,6 +15,30 @@ export function resetRedis(): void {
   _redis = null
 }
 
+export async function cacheDelete(key: string): Promise<void> {
+  const redis = getRedis()
+  if (!redis) return
+  try {
+    await redis.del(key)
+  } catch {
+    // Cache failures must not affect API availability.
+  }
+}
+
+export async function cacheTryLock(key: string, ttlMs: number): Promise<boolean> {
+  const redis = getRedis()
+  if (!redis) return true
+  try {
+    return (await redis.set(key, "1", "PX", ttlMs, "NX")) === "OK"
+  } catch {
+    return true
+  }
+}
+
+export async function cacheReleaseLock(key: string): Promise<void> {
+  await cacheDelete(key)
+}
+
 export async function cacheGet<T>(key: string): Promise<T | null> {
   const redis = getRedis()
   if (!redis) return null

@@ -134,7 +134,43 @@ export async function buildSeries(options: {
 }
 
 /**
- * GET /api/analytics/metrics
+ * @openapi
+ * /api/analytics/metrics:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Get protocol analytics metrics
+ *     parameters:
+ *       - in: query
+ *         name: start_date
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: end_date
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: bucket
+ *         schema: { type: string, enum: [day, week, month] }
+ *       - in: query
+ *         name: merchant
+ *         schema: { type: string }
+ *       - in: query
+ *         name: token
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Aggregated protocol metrics or a bucketed invoice series
+ *         content:
+ *           application/json:
+ *             schema:
+ *               oneOf:
+ *                 - $ref: '#/components/schemas/AnalyticsMetrics'
+ *                 - $ref: '#/components/schemas/AnalyticsSeries'
+ *       400:
+ *         description: Invalid analytics query
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ *
  * Returns aggregated protocol metrics for the admin dashboard
  *
  * Query parameters:
@@ -225,7 +261,6 @@ router.get("/metrics", validateQuery(analyticsQuerySchema), async (req: Request,
     res.status(500).json({ error: "Failed to fetch analytics metrics" })
   }
 
-  res.json(analyticsData)
 }))
 
 export default router

@@ -11,7 +11,8 @@ import { RateLimitError } from "../lib/errors.js"
  */
 function getConfig() {
   return {
-    points: parseInt(process.env.RATE_LIMIT_POINTS ?? "60", 10),
+    ipPoints: parseInt(process.env.RATE_LIMIT_POINTS ?? "60", 10),
+    apiKeyPoints: parseInt(process.env.RATE_LIMIT_API_KEY_POINTS ?? "600", 10),
     duration: parseInt(process.env.RATE_LIMIT_DURATION ?? "60", 10),
   }
 }
@@ -27,7 +28,8 @@ let _limiter: RateLimiterAbstract | null = null
 export function getLimiter(): RateLimiterAbstract {
   if (_limiter) return _limiter
 
-  const { points, duration } = getConfig()
+  const { ipPoints, apiKeyPoints, duration } = getConfig()
+  const points = Math.max(ipPoints, apiKeyPoints)
   const redisUrl = process.env.REDIS_URL
 
   if (redisUrl) {
@@ -82,7 +84,7 @@ function setRateLimitHeaders(
 }
 
 /**
- * Express middleware: enforces per-IP rate limiting.
+ * Express middleware: enforces per-IP or per-API-key rate limiting.
  * Returns 429 (standard error envelope, `details.retryAfter`) with a
  * Retry-After header when the limit is exceeded.
  * On every response (success or 429) attaches:
@@ -98,12 +100,15 @@ export function rateLimitMiddleware(
     (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ??
     req.socket.remoteAddress ??
     "unknown"
+  const apiKey = req.header("X-API-Key")?.trim()
+  const key = apiKey ? `api-key:${apiKey}` : `ip:${ip}`
 
   const limiter = getLimiter()
-  const { points } = getConfig()
+  const { ipPoints, apiKeyPoints } = getConfig()
+  const points = apiKey ? apiKeyPoints : ipPoints
 
   limiter
-    .consume(ip)
+    .consume(key)
     .then((rateLimiterRes) => {
       setRateLimitHeaders(res, points, rateLimiterRes.remainingPoints, rateLimiterRes.msBeforeNext)
       next()

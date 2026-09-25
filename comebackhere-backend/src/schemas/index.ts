@@ -172,3 +172,31 @@ export const analyticsQuerySchema = z
     },
     { message: "start_date must be before end_date" },
   )
+
+export const invoiceResponseSchema = z.object({
+  invoice_id: z.string(),
+  status: z.string(),
+})
+
+export const invoiceListResponseSchema = z.object({
+  data: z.array(z.object({ invoice_id: z.union([z.string(), z.number()]) }).passthrough()),
+  total: z.number().int().nonnegative(),
+  page: z.number().int().positive(),
+  limit: z.number().int().positive(),
+  totalPages: z.number().int().nonnegative(),
+})
+
+export const treasuryBalancesResponseSchema = z.array(z.object({
+  token: z.string(),
+  balance: z.string(),
+}))
+
+export const treasurySettlementResponseSchema = z.object({
+  id: z.number().int().positive(),
+  merchant_address: z.string(),
+  amount: z.union([z.string(), z.number()]),
+  approvals: z.array(z.string()),
+  approval_weight: z.number().int().nonnegative(),
+  status: z.string(),
+  hold_reason: z.string().nullable(),
+}).passthrough()

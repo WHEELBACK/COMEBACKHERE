@@ -11,6 +11,7 @@ import disputesRouter from "./routes/disputes.js"
 import analyticsRouter from "./routes/analytics.js"
 import { startComplianceIndexer } from "./services/compliance-indexer.js"
 import { rateLimitMiddleware } from "./middleware/rateLimiter.js"
+import { idempotencyMiddleware } from "./middleware/idempotency.js"
 import { correlationIdMiddleware } from "./middleware/correlationId.js"
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js"
 import { createCorsMiddleware } from "./middleware/cors.js"
@@ -76,6 +77,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use(createCorsMiddleware(corsOrigins))
   app.use(express.json({ limit: JSON_BODY_LIMIT }))
   app.use(rateLimitMiddleware)
+  app.use("/invoices", idempotencyMiddleware)
 
   // ── Health ──────────────────────────────────────────────────────────────────
   app.get("/health", (_req, res) => res.json({ status: "ok" }))
