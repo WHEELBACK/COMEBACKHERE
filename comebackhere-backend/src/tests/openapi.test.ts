@@ -54,6 +54,24 @@ describe("GET /api-docs/swagger.json — OpenAPI spec endpoint", () => {
     expect(spec.paths["/disputes"]).toHaveProperty("post")
   })
 
+  it("documents the analytics route and every mounted application route", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const paths = res.body.paths
+    for (const path of [
+      "/invoices",
+      "/invoices/{id}",
+      "/invoices/export.csv",
+      "/disputes",
+      "/disputes/{id}",
+      "/disputes/{id}/vote",
+      "/api/analytics/metrics",
+      "/api/treasury/pending-settlements",
+    ]) {
+      expect(paths).toHaveProperty(path)
+    }
+    expect(paths["/api/analytics/metrics"]).toHaveProperty("get")
+  })
+
   it("spec covers the dispute read endpoints", async () => {
     const res = await request(app).get("/api-docs/swagger.json")
     const spec = res.body

@@ -80,6 +80,26 @@ const options: swaggerJsdoc.Options = {
             hold_reason: { type: "string", nullable: true },
           },
         },
+        AnalyticsMetrics: {
+          type: "object",
+          properties: {
+            invoices: { type: "object", additionalProperties: { type: "integer" } },
+            settled_volume: { type: "array", items: { type: "object", properties: { token: { type: "string" }, volume: { type: "number" } } } },
+            open_disputes: { type: "integer" },
+            compliance_blocks: { type: "integer" },
+            settlement_throughput: { type: "integer" },
+          },
+        },
+        AnalyticsSeries: {
+          type: "object",
+          properties: {
+            bucket: { type: "string", enum: ["day", "week", "month"] },
+            timezone: { type: "string", example: "UTC" },
+            start_date: { type: "integer" },
+            end_date: { type: "integer" },
+            series: { type: "array", items: { type: "object", properties: { period: { type: "string" }, count: { type: "integer" }, volume: { type: "number" } } } },
+          },
+        },
       },
     },
     tags: [
@@ -89,6 +109,7 @@ const options: swaggerJsdoc.Options = {
       { name: "Treasury", description: "Settlement and treasury operations" },
       { name: "Invoice Settings", description: "Grace window configuration" },
       { name: "Compliance", description: "Compliance status and audit history" },
+      { name: "Analytics", description: "Protocol analytics and metrics" },
     ],
   },
   // Glob must resolve at spec-generation time; use absolute path

@@ -1,7 +1,9 @@
 # Rate Limits and Throttling
 
 Both the TypeScript backend (`comebackhere-backend`) and the Rust backend
-(`backend`) enforce **per-IP rate limiting** on every API endpoint. This page
+(`backend`) enforce rate limiting on every API endpoint. Anonymous traffic is
+limited per IP; requests with a valid API key use a separate per-key bucket.
+This page
 documents the default limits, how to configure them, and the response shape
 returned when a client exceeds the budget.
 
@@ -12,6 +14,7 @@ returned when a client exceeds the budget.
 | Setting | Default | Environment variable |
 | --- | --- | --- |
 | Max requests per window | **60** | `RATE_LIMIT_POINTS` |
+| Max API-key requests per window | **600** | `RATE_LIMIT_API_KEY_POINTS` |
 | Window duration | **60 seconds** | `RATE_LIMIT_DURATION` |
 
 The same defaults apply to both backends. Operators can override them by setting
@@ -22,8 +25,10 @@ the environment variables before starting the service.
 ## Scope
 
 The rate limiter is applied as **global middleware** — every endpoint listed in
-[docs/api-reference.md](./api-reference.md) is subject to the same per-IP
-budget. There is currently no per-route or per-user differentiation.
+[docs/api-reference.md](./api-reference.md) is subject to a budget. Anonymous
+requests share a per-IP bucket; requests carrying a non-empty `X-API-Key`
+header use a separate bucket for that key. The API-key tier has its own limit,
+but both tiers share the configured window duration.
 
 | Backend | Middleware layer |
 | --- | --- |
@@ -100,7 +105,7 @@ plus `X-RateLimit-Limit`, `X-RateLimit-Remaining: 0`, and `X-RateLimit-Reset`.
 ### Increase the limit for a high-traffic deployment
 
 ```bash
-RATE_LIMIT_POINTS=200 RATE_LIMIT_DURATION=60 node dist/app.js
+RATE_LIMIT_POINTS=200 RATE_LIMIT_API_KEY_POINTS=2000 RATE_LIMIT_DURATION=60 node dist/app.js
 ```
 
 ### Tighten the limit for a staging environment
@@ -108,6 +113,20 @@ RATE_LIMIT_POINTS=200 RATE_LIMIT_DURATION=60 node dist/app.js
 ```bash
 RATE_LIMIT_POINTS=10 RATE_LIMIT_DURATION=60 node dist/app.js
 ```
+
+### API-key requests
+
+Send the API key in the `X-API-Key` header. The response headers always describe
+the bucket used for that request, so clients can use the same logic for either
+tier:
+
+```http
+X-API-Key: merchant-key
+```
+
+`X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` are
+returned on successful and rejected responses. On `429`, also honor
+`Retry-After` or `error.details.retryAfter` before retrying.
 
 ---
 
@@ -119,7 +138,7 @@ RATE_LIMIT_POINTS=10 RATE_LIMIT_DURATION=60 node dist/app.js
 - When `REDIS_URL` is set, rate-limit state is stored in Redis (key prefix
   `rl:invoice`) with an in-memory fallback if Redis is unreachable.
 - When `REDIS_URL` is not set (local development and tests), the limiter runs
-  entirely in memory.
+  entirely in memory. API-key and IP buckets remain independent.
 
 ### Rust backend (`backend`)
 
