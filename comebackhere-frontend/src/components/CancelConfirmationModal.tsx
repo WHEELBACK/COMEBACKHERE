@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useFocusTrap } from "../hooks/useFocusTrap"
 import type { Invoice } from "../types"
 import { StatusBadge } from "./StatusBadge"
 import { formatAmount, USDC_DECIMALS } from "../utils/format"
@@ -16,65 +16,7 @@ export function CancelConfirmationModal({
   onCancel,
   submitting,
 }: CancelConfirmationModalProps) {
-  const modalRef = useRef<HTMLDivElement>(null)
-  const previousActiveElement = useRef<Element | null>(null)
-
-  useEffect(() => {
-    // Store the element that had focus before modal opened
-    previousActiveElement.current = document.activeElement
-
-    // Set initial focus to the modal
-    if (modalRef.current) {
-      modalRef.current.focus()
-    }
-
-    // Handle Escape key to close modal
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !submitting) {
-        onCancel()
-      }
-    }
-
-    // Handle Tab key to trap focus within modal
-    const handleKeyTab = (event: KeyboardEvent) => {
-      if (event.key !== "Tab") return
-
-      const modal = modalRef.current
-      if (!modal) return
-
-      const focusableElements = modal.querySelectorAll(
-        "button, [href], input, select, textarea, [tabindex]:not([tabindex=\"-1\"])"
-      )
-      const firstElement = focusableElements[0] as HTMLElement
-      const lastElement = focusableElements[focusableElements.length - 1] as HTMLElement
-
-      if (event.shiftKey) {
-        // Shift + Tab: move focus backward
-        if (document.activeElement === firstElement) {
-          event.preventDefault()
-          lastElement.focus()
-        }
-      } else {
-        // Tab: move focus forward
-        if (document.activeElement === lastElement) {
-          event.preventDefault()
-          firstElement.focus()
-        }
-      }
-    }
-
-    document.addEventListener("keydown", handleKeyDown)
-    document.addEventListener("keydown", handleKeyTab)
-
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown)
-      document.removeEventListener("keydown", handleKeyTab)
-      // Restore focus to the element that opened the modal
-      if (previousActiveElement.current instanceof HTMLElement) {
-        previousActiveElement.current.focus()
-      }
-    }
-  }, [onCancel, submitting])
+  const modalRef = useFocusTrap({ onClose: onCancel, disabled: submitting })
 
   return (
     <div className="modal-overlay" onClick={onCancel} role="presentation">

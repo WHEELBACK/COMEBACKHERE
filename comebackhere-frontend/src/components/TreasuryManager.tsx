@@ -415,8 +415,8 @@ export function TreasuryManager() {
         <table className="managed-table">
           <thead>
             <tr>
-              <th>Token</th>
-              <th>Balance</th>
+              <th scope="col">Token</th>
+              <th scope="col">Balance</th>
             </tr>
           </thead>
           <tbody>

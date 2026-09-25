@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react"
+import { useState, useCallback, useRef, useEffect } from "react"
 import { InvoicePayment } from "./components/InvoicePayment"
 import { RefundRequest } from "./components/RefundRequest"
 import { ComplianceManager } from "./components/ComplianceManager"
@@ -18,6 +18,15 @@ import "./App.css"
 import "./components/ErrorBoundary.css"
 
 type Tab = "payment" | "refund" | "compliance" | "tokens" | "batch-expire" | "treasury" | "signers"
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "payment", label: "Pay Invoice" },
+  { id: "refund", label: "Request Refund" },
+  { id: "compliance", label: "Compliance" },
+  { id: "tokens", label: "Token Allowlist" },
+  { id: "batch-expire", label: "Batch Expire" },
+  { id: "treasury", label: "Treasury" },
+]
 
 function RefundTab() {
   const { invoice, loading, error, loadInvoice, refund } = useInvoice()
@@ -152,6 +161,63 @@ export default function App() {
     setTab("payment")
   }, [setTab])
 
+  // Activate a tab and move focus to it.
+  const activateTab = useCallback((id: Tab) => {
+    setTab(id)
+    // Focus the button on the next tick so the DOM has updated tabIndex.
+    requestAnimationFrame(() => {
+      tabRefs.current.get(id)?.focus()
+    })
+  }, [])
+
+  // Keyboard handler for WAI-ARIA roving tabindex pattern.
+  const handleTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>) => {
+      const currentIndex = TABS.findIndex((t) => t.id === tab)
+
+      switch (event.key) {
+        case "ArrowRight": {
+          event.preventDefault()
+          const next = TABS[(currentIndex + 1) % TABS.length]
+          activateTab(next.id)
+          break
+        }
+        case "ArrowLeft": {
+          event.preventDefault()
+          const prev = TABS[(currentIndex - 1 + TABS.length) % TABS.length]
+          activateTab(prev.id)
+          break
+        }
+        case "Home": {
+          event.preventDefault()
+          activateTab(TABS[0].id)
+          break
+        }
+        case "End": {
+          event.preventDefault()
+          activateTab(TABS[TABS.length - 1].id)
+          break
+        }
+        // Space and Enter are handled by the default button behaviour (onClick).
+        default:
+          break
+      }
+    },
+    [tab, activateTab],
+  )
+
+  // Sync URL hash with active tab so bookmarks and back-button work.
+  useEffect(() => {
+    const hash = window.location.hash.slice(1) as Tab
+    if (TABS.some((t) => t.id === hash)) {
+      setTab(hash)
+    }
+  }, [])
+
+  useEffect(() => {
+    window.history.replaceState(null, "", `#${tab}`)
+  }, [tab])
+
   return (
     <div className="app">
       <header className="app-header" role="banner">
@@ -264,17 +330,63 @@ export default function App() {
       </nav>
 
       <main className="app-main">
-        {tab === "payment" ? (
+        {/*
+          Each panel uses role="tabpanel" + aria-labelledby pointing back to
+          its controlling tab button, and tabIndex={0} so the panel itself is
+          reachable after Tab leaves the tablist.
+        */}
+        <div
+          role="tabpanel"
+          id="tabpanel-payment"
+          aria-labelledby="tab-payment"
+          tabIndex={0}
+          hidden={tab !== "payment"}
+        >
           <InvoicePayment />
-        ) : tab === "refund" ? (
+        </div>
+        <div
+          role="tabpanel"
+          id="tabpanel-refund"
+          aria-labelledby="tab-refund"
+          tabIndex={0}
+          hidden={tab !== "refund"}
+        >
           <RefundTab />
-        ) : tab === "tokens" ? (
-          <TokenAllowlist />
-        ) : tab === "compliance" ? (
+        </div>
+        <div
+          role="tabpanel"
+          id="tabpanel-compliance"
+          aria-labelledby="tab-compliance"
+          tabIndex={0}
+          hidden={tab !== "compliance"}
+        >
           <ComplianceManager />
-        ) : tab === "batch-expire" ? (
+        </div>
+        <div
+          role="tabpanel"
+          id="tabpanel-tokens"
+          aria-labelledby="tab-tokens"
+          tabIndex={0}
+          hidden={tab !== "tokens"}
+        >
+          <TokenAllowlist />
+        </div>
+        <div
+          role="tabpanel"
+          id="tabpanel-batch-expire"
+          aria-labelledby="tab-batch-expire"
+          tabIndex={0}
+          hidden={tab !== "batch-expire"}
+        >
           <BatchExpireInvoices walletAddress={address} />
-        ) : tab === "treasury" ? (
+        </div>
+        <div
+          role="tabpanel"
+          id="tabpanel-treasury"
+          aria-labelledby="tab-treasury"
+          tabIndex={0}
+          hidden={tab !== "treasury"}
+        >
           <TreasuryManager />
         ) : tab === "signers" && connected ? (
           <SignerManagement />

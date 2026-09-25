@@ -26,7 +26,141 @@
      the text content change is enough of a visual cue. */
 }
 
+/* ── Table wrapper — prevents horizontal page scroll ────────────────────── */
+
+.managed-table-wrapper {
+  width: 100%;
+  overflow-x: auto;          /* allow scrolling only inside this box */
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── Desktop table (≥ 641 px) — unchanged ───────────────────────────────── */
+
+.managed-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.managed-table th,
+.managed-table td {
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+
+.managed-table th {
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background: var(--color-surface-muted);
+}
+
+.managed-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.managed-table tbody tr:hover {
+  background: var(--color-surface-muted);
+}
+
 /* ── Responsive adjustments ─────────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  /* Header stack */
+  .treasury-balances-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .treasury-balances-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  /* ── Card layout for table rows ──────────────────────────────────────── */
+
+  /*
+   * Hide the column headers on mobile — each cell shows its own label
+   * via the data-label attribute rendered by TreasuryManager.tsx.
+   */
+  .managed-table thead {
+    display: none;
+  }
+
+  .managed-table,
+  .managed-table tbody,
+  .managed-table tr,
+  .managed-table td {
+    display: block;
+    width: 100%;
+  }
+
+  /* Each row becomes a card */
+  .managed-table tbody tr {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius, 8px);
+    margin-bottom: 0.75rem;
+    padding: 0.75rem;
+    box-shadow: var(--shadow);
+  }
+
+  .managed-table tbody tr:last-child {
+    margin-bottom: 0;
+  }
+
+  /* Each cell becomes a label/value pair */
+  .managed-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.375rem 0;
+    border-bottom: 1px solid var(--color-border);
+    white-space: normal;
+    word-break: break-word;
+  }
+
+  .managed-table td:last-child {
+    border-bottom: none;
+  }
+
+  /* Inline label rendered via ::before using the data-label attribute */
+  .managed-table td[data-label]::before {
+    content: attr(data-label);
+    font-weight: 600;
+    font-size: 0.8rem;
+    color: var(--color-text-secondary);
+    flex-shrink: 0;
+    margin-right: 0.75rem;
+  }
+
+  /* Action cells — stack button(s) at the bottom of the card, full-width */
+  .managed-table td.table-actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+    padding-top: 0.625rem;
+    border-bottom: none;
+  }
+
+  .managed-table td.table-actions::before {
+    display: none;          /* no label needed for the actions row */
+  }
+
+  .managed-table td.table-actions .btn {
+    width: 100%;
+    min-height: 44px;       /* comfortable touch target */
+    justify-content: center;
+  }
+
+  /* Empty / loading row — keep it centred */
+  .managed-table td.empty-row {
+    justify-content: center;
+    color: var(--color-text-secondary);
+    font-style: italic;
+  }
+}
 
 @media (max-width: 480px) {
   .treasury-balances-header {

@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { useFocusTrap } from "../hooks/useFocusTrap"
 import type { Invoice } from "../types"
 import { StatusBadge } from "./StatusBadge"
 import { CopyableText } from "./CopyableText"
@@ -19,6 +20,7 @@ export function RefundConfirmationModal({
 }: RefundConfirmationModalProps) {
   const [error, setError] = useState<string | null>(null)
   const [isRetrying, setIsRetrying] = useState(false)
+  const modalRef = useFocusTrap({ onClose: onCancel, disabled: submitting || isRetrying })
 
   const handleConfirm = async () => {
     setError(null)
@@ -45,7 +47,15 @@ export function RefundConfirmationModal({
 
   return (
     <div className="modal-overlay" onClick={onCancel} role="presentation">
-      <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="refund-confirm-title">
+      <div
+        ref={modalRef}
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="refund-confirm-title"
+        tabIndex={-1}
+      >
         <h2 id="refund-confirm-title">Request Refund</h2>
         
         {error && (
