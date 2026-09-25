@@ -1,3 +1,4 @@
+import { useFocusTrap } from "../hooks/useFocusTrap"
 import type { Invoice } from "../types"
 import { StatusBadge } from "./StatusBadge"
 import { CopyableText } from "./CopyableText"
@@ -15,19 +16,22 @@ export function PayConfirmationModal({
   onCancel,
   submitting,
 }: PayConfirmationModalProps) {
+  const modalRef = useFocusTrap({ onClose: onCancel, disabled: submitting })
+
   return (
-    <div 
-      className="modal-overlay" 
-      onClick={onCancel} 
+    <div
+      className="modal-overlay"
+      onClick={onCancel}
       role="presentation"
-      aria-hidden={submitting ? "true" : "false"}
     >
-      <div 
-        className="modal" 
-        onClick={(e) => e.stopPropagation()} 
-        role="dialog" 
-        aria-modal="true" 
+      <div
+        ref={modalRef}
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
         aria-labelledby="pay-confirm-title"
+        tabIndex={-1}
       >
         <h2 id="pay-confirm-title">Confirm Payment</h2>
         <p className="modal-desc">

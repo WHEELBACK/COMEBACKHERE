@@ -360,8 +360,8 @@ export function TreasuryManager() {
         <table className="managed-table">
           <thead>
             <tr>
-              <th>Token</th>
-              <th>Balance</th>
+              <th scope="col">Token</th>
+              <th scope="col">Balance</th>
             </tr>
           </thead>
           <tbody>
@@ -378,8 +378,8 @@ export function TreasuryManager() {
             ) : (
               balances.map((b) => (
                 <tr key={b.token}>
-                  <td>{b.token}</td>
-                  <td>{(Number(b.balance) / 10_000_000).toFixed(7)}</td>
+                  <td data-label="Token">{b.token}</td>
+                  <td data-label="Balance">{(Number(b.balance) / 10_000_000).toFixed(7)}</td>
                 </tr>
               ))
             )}
