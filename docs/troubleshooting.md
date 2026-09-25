@@ -671,3 +671,112 @@ fell in the gap may show a stale status and their webhooks were not sent.
   outages.
 - For self-hosted RPC, raise the event retention window if maintenance windows
   are long.
+
+---
+
+## Freighter Wallet Troubleshooting
+
+This section covers the most common Freighter wallet issues end users encounter when paying invoices.
+
+### Freighter Extension Not Installed
+
+**Symptom:** "Install Freighter" button appears, or clicking "Connect Wallet" shows no wallet options.
+
+**Cause:** Freighter browser extension is not installed.
+
+**Fix:**
+1. Go to [https://www.freighter.app](https://www.freighter.app)
+2. Click "Install Freighter" for your browser (Chrome, Firefox, Edge, Safari)
+3. Follow the browser's installation prompts
+4. After installation, refresh the payment page in your browser
+5. Click "Connect Wallet" — Freighter should now appear
+
+### "Locked Wallet" Error
+
+**Symptom:** Freighter icon shows a lock, or you see "Wallet is locked" when trying to pay.
+
+**Cause:** Freighter is locked and requires your password to unlock.
+
+**Fix:**
+1. Click the Freighter icon in your browser toolbar (top-right corner)
+2. Enter your password in the unlock popup
+3. Click "Unlock"
+4. Return to the payment page and try again
+
+> After 15 minutes of inactivity, Freighter auto-locks for security. Simply unlock again to continue.
+
+### "Wrong Network Selected"
+
+**Symptom:** Payment fails with "network mismatch" or the Freighter popup shows "Testnet" or the wrong network.
+
+**Cause:** Freighter is connected to a different Stellar network than what the application uses.
+
+**Fix:**
+1. Click the Freighter icon in your browser toolbar
+2. Look for the network selector (usually at the top of the Freighter window)
+3. Select **"Mainnet"** (or the correct network for this application)
+4. Close Freighter and return to the payment page
+5. Try paying again
+
+> The application should display which network it's connected to (usually near the top of the page or in the wallet connection button).
+
+### Signature Request Never Appeared
+
+**Symptom:** After clicking "Pay," nothing happens; no Freighter popup appears.
+
+**Cause:** Browser popup permissions are blocked, or Freighter encountered an error.
+
+**Fix:**
+1. **Check popup blockers:**
+   - Look for a "blocked popups" icon in your browser's address bar
+   - Click it and select "Allow popups for this site"
+   - Try paying again
+
+2. **Refresh the page:**
+   - Refresh your browser tab (Ctrl+R or Cmd+R)
+   - Disconnect and reconnect your wallet
+   - Try paying again
+
+3. **Restart Freighter:**
+   - Click the Freighter icon
+   - Open Freighter's settings (gear icon, usually bottom-right)
+   - Scroll down and click "Clear Data" or "Lock"
+   - Unlock Freighter again and retry
+
+### Signature Request Rejected
+
+**Symptom:** A Freighter popup appeared, but you clicked "Reject" or the request timed out.
+
+**Cause:** You declined the transaction, or the request expired before you approved it.
+
+**Fix:**
+1. Return to the payment page or refresh it
+2. Click "Pay" again
+3. **When the Freighter popup appears**, carefully review the transaction details (amounts, recipient, etc.)
+4. Click **"Approve"** (not "Reject")
+5. Wait for the transaction to complete (usually 30 seconds–1 minute on Mainnet)
+
+### "Insufficient Balance"
+
+**Symptom:** Payment fails with "insufficient balance" even though your Freighter account shows enough funds.
+
+**Cause:** Your balance includes less than the full invoice amount (sometimes accounts display rounding or your balance is in a different asset).
+
+**Fix:**
+1. In Freighter, make sure your balance is displayed in **USDC** (the correct stablecoin)
+2. Confirm the amount shown in your Freighter account is at least the invoice amount
+3. If you just received funds, wait a few minutes for the balance to sync (Stellar has ~5-10 second block times)
+4. If the balance is still too low, you need to receive more funds or cancel this invoice and request a smaller amount
+
+### "Transaction Failed" After Approval
+
+**Symptom:** You approved the signature in Freighter, but the payment page shows "Transaction failed."
+
+**Cause:** The transaction was submitted to the Stellar network but could not be processed (insufficient fees, network congestion, or invalid transaction details).
+
+**Fix:**
+1. **Wait 1–2 minutes** to ensure the transaction settled
+2. Refresh the payment page — sometimes it shows as paid after a reload
+3. If still failed, contact the merchant or support; you may need to retry or request a new payment link
+
+---

@@ -867,6 +867,153 @@ webhook delivery is skipped silently (no error).
 
 ---
 
+## Analytics
+
+### `GET /api/analytics/metrics`
+
+Fetch aggregated protocol metrics and performance data.
+
+**Query parameters** (all optional)
+
+| Parameter    | Type    | Description                                              |
+| ------------ | ------- | -------------------------------------------------------- |
+| `start_date` | string  | ISO-8601 date (e.g. `2025-03-01`) — default: 30 days ago |
+| `end_date`   | string  | ISO-8601 date (e.g. `2025-03-31`) — default: today       |
+| `resolution` | string  | Aggregation granularity: `daily`, `weekly`, `monthly` (default: `daily`) |
+
+**Response `200`**
+
+```json
+{
+  "period": {
+    "start": "2025-03-01T00:00:00Z",
+    "end": "2025-03-31T23:59:59Z"
+  },
+  "summary": {
+    "total_invoices": 156,
+    "total_revenue_usdc": "150000000000",
+    "avg_invoice_amount_usdc": "961538462",
+    "settlement_success_rate": 0.98
+  },
+  "by_date": [
+    {
+      "date": "2025-03-01",
+      "invoices_created": 5,
+      "invoices_paid": 4,
+      "revenue_usdc": "4800000000",
+      "disputes_raised": 0
+    }
+  ]
+}
+```
+
+| Field                      | Type   | Description                                      |
+| -------------------------- | ------ | ------------------------------------------------ |
+| `period`                   | object | Query date range (ISO-8601)                      |
+| `summary`                  | object | Aggregate metrics across the entire period       |
+| `by_date`                  | array  | Per-day breakdown (if resolution is `daily`)     |
+| `total_invoices`           | number | Count of all invoices in the period              |
+| `total_revenue_usdc`       | string | Sum of all paid invoice amounts (stroops)        |
+| `avg_invoice_amount_usdc`  | string | Mean invoice amount (stroops)                    |
+| `settlement_success_rate`  | number | Fraction of settlements executed successfully (0–1) |
+
+#### Errors
+
+| Status | Description                            |
+| ------ | -------------------------------------- |
+| `400`  | Invalid date format or date range      |
+| `503`  | Database connection error              |
+| `500`  | Unexpected server error                |
+
+---
+
+## Disputes
+
+### `GET /api/disputes/:settlementId`
+
+Fetch dispute status for a settlement.
+
+#### Path parameters
+
+| Parameter      | Type   | Description                   |
+| -------------- | ------ | ----------------------------- |
+| `settlementId` | string | Settlement numeric ID as string |
+
+**Response `200`**
+
+```json
+{
+  "settlement_id": 15,
+  "dispute_status": "Raised",
+  "claimant": "G...",
+  "reason": "Payment never received",
+  "created_at": "2025-03-15T10:30:00Z",
+  "resolution_weight": 0,
+  "threshold": 100
+}
+```
+
+| Field               | Type   | Description                                              |
+| ------------------- | ------ | -------------------------------------------------------- |
+| `settlement_id`     | number | Settlement ID                                            |
+| `dispute_status`    | string | One of: `Raised`, `ResolvedClaimant`, `ResolvedCounterparty`, `None` |
+| `claimant`          | string | Stellar address that raised the dispute                  |
+| `reason`            | string | Text reason provided by the claimant                     |
+| `created_at`        | string | ISO-8601 timestamp when dispute was raised               |
+| `resolution_weight` | number | Cumulative signer weight voting on the dispute           |
+| `threshold`         | number | Signer weight threshold required to resolve              |
+
+#### Errors
+
+| Status | Description                            |
+| ------ | -------------------------------------- |
+| `400`  | `settlementId` is not a positive integer |
+| `404`  | No dispute found for this settlement    |
+| `503`  | Missing required environment variables  |
+| `500`  | Unexpected server error                |
+
+### `POST /api/disputes/:settlementId/vote`
+
+Vote on a dispute resolution (admin/signer only).
+
+**Request body**
+
+```json
+{
+  "vote": "ClaimantWins",
+  "admin_key": "secret_key_123"
+}
+```
+
+| Field       | Type   | Description                                          |
+| ----------- | ------ | ---------------------------------------------------- |
+| `vote`      | string | Vote direction: `ClaimantWins` or `CounterpartyWins` |
+| `admin_key` | string | Admin secret key (if using key-based authorization) |
+
+**Response `200`**
+
+```json
+{
+  "settlement_id": 15,
+  "resolution_weight": 65,
+  "threshold": 100,
+  "outcome": "pending"
+}
+```
+
+#### Errors
+
+| Status | Description                                      |
+| ------ | ------------------------------------------------ |
+| `400`  | Invalid vote direction or settlement ID          |
+| `401`  | Missing or invalid `admin_key`                   |
+| `404`  | No dispute found                                 |
+| `409`  | Dispute already resolved or settlement not held  |
+| `503`  | Missing required environment variables or contract unavailable |
+| `500`  | Unexpected server error                          |
+
+---
+
 ## Error response shape
 
 Every non-2xx response, from every endpoint, uses the same envelope:

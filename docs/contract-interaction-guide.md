@@ -346,6 +346,184 @@ curl -X POST http://localhost:3000/api/treasury/threshold \
 
 ---
 
+## Treasury Multisig Workflow
+
+This section walks through a complete multisig approval flow: proposing a settlement, approving it from multiple signer identities, and executing it. Use this guide when acting directly on-chain during backend outages.
+
+### Scenario: Three signers approve a settlement
+
+Signers: `SIGNER_1`, `SIGNER_2`, `SIGNER_3` (threshold = 100 weight; each signer has 50 weight).
+
+#### Step 1: Propose a settlement
+
+The first signer proposes a settlement disbursing 10 USDC to a merchant.
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT \
+  --source $SECRET_KEY \  # Signer 1's key
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- propose_settlement \
+  --signer SIGNER_1 \
+  --token CUSDC... \
+  --amount 10000000 \
+  --merchant GMERCHANT...
+```
+
+**Expected output:** Settlement ID (e.g. `settlement_id: 1`). Note this ID; you'll need it for approvals.
+
+#### Step 2: Check settlement status
+
+Verify the settlement was created and is awaiting approvals.
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT \
+  --source $SECRET_KEY \
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- get_settlement \
+  --settlement_id 1
+```
+
+**Expected output:**
+```
+status: Pending
+approval_weight: 0
+threshold: 100
+```
+
+The `approval_weight` of 0 means no signers have approved yet.
+
+#### Step 3: Signer 1 approves
+
+Signer 1 approves the settlement (automating their 50 weight).
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT \
+  --source $SIGNER_1_KEY \
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- approve_settlement \
+  --signer SIGNER_1 \
+  --settlement_id 1
+```
+
+**Expected output:** Transaction confirmed.
+
+Check status again:
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT \
+  --source $SECRET_KEY \
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- get_settlement \
+  --settlement_id 1
+```
+
+**Expected output:**
+```
+status: Pending
+approval_weight: 50
+threshold: 100
+```
+
+Still pending — only 50 of 100 weight approvals collected.
+
+#### Step 4: Signer 2 approves
+
+A second signer approves. Their 50 weight brings the total to 100, meeting the threshold.
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT \
+  --source $SIGNER_2_KEY \
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- approve_settlement \
+  --signer SIGNER_2 \
+  --settlement_id 1
+```
+
+Check status:
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT \
+  --source $SECRET_KEY \
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- get_settlement \
+  --settlement_id 1
+```
+
+**Expected output:**
+```
+status: Pending
+approval_weight: 100
+threshold: 100
+```
+
+Status is still `Pending`, but `approval_weight` now equals the threshold. The settlement is ready to be executed by any signer.
+
+#### Step 5: Execute the settlement
+
+Any signer (or the protocol admin) can now call `execute_settlement` to transfer funds.
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT \
+  --source $SIGNER_1_KEY \  # Any signer can execute
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- execute_settlement \
+  --signer SIGNER_1 \
+  --settlement_id 1 \
+  --token_contract CUSDC...
+```
+
+**Expected output:** Transaction confirmed. Funds are transferred to the merchant's account.
+
+Verify execution:
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT \
+  --source $SECRET_KEY \
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- get_settlement \
+  --settlement_id 1
+```
+
+**Expected output:**
+```
+status: Executed
+```
+
+#### Step 6 (optional): Update the threshold
+
+After testing, the admin can adjust the threshold for future settlements.
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT \
+  --source $ADMIN_KEY \
+  --rpc-url $RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- update_threshold \
+  --admin GADMIN... \
+  --new_threshold 150
+```
+
+Now all future settlements will require 150 cumulative weight before execution.
+
+---
+
 ## Compliance Contract
 
 ### Allow an address
