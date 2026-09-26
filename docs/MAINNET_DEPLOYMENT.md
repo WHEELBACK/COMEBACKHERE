@@ -413,6 +413,8 @@ A `SYSTEM` contract event is emitted automatically on upgrade with:
 - `data = []`
 
 Backend services that monitor contract events can use this to detect upgrades.
+Each protocol contract also emits an application-level `upgraded` event whose
+data is the uploaded Wasm hash.
 
 ### Upgrade Procedure
 
@@ -442,12 +444,23 @@ Backend services that monitor contract events can use this to detect upgrades.
 5. **Invoke the upgrade function** through the standard ceremony process:
 
    ```sh
-   stellar contract invoke \
-     --id <CONTRACT_ID> \
-     --source-account <ADMIN_KEY> \
-     --network mainnet \
-     -- upgrade \
-     --new_wasm_hash <NEW_WASM_HASH>
+    # Invoice
+    INVOICE_WASM_HASH=$(stellar contract upload --source-account "$ADMIN_KEY" \
+       --wasm target/wasm32-unknown-unknown/release/comebackhere_invoice.wasm --network mainnet)
+    stellar contract invoke --id "$INVOICE_CONTRACT_ID" --source-account "$ADMIN_KEY" \
+       --network mainnet -- upgrade --new_wasm_hash "$INVOICE_WASM_HASH"
+
+    # Treasury
+    TREASURY_WASM_HASH=$(stellar contract upload --source-account "$ADMIN_KEY" \
+       --wasm target/wasm32-unknown-unknown/release/comebackhere_treasury.wasm --network mainnet)
+    stellar contract invoke --id "$TREASURY_CONTRACT_ID" --source-account "$ADMIN_KEY" \
+       --network mainnet -- upgrade --new_wasm_hash "$TREASURY_WASM_HASH"
+
+    # Compliance
+    COMPLIANCE_WASM_HASH=$(stellar contract upload --source-account "$ADMIN_KEY" \
+       --wasm target/wasm32-unknown-unknown/release/comebackhere_compliance.wasm --network mainnet)
+    stellar contract invoke --id "$COMPLIANCE_CONTRACT_ID" --source-account "$ADMIN_KEY" \
+       --network mainnet -- upgrade --new_wasm_hash "$COMPLIANCE_WASM_HASH"
    ```
 
 6. **Verify** the upgrade by querying contract state and running the
@@ -460,7 +473,15 @@ if a new contract was deployed rather than upgraded in-place.
 
 ### Upgrade Authorization
 
-Each contract enforces admin authorization in its `upgrade` function:
+Each contract's `upgrade(new_wasm_hash)` entrypoint loads the stored admin and
+requires that address to authorize the call. This is a single-key on-chain
+authorization; the treasury signer threshold does not gate contract upgrades.
+The multi-sig process described above is currently an off-chain governance
+control. A compromised admin key could bypass that process, so maintainers
+should consider moving upgrade authorization to the treasury multisig in a
+future change before relying on these entrypoints for mainnet governance.
+
+The on-chain authorization pattern is:
 
 ```rust
 pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {

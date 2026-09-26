@@ -2,31 +2,27 @@
   "contract": "compliance",
   "version": "1.0.0",
   "functions": [
+    "upgrade",
     "initialize",
     "is_allowed",
     "get_address_status",
     "allow_address",
     "block_address",
     "allow_address_until",
+    "batch_allow_addresses",
     "transfer_admin",
     "accept_admin",
     "clear_address",
     "pause",
     "unpause"
   ],
-  "events": [
-    "address_allowed",
-    "address_blocked",
-    "address_cleared",
-    "address_allowed_until",
-    "admin_transfer_initiated",
-    "admin_transferred",
-    "contract_paused",
-    "contract_unpaused"
-  ],
+  "events": ["upgraded", "address_allowed", "address_blocked", "address_allowed_until", "compliance_batch_processed", "accept_admin", "address_cleared", "contract_paused", "contract_unpaused"],
   "errors": {
     "1": "Unauthorized",
     "2": "ContractPaused",
-    "3": "AlreadyInitialized"
+    "3": "AlreadyInitialized",
+    "4": "AddressNotFound",
+    "5": "PastExpiry",
+    "6": "BatchTooLarge"
   }
 }

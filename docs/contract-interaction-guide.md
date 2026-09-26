@@ -97,6 +97,10 @@ soroban contract invoke \
   --invoice_ids '[1]'
 ```
 
+`mark_paids` and `batch_expire` accept at most 50 invoice IDs per call. Larger
+jobs must be split into chunks of 50 or fewer; a larger batch fails with
+`ContractError::BatchTooLarge` before any invoice is changed.
+
 ---
 
 ### Raise a dispute

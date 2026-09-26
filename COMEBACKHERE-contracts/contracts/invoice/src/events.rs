@@ -1,4 +1,9 @@
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{Address, BytesN, Env, Symbol};
+
+pub fn upgraded(env: &Env, new_wasm_hash: BytesN<32>) {
+    env.events()
+        .publish((Symbol::new(env, "upgraded"),), new_wasm_hash);
+}
 
 pub fn invoice_created(env: &Env, merchant: &Address, invoice_id: &u64) {
     env.events().publish(
