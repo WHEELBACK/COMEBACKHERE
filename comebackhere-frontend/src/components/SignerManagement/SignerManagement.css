@@ -1,0 +1,323 @@
+/* ==========================================================================
+   SignerManagement — canonical frontend styles
+   Ported from frontend/src/components/SignerManagement/SignerManagement.css
+   ========================================================================== */
+
+.signer-panel {
+  max-width: 720px;
+}
+
+.signer-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.signer-panel__title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.signer-panel__error {
+  color: var(--color-danger);
+  font-size: 0.875rem;
+  margin-bottom: 12px;
+}
+
+/* ── Table ──────────────────────────────────────────────────────────────── */
+
+.signer-table-wrap {
+  background: var(--color-card-bg);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  margin-bottom: 24px;
+  overflow-x: auto;
+}
+
+.signer-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.signer-th {
+  text-align: left;
+  padding: 12px 16px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.signer-td {
+  padding: 12px 16px;
+  font-size: 0.875rem;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+}
+
+.signer-row:last-child .signer-td {
+  border-bottom: none;
+}
+
+.signer-td--address {
+  font-family: ui-monospace, "Cascadia Code", monospace;
+}
+
+/* Identicon + address inline wrapper */
+.signer-td__address-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.signer-identicon {
+  flex-shrink: 0;
+  display: inline-flex;
+  border-radius: 4px;
+  overflow: hidden;
+  line-height: 0;
+}
+
+.address-full {
+  display: none;
+}
+
+.address-short {
+  display: inline;
+}
+
+@media (min-width: 640px) {
+  .address-full {
+    display: inline;
+  }
+
+  .address-short {
+    display: none;
+  }
+}
+
+.weight-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  background: var(--color-info-soft-bg);
+  color: var(--color-info-soft-text);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.signer-empty {
+  padding: 24px 16px;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+/* ── Add Signer Form ────────────────────────────────────────────────────── */
+
+.add-signer-form {
+  background: var(--color-card-bg);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px 24px;
+}
+
+.signer-section-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--color-text);
+  margin-bottom: 16px;
+}
+
+.form-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.form-field--weight {
+  flex: 0 0 90px;
+}
+
+.form-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.form-input {
+  padding: 8px 12px;
+  border: 1px solid var(--color-input-border);
+  border-radius: var(--radius);
+  background: var(--color-input-bg);
+  color: var(--color-text);
+  font-size: 0.875rem;
+  transition: border-color 0.15s;
+  width: 100%;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.form-input--error {
+  border-color: var(--color-danger);
+}
+
+.form-error {
+  font-size: 0.78rem;
+  color: var(--color-danger);
+  margin-top: 2px;
+}
+
+.form-submit-btn {
+  margin-top: 22px;
+  white-space: nowrap;
+  align-self: flex-start;
+}
+
+/* ── Modal ──────────────────────────────────────────────────────────────── */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.modal {
+  background: var(--color-card-bg);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 28px 32px;
+  max-width: 420px;
+  width: 90%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.modal__title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.modal__message {
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+.modal__actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+/* Rotate-signer modal extensions */
+.modal--rotate {
+  max-width: 480px;
+}
+
+.modal__address-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.modal__address-section:first-of-type {
+  padding-top: 0;
+  border-top: none;
+}
+
+.modal__address-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+}
+
+.modal__address-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modal__address-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.modal__address-empty {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+.modal__address-mono {
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  font-size: 0.82rem;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 4px 8px;
+  word-break: break-all;
+  flex: 1;
+}
+
+.modal__address-full {
+  display: none;
+}
+
+.modal__address-short {
+  display: inline;
+}
+
+@media (min-width: 480px) {
+  .modal__address-full {
+    display: inline;
+  }
+
+  .modal__address-short {
+    display: none;
+  }
+}
+
+.modal__address-weight {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.modal__pending-note {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  text-align: center;
+  font-style: italic;
+}
