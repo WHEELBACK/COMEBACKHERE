@@ -121,6 +121,13 @@ Defined in `COMEBACKHERE-contracts/contracts/treasury/src/lib.rs`.
 | 6 | `InvalidThreshold` | `update_threshold` was called with a threshold of 0. | Pass a positive `u32` threshold; the multi-sig cannot function with zero required weight. |
 | 7 | `DuplicateSigner` | `initialize` was called with the same signer address appearing more than once in the `signers` list. | Ensure every `(address, weight)` pair in the `signers` vector is unique before calling `initialize`. |
 | 8 | `InvalidWeightSum` | `initialize` was called with a `threshold` greater than the sum of all signer weights. | Lower the threshold or add signers with sufficient weight so that `sum(weights) ≥ threshold`. |
+| 9 | `NotSettlementParty` | A caller other than the merchant attempted to raise a settlement dispute. | Use the merchant address associated with the settlement. |
+| 10 | `ThresholdExceedsWeight` | `update_threshold` requested a threshold greater than the total registered signer weight. | Add signer weight or choose a threshold no greater than the current total. |
+| 11 | `InvalidPagination` | `get_pending_settlements` was called with a page limit above 100. | Use a limit of 100 or less. |
+| 12 | `SignerNotFound` | `rotate_signer` was called with an address that is not a current signer. | Supply an address with a non-zero registered signer weight. |
+| 13 | `DailyLimitExceeded` | A withdrawal would exceed the token's configured rolling 24-hour cap. | Wait for the window to expire or have the admin raise or clear the cap. |
+| 14 | `SettlementExpired` | `approve_settlement` or `execute_settlement` was called at or after a proposal's `expires_at` timestamp. | Propose a new settlement and collect approvals before its expiry. |
+| 15 | `InvalidSettlementTtl` | The admin configured a zero TTL, or adding the TTL to the ledger timestamp would overflow. | Configure a positive TTL that fits within the ledger timestamp range. |
 
 ---
 
