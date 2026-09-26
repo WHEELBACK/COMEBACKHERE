@@ -85,6 +85,7 @@ const options: swaggerJsdoc.Options = {
     tags: [
       { name: "Health", description: "Service health checks" },
       { name: "Invoices", description: "Invoice creation and status" },
+      { name: "Webhooks", description: "Webhook delivery operations" },
       { name: "Disputes", description: "Dispute management" },
       { name: "Treasury", description: "Settlement and treasury operations" },
       { name: "Invoice Settings", description: "Grace window configuration" },

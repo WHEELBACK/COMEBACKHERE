@@ -96,3 +96,34 @@ export function parseCorsOrigins(raw: string | undefined = process.env.CORS_ORIG
 
   return [...origins]
 }
+
+export interface WebhookRetryConfig {
+  maxAttempts: number
+  baseDelayMs: number
+  maxDelayMs: number
+  jitterRatio: number
+}
+
+/** Reads webhook retry policy from the environment, falling back to safe defaults. */
+export function getWebhookRetryConfig(env: NodeJS.ProcessEnv = process.env): WebhookRetryConfig {
+  const positiveInteger = (name: string, fallback: number): number => {
+    const value = env[name]
+    if (value === undefined || value === "") return fallback
+    const parsed = Number(value)
+    if (!Number.isSafeInteger(parsed) || parsed < 1) {
+      throw new Error(`${name} must be a positive integer`)
+    }
+    return parsed
+  }
+
+  const maxAttempts = positiveInteger("WEBHOOK_MAX_ATTEMPTS", 5)
+  const baseDelayMs = positiveInteger("WEBHOOK_BASE_DELAY_MS", 1_000)
+  const maxDelayMs = positiveInteger("WEBHOOK_MAX_DELAY_MS", 60_000)
+  const jitterRaw = env.WEBHOOK_JITTER_RATIO
+  const jitterRatio = jitterRaw === undefined || jitterRaw === "" ? 0.2 : Number(jitterRaw)
+  if (!Number.isFinite(jitterRatio) || jitterRatio < 0 || jitterRatio > 1) {
+    throw new Error("WEBHOOK_JITTER_RATIO must be between 0 and 1")
+  }
+
+  return { maxAttempts, baseDelayMs, maxDelayMs, jitterRatio }
+}

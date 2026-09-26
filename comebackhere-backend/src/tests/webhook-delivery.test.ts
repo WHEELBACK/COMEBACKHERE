@@ -1,10 +1,14 @@
 import { describe, it, expect, vi } from "vitest"
+import { getWebhookRetryConfig } from "../lib/env.js"
 import {
   deliverWebhook,
   buildWebhookPayload,
   DEFAULT_MAX_ATTEMPTS,
   BASE_DELAY_MS,
+  WebhookDeliveryQueue,
   type WebhookPayload,
+  type DeadLetterStore,
+  type WebhookDeadLetterRecord,
 } from "../services/webhook-delivery.js"
 
 // ---------------------------------------------------------------------------
@@ -12,6 +16,31 @@ import {
 // ---------------------------------------------------------------------------
 
 const noDelay = () => Promise.resolve()
+
+describe("webhook retry configuration", () => {
+  it("uses bounded defaults when variables are unset", () => {
+    expect(getWebhookRetryConfig({})).toEqual({
+      maxAttempts: 5,
+      baseDelayMs: 1_000,
+      maxDelayMs: 60_000,
+      jitterRatio: 0.2,
+    })
+  })
+
+  it("reads retry limits from the environment", () => {
+    expect(getWebhookRetryConfig({
+      WEBHOOK_MAX_ATTEMPTS: "8",
+      WEBHOOK_BASE_DELAY_MS: "250",
+      WEBHOOK_MAX_DELAY_MS: "5000",
+      WEBHOOK_JITTER_RATIO: "0.5",
+    })).toEqual({ maxAttempts: 8, baseDelayMs: 250, maxDelayMs: 5_000, jitterRatio: 0.5 })
+  })
+
+  it("rejects invalid retry settings", () => {
+    expect(() => getWebhookRetryConfig({ WEBHOOK_MAX_ATTEMPTS: "0" })).toThrow(/WEBHOOK_MAX_ATTEMPTS/)
+    expect(() => getWebhookRetryConfig({ WEBHOOK_JITTER_RATIO: "1.5" })).toThrow(/WEBHOOK_JITTER_RATIO/)
+  })
+})
 
 function makePayload(overrides?: Partial<WebhookPayload>): WebhookPayload {
   return {
@@ -31,6 +60,25 @@ function makeFetch(responses: Array<{ status: number } | Error>): typeof fetch {
     if (r instanceof Error) throw r
     return { status: r.status } as Response
   }) as unknown as typeof fetch
+}
+
+function memoryDeadLetters(): DeadLetterStore & { records: Map<string, WebhookDeadLetterRecord> } {
+  const records = new Map<string, WebhookDeadLetterRecord>()
+  return {
+    records,
+    async save(record) {
+      records.set(record.idempotency_key, { ...record, failed_at: new Date().toISOString() })
+    },
+    async find(key) {
+      return records.get(key) ?? null
+    },
+    async list() {
+      return [...records.values()]
+    },
+    async delete(key) {
+      records.delete(key)
+    },
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +167,7 @@ describe("deliverWebhook", () => {
     const fetchFn = makeFetch([{ status: 500 }, { status: 500 }, { status: 200 }])
     const payload = makePayload()
 
-    await deliverWebhook("https://example.com/hook", payload, 5, fetchFn, delayFn)
+    await deliverWebhook("https://example.com/hook", payload, 5, fetchFn, delayFn, { jitterRatio: 0 })
 
     // Two failures → two delays before the successful third attempt
     expect(delays).toHaveLength(2)
@@ -140,6 +188,65 @@ describe("deliverWebhook", () => {
 
     // 3 attempts → 2 delays (not 3)
     expect(delays).toHaveLength(2)
+  })
+
+  it("caps the exponential delay and records every attempt", async () => {
+    const delays: number[] = []
+    const record = await deliverWebhook(
+      "https://example.com/hook",
+      makePayload(),
+      3,
+      makeFetch([{ status: 500 }]),
+      async (ms) => { delays.push(ms) },
+      { baseDelayMs: 1_000, maxDelayMs: 1_500, jitterRatio: 0, randomFn: () => 0.5 },
+    )
+
+    expect(delays).toEqual([1_000, 1_500])
+    expect(record.attempt_history).toHaveLength(3)
+    expect(record.attempt_history.map((attempt) => attempt.status_code)).toEqual([500, 500, 500])
+  })
+
+  it("uses fake timers for the default backoff delay", async () => {
+    vi.useFakeTimers()
+    try {
+      const delivery = deliverWebhook(
+        "https://example.com/hook",
+        makePayload(),
+        2,
+        makeFetch([{ status: 500 }, { status: 200 }]),
+        undefined,
+        { jitterRatio: 0 },
+      )
+      await vi.runAllTimersAsync()
+      await expect(delivery).resolves.toMatchObject({ status: "delivered", attempts: 2 })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("persists exhausted deliveries and replays them until success", async () => {
+    const deadLetters = memoryDeadLetters()
+    const queue = new WebhookDeliveryQueue({
+      deadLetterStore: deadLetters,
+      maxAttempts: 1,
+      fetchFn: makeFetch([{ status: 503 }, { status: 200 }]),
+      delayFn: noDelay,
+      retryConfig: { jitterRatio: 0 },
+    })
+    const payload = makePayload()
+
+    const failed = await queue.enqueue("https://example.com/hook", payload)
+    expect(failed).toMatchObject({ status: "failed", last_error: "HTTP 503", attempts: 1 })
+    expect(deadLetters.records.get(payload.idempotency_key)).toMatchObject({
+      endpoint: "https://example.com/hook",
+      payload,
+      last_error: "HTTP 503",
+      attempt_history: [{ attempt: 1, status_code: 503 }],
+    })
+
+    const replayed = await queue.replayDeadLetter(payload.idempotency_key)
+    expect(replayed).toMatchObject({ status: "delivered" })
+    expect(deadLetters.records.has(payload.idempotency_key)).toBe(false)
   })
 
   it("preserves the idempotency_key across all retry attempts", async () => {

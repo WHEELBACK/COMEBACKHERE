@@ -47,6 +47,32 @@ export const invoiceIdParamSchema = z.object({
   id: z.string().regex(/^\d+$/, "id must be a positive integer"),
 })
 
+export const invoiceActionIdParamSchema = z.object({
+  id: z.string().regex(/^[1-9]\d*$/, "id must be a positive integer").refine((value) => {
+    try {
+      return BigInt(value) <= 18_446_744_073_709_551_615n
+    } catch {
+      return false
+    }
+  }, "id must fit in an unsigned 64-bit integer"),
+})
+
+export const invoiceListQuerySchema = z.object({
+  cursor: z.string().max(1024).regex(/^[A-Za-z0-9_-]+$/, "cursor is invalid").optional(),
+  limit: z.string().regex(/^[1-9]\d*$/, "limit must be a positive integer")
+    .refine((value) => Number.isSafeInteger(Number(value)), "limit must be a positive integer").optional(),
+  page: z.string().regex(/^[1-9]\d*$/, "page must be a positive integer")
+    .refine((value) => Number.isSafeInteger(Number(value)), "page must be a positive integer").optional(),
+  offset: z.string().regex(/^\d+$/, "offset must be a non-negative integer")
+    .refine((value) => Number.isSafeInteger(Number(value)), "offset must be a non-negative integer").optional(),
+}).refine((query) => !(query.cursor && (query.page || query.offset)), {
+  message: "cursor cannot be combined with page or offset",
+})
+
+export const deadLetterIdParamSchema = z.object({
+  id: z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/, "idempotency key is invalid"),
+})
+
 export const releaseEscrowIdParamSchema = z.object({
   id: z
     .string()
