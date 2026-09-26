@@ -6,6 +6,10 @@
  *     (getTokenBalance mock is only called once).
  *  2. The cache expires after the TTL, causing a fresh RPC call.
  *  3. The cache is invalidated immediately after a successful execute-settlement.
+ *  4. The treasury indexer invalidates the cache when it indexes a
+ *     settlement_executed event, and logs the invalidation.
+ *  5. Events other than settlement_executed leave the cache alone, so TTL
+ *     expiry remains the fallback for them.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
@@ -16,6 +20,9 @@ import {
   setBalanceCache,
   invalidateBalanceCache,
 } from "../routes/treasury.js"
+import { processIndexerBatch } from "../services/treasury-indexer.js"
+import type { SorobanClient } from "../lib/soroban.js"
+import type { Db } from "mongodb"
 
 // ---------------------------------------------------------------------------
 // Constants — valid Stellar credentials for env setup
@@ -159,21 +166,133 @@ describe("GET /api/treasury/balances — caching behaviour", () => {
   it("cache expires after TTL and next call fetches fresh data", async () => {
     const { getTokenBalance } = await import("../lib/soroban.js")
 
-    // Seed the cache with a known value
-    setBalanceCache([{ token: USDC_CONTRACT, balance: "10000000" }])
+    // Only fake Date so supertest's real I/O timers keep working, and keep the
+    // fake clock active for the HTTP call so the entry stays expired.
+    vi.useFakeTimers({ toFake: ["Date"] })
+    try {
+      // Seed the cache with a known value
+      setBalanceCache([{ token: USDC_CONTRACT, balance: "10000000" }])
 
-    vi.useFakeTimers()
+      // Advance past the 5-second TTL — the cache should now be stale
+      vi.advanceTimersByTime(6_000)
+      expect(getBalanceCache()).toBeNull()
 
-    // Advance past the 5-second TTL — the cache should now be stale
-    vi.advanceTimersByTime(6_000)
+      // Confirm a fresh HTTP call hits the mock (cache expired)
+      await request(app).get("/api/treasury/balances")
+      expect(vi.mocked(getTokenBalance)).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
 
-    // Cache should be empty, so next real call hits getTokenBalance
+// ---------------------------------------------------------------------------
+// Indexer-driven invalidation: settlement_executed evicts the balance cache
+// ---------------------------------------------------------------------------
+
+function makeEvent(eventType: string, settlementId = 7, pagingToken = `tok-${eventType}`) {
+  // Each slot answers both u64() and address() since event types read the
+  // same positions differently (e.g. slot 3 is merchant vs. approval weight).
+  const slot = (n: number, a: string) => ({
+    u64: () => ({ toString: () => String(n) }),
+    address: () => ({ toString: () => a }),
+  })
+  return {
+    pagingToken,
+    txHash: `tx-${eventType}`,
+    topic: [{ sym: () => ({ toString: () => eventType }) }],
+    value: {
+      vec: () => [slot(settlementId, ""), slot(0, "addr-token"), slot(1000, ""), slot(1, "addr-merchant")],
+    },
+  }
+}
+
+function makeClient(events: ReturnType<typeof makeEvent>[]): SorobanClient {
+  return {
+    getEvents: vi.fn().mockResolvedValue({ events, latestLedger: 200 }),
+    getLatestLedger: vi.fn().mockResolvedValue({ sequence: 200 }),
+  } as unknown as SorobanClient
+}
+
+function makeDatabase(): Db {
+  const collection = {
+    findOne: vi.fn().mockResolvedValue(null),
+    updateOne: vi.fn().mockResolvedValue({}),
+  }
+  return { collection: vi.fn(() => collection) } as unknown as Db
+}
+
+describe("treasury indexer — balance cache invalidation", () => {
+  const CACHED = [{ token: USDC_CONTRACT, balance: "1" }]
+
+  beforeEach(() => {
+    invalidateBalanceCache()
+    delete process.env.WEBHOOK_URL
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("invalidates the cache when settlement_executed is indexed", async () => {
+    setBalanceCache(CACHED)
+    expect(getBalanceCache()).toEqual(CACHED)
+
+    await processIndexerBatch(makeClient([makeEvent("settlement_executed")]), TREASURY_CONTRACT, makeDatabase())
+
     expect(getBalanceCache()).toBeNull()
+  })
 
-    vi.useRealTimers()
+  it("logs the invalidation with the settlement id", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {})
+    setBalanceCache(CACHED)
 
-    // Confirm a fresh HTTP call hits the mock (cache was cleared)
-    await request(app).get("/api/treasury/balances")
-    expect(vi.mocked(getTokenBalance)).toHaveBeenCalledTimes(1)
+    await processIndexerBatch(makeClient([makeEvent("settlement_executed", 42)]), TREASURY_CONTRACT, makeDatabase())
+
+    const lines = log.mock.calls.map((c) => String(c[0]))
+    expect(lines.some((l) => l.includes("[cache] invalidated key=treasury:balances") && l.includes("settlement_executed id=42"))).toBe(true)
+  })
+
+  it("does not invalidate the cache for proposed or approved events", async () => {
+    setBalanceCache(CACHED)
+
+    await processIndexerBatch(
+      makeClient([makeEvent("settlement_proposed"), makeEvent("settlement_approved")]),
+      TREASURY_CONTRACT,
+      makeDatabase(),
+    )
+
+    expect(getBalanceCache()).toEqual(CACHED)
+  })
+
+  it("keeps TTL as the fallback when no settlement_executed event is seen", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] })
+    try {
+      setBalanceCache(CACHED)
+      await processIndexerBatch(makeClient([]), TREASURY_CONTRACT, makeDatabase())
+      expect(getBalanceCache()).toEqual(CACHED)
+
+      vi.advanceTimersByTime(6_000)
+      expect(getBalanceCache()).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("next GET /balances after an indexed execution fetches fresh data", async () => {
+    for (const [key, val] of Object.entries(ENV)) process.env[key] = val
+    const { getTokenBalance } = await import("../lib/soroban.js")
+    vi.mocked(getTokenBalance).mockClear()
+    vi.mocked(getTokenBalance).mockResolvedValueOnce(BigInt(100)).mockResolvedValueOnce(BigInt(40))
+    const app = createApp()
+
+    const before = await request(app).get("/api/treasury/balances")
+    expect(before.body).toEqual([{ token: USDC_CONTRACT, balance: "100" }])
+
+    await processIndexerBatch(makeClient([makeEvent("settlement_executed")]), TREASURY_CONTRACT, makeDatabase())
+
+    const after = await request(app).get("/api/treasury/balances")
+    expect(after.body).toEqual([{ token: USDC_CONTRACT, balance: "40" }])
+    expect(vi.mocked(getTokenBalance)).toHaveBeenCalledTimes(2)
   })
 })

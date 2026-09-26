@@ -3,35 +3,20 @@ import { useInvoice } from "../hooks/useInvoice"
 import { useWallet } from "../hooks/useWallet"
 import { usePolling } from "../hooks/usePolling"
 import { fetchBalances } from "../utils/treasury"
+import { formatAmount, compareRawAmounts, USDC_DECIMALS } from "../utils/format"
 import { StatusBadge } from "./StatusBadge"
 import { InvoiceStatus } from "../types"
 import { config } from "../config"
 
 const TREASURY_BALANCE_POLL_MS = 10_000
 
-/**
- * Stellar ledger closes every ~5 s. We apply a small margin (one extra ledger)
- * so the release button only becomes active once we are reasonably confident
- * the on-chain grace window has elapsed, even with minor clock skew.
- */
-const LEDGER_CLOSE_S = 5
-const CLOCK_SKEW_MARGIN_S = LEDGER_CLOSE_S
-
-/** Default grace window used when the backend does not return one. */
-const DEFAULT_GRACE_WINDOW_S = 86_400 // 24 h
-
-interface GraceWindowConfig {
-  grace_window_seconds: number
-}
-
-/** Format seconds into HH:MM:SS (or MM:SS when < 1 h). */
-function formatCountdown(totalSeconds: number): string {
-  const s = Math.max(0, Math.floor(totalSeconds))
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  const pad = (n: number) => String(n).padStart(2, "0")
-  return h > 0 ? `${pad(h)}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`
+/** Exact comparison of raw stroop amounts; unparseable values never block. */
+function isBelow(balance: string, amount: string): boolean {
+  try {
+    return compareRawAmounts(balance, amount) < 0
+  } catch {
+    return false
+  }
 }
 
 export function EscrowRelease() {
@@ -161,7 +146,7 @@ export function EscrowRelease() {
   const insufficientTreasuryFunds =
     invoice != null &&
     treasuryBalance !== null &&
-    Number(treasuryBalance) < Number(invoice.amount_usdc)
+    isBelow(treasuryBalance, invoice.amount_usdc)
 
   // ---------------------------------------------------------------------------
   // Render
@@ -222,8 +207,8 @@ export function EscrowRelease() {
               </span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">Amount (USDC)</span>
-              <span className="detail-value">{invoice.amount_usdc}</span>
+              <span className="detail-label">Amount</span>
+              <span className="detail-value">{formatAmount(invoice.amount_usdc, USDC_DECIMALS, "USDC")}</span>
             </div>
             <div className="detail-row">
               <span className="detail-label">Status</span>
@@ -259,7 +244,7 @@ export function EscrowRelease() {
                     ? "Unavailable"
                     : treasuryBalance === null
                     ? "Loading..."
-                    : treasuryBalance}
+                    : formatAmount(treasuryBalance, USDC_DECIMALS, "USDC")}
                 </span>
               </div>
             )}
@@ -329,9 +314,9 @@ export function EscrowRelease() {
                 role="alert"
               >
                 <span style={{ flex: 1 }}>
-                  Treasury balance ({treasuryBalance} USDC) is below this
-                  invoice's amount ({invoice.amount_usdc} USDC). Releasing now
-                  would likely fail.
+                  Treasury balance ({formatAmount(treasuryBalance ?? "0", USDC_DECIMALS, "USDC")}) is
+                  below this invoice's amount ({formatAmount(invoice.amount_usdc, USDC_DECIMALS, "USDC")}).
+                  Releasing now would likely fail.
                 </span>
                 <button
                   className="btn btn--primary"

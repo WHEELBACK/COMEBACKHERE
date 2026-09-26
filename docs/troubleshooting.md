@@ -592,3 +592,82 @@ curl -H "X-Request-Id: my-trace-id-abc123" http://localhost:3000/invoices/1
 
 The response will echo the same `X-Request-Id: my-trace-id-abc123` header,
 confirming the backend used your ID throughout the request lifecycle.
+
+## Indexer Retention Gaps
+
+Soroban RPC nodes keep contract events only for a limited retention window
+(about 7 days by default on public nodes). If the invoice indexer is stopped,
+or falls behind, for longer than that window, its saved cursor points at
+ledgers the node no longer has and `getEvents` rejects the request.
+
+### How the indexer reacts
+
+When the resume ledger is older than the node's oldest retained ledger, the
+indexer:
+
+1. Logs an error such as
+   `[indexer] RETENTION GAP: ledgers 3000-4999 (2000 ledgers) are no longer retained by the RPC node; events in this range were NOT indexed.`
+2. Updates the metrics served at `GET /metrics`:
+
+   | Metric | Meaning |
+   | --- | --- |
+   | `indexer_retention_gaps_total{indexer="invoice"}` | Number of gaps detected |
+   | `indexer_retention_gap_ledgers_total{indexer="invoice"}` | Total ledgers skipped |
+   | `indexer_retention_gap_last_missing_ledgers{indexer="invoice"}` | Size of the most recent gap |
+
+3. Stores the missing range in the `indexer_gaps` Mongo collection with
+   `status: "open"`.
+4. Only then moves its cursor to the oldest retained ledger and continues.
+
+Alert on any increase of `indexer_retention_gaps_total`. Invoices whose events
+fell in the gap may show a stale status and their webhooks were not sent.
+
+### Recovering from a gap
+
+1. List the open gaps:
+
+   ```sh
+   mongosh "$MONGODB_URI" --eval 'db.indexer_gaps.find({ status: "open" })'
+   ```
+
+2. Find an RPC node that still retains the range: an archive RPC
+   (captive-core with a long `HISTORY_RETENTION_WINDOW`) or a provider
+   offering full history.
+3. Run a one-off indexer against that node, starting at the gap. Processing is
+   idempotent per event id, so overlapping ranges are safe to replay:
+
+   ```sh
+   # Point the one-off run's cursor at the start of the gap
+   mongosh "$MONGODB_URI" --eval '
+     db.indexer_cursors.updateOne(
+       { _id: "invoice_events" },
+       { $set: { paging_token: null, last_ledger: <from_ledger> } })'
+
+   SOROBAN_RPC_URL=<archive-rpc-url> INVOICE_CONTRACT_ID=... \
+     node dist/indexer.js
+   ```
+
+   Stop the main indexer while the backfill runs, and stop the backfill once
+   its logs show ledgers past `to_ledger`. Then restart the main indexer; it
+   continues from the saved cursor and skips events it has already applied.
+
+4. Mark the gap as resolved:
+
+   ```sh
+   mongosh "$MONGODB_URI" --eval '
+     db.indexer_gaps.updateOne(
+       { _id: "invoice:<from>-<to>" },
+       { $set: { status: "backfilled", resolved_at: new Date() } })'
+   ```
+
+   If no archive source is available, set `status: "accepted"` instead and
+   reconcile the affected invoices manually with
+   `stellar contract invoke ... -- get_invoice --invoice_id <id>`.
+
+### Preventing gaps
+
+- Keep indexer downtime well below the RPC node's retention window.
+- Watch `indexer_retention_gap_last_missing_ledgers` and indexer logs after
+  outages.
+- For self-hosted RPC, raise the event retention window if maintenance windows
+  are long.

@@ -1,6 +1,8 @@
+import { useFocusTrap } from "../hooks/useFocusTrap"
 import type { Invoice } from "../types"
 import { StatusBadge } from "./StatusBadge"
 import { CopyableText } from "./CopyableText"
+import { formatAmount, USDC_DECIMALS } from "../utils/format"
 
 interface PayConfirmationModalProps {
   invoice: Invoice
@@ -15,19 +17,22 @@ export function PayConfirmationModal({
   onCancel,
   submitting,
 }: PayConfirmationModalProps) {
+  const modalRef = useFocusTrap({ onClose: onCancel, disabled: submitting })
+
   return (
-    <div 
-      className="modal-overlay" 
-      onClick={onCancel} 
+    <div
+      className="modal-overlay"
+      onClick={onCancel}
       role="presentation"
-      aria-hidden={submitting ? "true" : "false"}
     >
-      <div 
-        className="modal" 
-        onClick={(e) => e.stopPropagation()} 
-        role="dialog" 
-        aria-modal="true" 
+      <div
+        ref={modalRef}
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
         aria-labelledby="pay-confirm-title"
+        tabIndex={-1}
       >
         <h2 id="pay-confirm-title">Confirm Payment</h2>
         <p className="modal-desc">
@@ -41,8 +46,8 @@ export function PayConfirmationModal({
             <span className="detail-value">#<CopyableText text={String(invoice.id)} label="Copy invoice ID" /></span>
           </div>
           <div className="detail-row">
-            <span className="detail-label">Amount (USDC)</span>
-            <span className="detail-value">{invoice.gross_usdc}</span>
+            <span className="detail-label">Amount</span>
+            <span className="detail-value">{formatAmount(invoice.gross_usdc, USDC_DECIMALS, "USDC")}</span>
           </div>
           <div className="detail-row">
             <span className="detail-label">Merchant</span>

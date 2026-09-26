@@ -74,15 +74,21 @@ shape:
 
 ```json
 {
-  "error": "Too many requests. Please retry after the indicated number of seconds.",
-  "retryAfter": 12
+  "error": {
+    "code": "RATE_LIMITED",
+    "message": "Too many requests. Please retry after the indicated number of seconds.",
+    "details": { "retryAfter": 12 },
+    "correlationId": "5f1c9a8e-2b7d-4c1e-9a3f-0d2e6b7c8a91"
+  }
 }
 ```
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `error` | string | Human-readable message. |
-| `retryAfter` | number | Seconds to wait before retrying. |
+| `error.code` | string | Always `RATE_LIMITED`. |
+| `error.message` | string | Human-readable message. |
+| `error.details.retryAfter` | number | Seconds to wait before retrying. |
+| `error.correlationId` | string | Same as the `X-Request-Id` response header. |
 
 The response also includes a `Retry-After` header with the same integer value,
 plus `X-RateLimit-Limit`, `X-RateLimit-Remaining: 0`, and `X-RateLimit-Reset`.

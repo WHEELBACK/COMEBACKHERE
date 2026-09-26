@@ -19,6 +19,15 @@
 #   INVOICE_CONTRACT_ID
 #   TREASURY_CONTRACT_ID
 #   COMPLIANCE_CONTRACT_ID
+#
+# Stellar identifier format (always enforced when the variable is set; mirrors
+# comebackhere-backend/src/lib/env.ts):
+#   C... contract ids : INVOICE_CONTRACT_ID TREASURY_CONTRACT_ID
+#                       COMPLIANCE_CONTRACT_ID USDC_CONTRACT_ID SETTLEMENT_CONTRACT_ID
+#   G... account keys : ADMIN_PUBLIC_KEY
+#   S... secret seeds : SIGNER_SECRET_KEY (value is never printed)
+# Full strkey validation (base32 + version byte + CRC16 checksum) uses python3;
+# without python3 only the shape (prefix, length, alphabet) is checked.
 
 set -euo pipefail
 
@@ -75,6 +84,68 @@ check_optional() {
   fi
 }
 
+# is_valid_strkey KIND VALUE — KIND is contract | account | seed.
+# Same rules as stellar-sdk StrKey.isValidContract / isValidEd25519PublicKey /
+# isValidEd25519SecretSeed.
+is_valid_strkey() {
+  local kind="$1" value="$2" prefix
+  case "$kind" in
+    contract) prefix="C" ;;
+    account)  prefix="G" ;;
+    seed)     prefix="S" ;;
+    *) return 1 ;;
+  esac
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$kind" "$value" <<'PY'
+import base64, sys
+
+kind, value = sys.argv[1], sys.argv[2]
+version = {"contract": 2 << 3, "account": 6 << 3, "seed": 18 << 3}[kind]
+
+def crc16_xmodem(data: bytes) -> int:
+    crc = 0
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) if crc & 0x8000 else (crc << 1)
+            crc &= 0xFFFF
+    return crc
+
+try:
+    raw = base64.b32decode(value)
+except Exception:
+    sys.exit(1)
+
+ok = (
+    len(value) == 56
+    and len(raw) == 35
+    and raw[0] == version
+    and int.from_bytes(raw[-2:], "little") == crc16_xmodem(raw[:-2])
+    and base64.b32encode(raw).decode() == value
+)
+sys.exit(0 if ok else 1)
+PY
+  else
+    [[ "$value" =~ ^${prefix}[A-Z2-7]{55}$ ]]
+  fi
+}
+
+check_strkey() {
+  local var="$1" kind="$2"
+  local val="${!var:-}"
+  [ -z "$val" ] && return 0
+  if is_valid_strkey "$kind" "$val"; then
+    ok "$var is a valid $kind strkey"
+    return 0
+  fi
+  case "$kind" in
+    contract) err "$var is not a valid Stellar contract id (expected C... address, got \"$val\")." ;;
+    account)  err "$var is not a valid Stellar account key (expected G... address, got \"$val\")." ;;
+    seed)     err "$var is not a valid Stellar secret seed (expected S... key)." ;;
+  esac
+}
+
 # ── source env file if provided ───────────────────────────────────────────────
 
 if [ -n "$ENV_FILE" ]; then
@@ -118,6 +189,23 @@ echo "=== contract integration variables (optional, STRICT=1 to enforce) ==="
 check_optional INVOICE_CONTRACT_ID
 check_optional TREASURY_CONTRACT_ID
 check_optional COMPLIANCE_CONTRACT_ID
+
+# ── Stellar identifier format ─────────────────────────────────────────────────
+
+echo ""
+echo "=== Stellar identifier format ==="
+
+for _var in INVOICE_CONTRACT_ID TREASURY_CONTRACT_ID COMPLIANCE_CONTRACT_ID \
+            USDC_CONTRACT_ID SETTLEMENT_CONTRACT_ID; do
+  check_strkey "$_var" contract
+done
+check_strkey ADMIN_PUBLIC_KEY account
+check_strkey SIGNER_SECRET_KEY seed
+unset _var
+
+if ! command -v python3 >/dev/null 2>&1; then
+  warn "python3 not found — Stellar ids were only checked for shape, not checksum."
+fi
 
 # ── summary ───────────────────────────────────────────────────────────────────
 

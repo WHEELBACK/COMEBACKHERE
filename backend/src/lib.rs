@@ -6,6 +6,7 @@
 //! re-assembling routes per test.
 
 pub mod extractors;
+pub mod handlers_readiness;
 pub mod idempotency;
 pub mod rate_limiter;
 pub mod routes;
@@ -26,6 +27,7 @@ use routes::{
     pay::pay_invoice,
     refund::refund_invoice,
 };
+use handlers_readiness::readiness_probe;
 use soroban::SorobanClient;
 
 /// Shared application state threaded through every route handler.
@@ -71,6 +73,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/health/rpc", axum::routing::get(get_rpc_health))
+        .route("/health/ready", axum::routing::get(readiness_probe))
         .route("/invoices", axum::routing::post(create_invoice))
         .route("/invoices/:id", axum::routing::get(get_invoice))
         .route("/invoices/:id/pay", axum::routing::post(pay_invoice))

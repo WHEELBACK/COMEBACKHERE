@@ -72,7 +72,7 @@ describe("POST /api/treasury/execute-settlement", () => {
   it("400 when settlement_id is missing", async () => {
     const res = await request(app).post("/api/treasury/execute-settlement").send({})
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/settlement_id/)
+    expect(res.body.error.message).toMatch(/settlement_id/)
   })
 
   it("503 when required env vars are missing", async () => {
@@ -173,7 +173,7 @@ describe("invoice grace window routes", () => {
       .post("/api/invoice/grace-window")
       .send({ grace_window_seconds: -1 })
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/grace_window_seconds/)
+    expect(res.body.error.message).toMatch(/grace_window_seconds/)
   })
 })
 
@@ -442,7 +442,7 @@ describe("POST /api/treasury/simulate-settlement", () => {
   it("400 when settlement_id is missing", async () => {
     const res = await request(app).post("/api/treasury/simulate-settlement").send({})
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/settlement_id/)
+    expect(res.body.error.message).toMatch(/settlement_id/)
   })
 
   it("503 when required env vars are missing", async () => {
@@ -481,7 +481,7 @@ describe("POST /api/treasury/execute-settlement — HTTP layer additional cases"
       .post("/api/treasury/execute-settlement")
       .send({ settlement_id: 1.5 })
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/settlement_id/)
+    expect(res.body.error.message).toMatch(/settlement_id/)
   })
 
   it("400 when settlement_id is zero", async () => {
@@ -489,7 +489,7 @@ describe("POST /api/treasury/execute-settlement — HTTP layer additional cases"
       .post("/api/treasury/execute-settlement")
       .send({ settlement_id: 0 })
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/settlement_id/)
+    expect(res.body.error.message).toMatch(/settlement_id/)
   })
 })
 
@@ -571,7 +571,7 @@ describe("GET /api/treasury/on-hold-settlements", () => {
 
     const res = await request(app).get("/api/treasury/on-hold-settlements")
     expect(res.status).toBe(500)
-    expect(res.body.error).toMatch(/mongo down/)
+    expect(res.body.error.message).toMatch(/mongo down/)
   })
 })
 
@@ -598,7 +598,7 @@ describe("POST /api/treasury/release-hold", () => {
   it("400 when settlement_id is missing", async () => {
     const res = await request(app).post("/api/treasury/release-hold").send({})
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/settlement_id/)
+    expect(res.body.error.message).toMatch(/settlement_id/)
   })
 
   it("400 when settlement_id is zero", async () => {
@@ -606,7 +606,7 @@ describe("POST /api/treasury/release-hold", () => {
       .post("/api/treasury/release-hold")
       .send({ settlement_id: 0 })
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/settlement_id/)
+    expect(res.body.error.message).toMatch(/settlement_id/)
   })
 
   it("404 when settlement is not found or not on hold", async () => {
@@ -621,7 +621,7 @@ describe("POST /api/treasury/release-hold", () => {
       .post("/api/treasury/release-hold")
       .send({ settlement_id: 999 })
     expect(res.status).toBe(404)
-    expect(res.body.error).toMatch(/not found or not on hold/i)
+    expect(res.body.error.message).toMatch(/not found or not on hold/i)
   })
 
   it("200 and returns updated record when successfully released", async () => {
@@ -686,7 +686,7 @@ describe("POST /api/treasury/release-hold", () => {
       .post("/api/treasury/release-hold")
       .send({ settlement_id: 1 })
     expect(res.status).toBe(500)
-    expect(res.body.error).toMatch(/db failure/)
+    expect(res.body.error.message).toMatch(/db failure/)
   })
 })
 
@@ -713,7 +713,7 @@ describe("POST /api/treasury/escalate-hold", () => {
   it("400 when settlement_id is missing", async () => {
     const res = await request(app).post("/api/treasury/escalate-hold").send({})
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/settlement_id/)
+    expect(res.body.error.message).toMatch(/settlement_id/)
   })
 
   it("400 when settlement_id is not a positive integer", async () => {
@@ -721,7 +721,7 @@ describe("POST /api/treasury/escalate-hold", () => {
       .post("/api/treasury/escalate-hold")
       .send({ settlement_id: -1 })
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/settlement_id/)
+    expect(res.body.error.message).toMatch(/settlement_id/)
   })
 
   it("404 when settlement is not found or not on hold", async () => {
@@ -736,7 +736,7 @@ describe("POST /api/treasury/escalate-hold", () => {
       .post("/api/treasury/escalate-hold")
       .send({ settlement_id: 999 })
     expect(res.status).toBe(404)
-    expect(res.body.error).toMatch(/not found or not on hold/i)
+    expect(res.body.error.message).toMatch(/not found or not on hold/i)
   })
 
   it("200 and returns escalated record with hold_reason: AdminHold", async () => {
@@ -806,7 +806,7 @@ describe("POST /api/treasury/escalate-hold", () => {
       .post("/api/treasury/escalate-hold")
       .send({ settlement_id: 70 })
     expect(res.status).toBe(404)
-    expect(res.body.error).toMatch(/not found or not on hold/i)
+    expect(res.body.error.message).toMatch(/not found or not on hold/i)
   })
 
   it("500 on database error", async () => {
@@ -816,6 +816,6 @@ describe("POST /api/treasury/escalate-hold", () => {
       .post("/api/treasury/escalate-hold")
       .send({ settlement_id: 1 })
     expect(res.status).toBe(500)
-    expect(res.body.error).toMatch(/connection lost/)
+    expect(res.body.error.message).toMatch(/connection lost/)
   })
 })

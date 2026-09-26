@@ -1,7 +1,9 @@
 import { useState } from "react"
+import { useFocusTrap } from "../hooks/useFocusTrap"
 import type { Invoice } from "../types"
 import { StatusBadge } from "./StatusBadge"
 import { CopyableText } from "./CopyableText"
+import { formatAmount, USDC_DECIMALS } from "../utils/format"
 
 interface RefundConfirmationModalProps {
   invoice: Invoice
@@ -18,6 +20,7 @@ export function RefundConfirmationModal({
 }: RefundConfirmationModalProps) {
   const [error, setError] = useState<string | null>(null)
   const [isRetrying, setIsRetrying] = useState(false)
+  const modalRef = useFocusTrap({ onClose: onCancel, disabled: submitting || isRetrying })
 
   const handleConfirm = async () => {
     setError(null)
@@ -44,7 +47,15 @@ export function RefundConfirmationModal({
 
   return (
     <div className="modal-overlay" onClick={onCancel} role="presentation">
-      <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="refund-confirm-title">
+      <div
+        ref={modalRef}
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="refund-confirm-title"
+        tabIndex={-1}
+      >
         <h2 id="refund-confirm-title">Request Refund</h2>
         
         {error && (
@@ -77,8 +88,8 @@ export function RefundConfirmationModal({
                 <span className="detail-value">#<CopyableText text={String(invoice.id)} label="Copy invoice ID" /></span>
               </div>
               <div className="detail-row">
-                <span className="detail-label">Paid Amount (USDC)</span>
-                <span className="detail-value">{invoice.gross_usdc}</span>
+                <span className="detail-label">Paid Amount</span>
+                <span className="detail-value">{formatAmount(invoice.gross_usdc, USDC_DECIMALS, "USDC")}</span>
               </div>
               <div className="detail-row">
                 <span className="detail-label">Merchant</span>

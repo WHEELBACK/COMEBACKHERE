@@ -99,7 +99,7 @@ export const voteBodySchema = z.object({
     .min(1, "signer_address is required")
     .refine(isValidStellarAddress, "signer_address must be a valid Stellar public key"),
   vote: z.enum(["ResolvedClaimant", "ResolvedCounterparty"], {
-    errorMap: () => ({ message: "vote must be 'ResolvedClaimant' or 'ResolvedCounterparty'" }),
+    message: "vote must be 'ResolvedClaimant' or 'ResolvedCounterparty'",
   }),
   weight: z
     .number({ message: "weight must be a positive integer" })
@@ -115,6 +115,23 @@ export const createDisputeSchema = z.object({
     .min(1, "settlement_id is required")
     .regex(/^\d+$/, "settlement_id must be a positive integer string"),
   reason: z.string().optional(),
+})
+
+export const disputeStatuses = ["Raised", "Resolved"] as const
+
+export const disputeListQuerySchema = z.object({
+  status: z.enum(disputeStatuses, { message: "status must be 'Raised' or 'Resolved'" }).optional(),
+  settlement_id: z
+    .string()
+    .regex(/^\d+$/, "settlement_id must be a positive integer string")
+    .optional(),
+  page: z.coerce.number().int("page must be a positive integer").positive("page must be a positive integer").default(1),
+  limit: z.coerce
+    .number()
+    .int("limit must be an integer between 1 and 100")
+    .positive("limit must be an integer between 1 and 100")
+    .max(100, "limit must be an integer between 1 and 100")
+    .default(20),
 })
 
 export const complianceAuditQuerySchema = z.object({
@@ -140,6 +157,11 @@ export const analyticsQuerySchema = z
       .optional()
       .transform((val) => (val ? parseInt(val, 10) : undefined))
       .pipe(z.number().finite("Invalid end_date timestamp").optional()),
+    bucket: z
+      .enum(["day", "week", "month"], { message: "bucket must be one of: day, week, month" })
+      .optional(),
+    merchant: stellarAddress.optional(),
+    token: z.string().min(1).optional(),
   })
   .refine(
     (data) => {

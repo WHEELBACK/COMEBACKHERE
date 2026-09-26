@@ -24,6 +24,8 @@ coverage/
 **/*.snap
 test-results/
 playwright-report/
+**/playwright-report/
+**/test-results/
 coverage/
 .nyc_output/
 
@@ -39,25 +41,33 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+lerna-debug.log*
 
 # Editor / OS
 .DS_Store
 Thumbs.db
 .vscode/settings.json
-.vscode/*.code-workspace
+.vscode/launch.json
 .idea/
 *.iml
+*.iws
 
 # TypeScript cache / incremental build info
 *.tsbuildinfo
+**/*.tsbuildinfo
 
 # Vite cache
 .vite/
+**/.vite/
 .vite-inspect/
+**/.vite/
 
-# Vitest extended outputs
-vitest.config.ts.timestamp-*
-**/*.test-d.ts
+# Vitest / Jest output
+vitest-report/
+html/
+lcov.info
+vitest-coverage/
+**/.vitest-cache/
 
 # Lock files — not committed (each sub-package manages its own lock locally)
 package-lock.json
@@ -70,11 +80,13 @@ Cargo.lock
 
 # Rust build artifacts
 **/*.wasm
+**/target/
 
 # Miscellaneous generated files
 *.local
 .turbo/
 .parcel-cache/
+.cache/
 
 # Playwright state
 playwright/.auth/
@@ -85,9 +97,10 @@ playwright-report/
 *.swo
 *~
 
-# macOS metadata
-__MACOSX/
+# Coverage reports
+comebackhere-frontend/coverage/
+frontend/coverage/
+comebackhere-backend/coverage/
 
-# Windows thumbnails
-ehthumbs.db
-Desktop.ini
+# Playwright state
+playwright/.auth/

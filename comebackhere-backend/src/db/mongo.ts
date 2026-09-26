@@ -63,6 +63,41 @@ export interface IndexerCursor {
   processed_event_ids?: string[]
 }
 
+/**
+ * One indexed invoice contract event. `event_id` is the Soroban event id and
+ * is unique, so replaying a ledger range is a no-op for events already seen.
+ * `applied` flips to true once the event's side effects have run; an event
+ * stored with `applied: false` (crash mid-apply) is re-applied on replay.
+ */
+export interface InvoiceEventRecord {
+  event_id: string
+  paging_token: string | null
+  event_type: string
+  invoice_id: string
+  ledger: number
+  ledger_closed_at: string
+  transaction_hash: string
+  contract_id: string
+  raw_topics: string[]
+  raw_value: string
+  applied: boolean
+  created_at: Date
+  applied_at?: Date
+}
+
+/** A ledger range the indexer skipped because the RPC node no longer retained it. */
+export interface IndexerGapRecord {
+  _id: string
+  indexer: string
+  contract_id: string
+  from_ledger: number
+  to_ledger: number
+  missing_ledgers: number
+  status: "open" | "backfilled" | "accepted"
+  detected_at: Date
+  resolved_at?: Date
+}
+
 export const DEFAULT_PAGE_SIZE = 20
 export const MAX_PAGE_SIZE = 100
 
@@ -151,6 +186,10 @@ export async function connectMongo(): Promise<Db> {
   const cursors = db.collection<IndexerCursor>("indexer_cursors")
   await cursors.createIndex({ _id: 1 }, { unique: true })
 
+  const invoiceEvents = db.collection<InvoiceEventRecord>("invoice_events")
+  await invoiceEvents.createIndex({ event_id: 1 }, { unique: true })
+  await invoiceEvents.createIndex({ invoice_id: 1, ledger: 1 })
+
   const complianceAudit = db.collection<ComplianceAuditRecord>("compliance_audit")
   await complianceAudit.createIndex({ event_id: 1 }, { unique: true })
   await complianceAudit.createIndex({ address: 1, ledger: -1 })
@@ -170,6 +209,14 @@ export function getSettlementsCollection(database: Db): Collection<SettlementRec
 
 export function getCursorsCollection(database: Db): Collection<IndexerCursor> {
   return database.collection<IndexerCursor>("indexer_cursors")
+}
+
+export function getInvoiceEventsCollection(database: Db): Collection<InvoiceEventRecord> {
+  return database.collection<InvoiceEventRecord>("invoice_events")
+}
+
+export function getIndexerGapsCollection(database: Db): Collection<IndexerGapRecord> {
+  return database.collection<IndexerGapRecord>("indexer_gaps")
 }
 
 export function getComplianceAuditCollection(database: Db): Collection<ComplianceAuditRecord> {
