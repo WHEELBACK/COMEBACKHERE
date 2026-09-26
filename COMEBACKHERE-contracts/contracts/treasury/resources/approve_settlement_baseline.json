@@ -1,5 +1,6 @@
 {
   "test": "bench_approve_settlement",
+  "baseline_status": "provisional_budget_not_measured",
   "cpu_instructions": 100000,
   "memory_bytes": 50000,
   "tolerance_percent": 20,
