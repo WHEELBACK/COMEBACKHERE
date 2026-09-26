@@ -29,6 +29,12 @@ playwright-report/
 coverage/
 .nyc_output/
 
+# Vitest / Jest HTML reports and coverage artefacts
+vitest-report/
+html/
+lcov.info
+*.lcov
+
 # Logs
 *.log
 npm-debug.log*
@@ -46,7 +52,7 @@ Thumbs.db
 *.iml
 *.iws
 
-# TypeScript cache
+# TypeScript cache / incremental build info
 *.tsbuildinfo
 **/*.tsbuildinfo
 
@@ -82,9 +88,9 @@ Cargo.lock
 .parcel-cache/
 .cache/
 
-# Vitest extended outputs
-vitest.config.ts.timestamp-*
-**/*.test-d.ts
+# Playwright state
+playwright/.auth/
+playwright-report/
 
 # Editor session files
 *.swp
