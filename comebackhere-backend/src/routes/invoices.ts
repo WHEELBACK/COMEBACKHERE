@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express"
 import type { FindCursor, WithId } from "mongodb"
 import { Keypair, TransactionBuilder, BASE_FEE, Contract, nativeToScVal, SorobanRpc, xdr } from "stellar-sdk"
-import { connectMongo, getInvoicesCollection, type InvoiceRecord, type InvoiceStatus } from "../db/mongo.js"
+import { connectMongo, getInvoiceEventsCollection, getInvoicesCollection, type InvoiceRecord, type InvoiceStatus } from "../db/mongo.js"
 import { requireEnv } from "../lib/env.js"
 import { asyncHandler, NotFoundError } from "../lib/errors.js"
 import { cacheGet, cacheSet } from "../lib/cache.js"
@@ -62,7 +62,7 @@ export async function createInvoice(
   ]
 
   const account = await client.getAccount(keypair.publicKey())
-  const tx = new TransactionBuilder(account as any, {
+  const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
   })
@@ -72,16 +72,21 @@ export async function createInvoice(
 
   const simulated = await client.simulateTransaction(tx)
   if (SorobanRpc.Api.isSimulationError(simulated)) {
-    throw Object.assign(new Error(`Soroban simulation failed: ${(simulated as any).error}`), { status: 422 })
+    throw Object.assign(new Error(`Soroban simulation failed: ${(simulated as { error?: string }).error}`), { status: 422 })
   }
 
-  const prepared = SorobanRpc.assembleTransaction(tx, simulated as any).build()
+  const prepared = SorobanRpc.assembleTransaction(
+    tx,
+    simulated as SorobanRpc.Api.SimulateTransactionSuccessResponse,
+  ).build()
   prepared.sign(keypair)
 
   const sendResult = await client.sendTransaction(prepared)
   if (sendResult.status === "ERROR") {
     throw Object.assign(
-      new Error(`Soroban submission failed: ${(sendResult as any).errorResult?.toXDR("base64")}`),
+      new Error(
+        `Soroban submission failed: ${(sendResult as { errorResult?: { toXDR: (format: string) => string } }).errorResult?.toXDR("base64")}`,
+      ),
       { status: 422 }
     )
   }
@@ -299,7 +304,11 @@ router.get("/export.csv", async (req: Request, res: Response) => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     if (!res.headersSent) {
-      res.status((err as any)?.status ?? 500).json({ error: message })
+      const status =
+        err && typeof err === "object" && "status" in err && typeof err.status === "number"
+          ? err.status
+          : 500
+      res.status(status).json({ error: message })
     } else {
       // Mid-stream failure: abort so the client sees a truncated download
       // rather than a file that silently looks complete.
@@ -480,6 +489,80 @@ router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req
   }
 
   res.json({ invoice_id: id, status: "Pending" })
+}))
+
+/**
+ * @openapi
+ * /invoices/{id}/events:
+ *   get:
+ *     tags: [Invoices]
+ *     summary: Fetch the indexed event timeline for an invoice
+ *     description: Returns invoice state changes ordered by ledger. The events array is empty when the invoice exists but has no indexed events.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Positive integer string invoice ID
+ *     responses:
+ *       200:
+ *         description: Invoice event timeline
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [invoice_id, events]
+ *               properties:
+ *                 invoice_id:
+ *                   type: string
+ *                 events:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     required: [event_type, ledger, timestamp, transaction_hash]
+ *                     properties:
+ *                       event_type:
+ *                         type: string
+ *                         example: invoice_created
+ *                       ledger:
+ *                         type: integer
+ *                       timestamp:
+ *                         type: string
+ *                         format: date-time
+ *                       transaction_hash:
+ *                         type: string
+ *       400:
+ *         description: Invalid invoice ID
+ *       404:
+ *         description: Invoice not found
+ */
+router.get("/:id/events", validateParams(invoiceIdParamSchema), asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const db = await connectMongo()
+  const invoice = await getInvoicesCollection(db).findOne({ invoice_id: id })
+
+  if (!invoice) {
+    throw new NotFoundError("Invoice not found")
+  }
+
+  const events = await getInvoiceEventsCollection(db)
+    .find(
+      { invoice_id: id },
+      { projection: { _id: 0, event_type: 1, ledger: 1, ledger_closed_at: 1, transaction_hash: 1 } },
+    )
+    .sort({ ledger: 1, event_id: 1 })
+    .toArray()
+
+  res.json({
+    invoice_id: id,
+    events: events.map((event) => ({
+      event_type: event.event_type,
+      ledger: event.ledger,
+      timestamp: event.ledger_closed_at,
+      transaction_hash: event.transaction_hash,
+    })),
+  })
 }))
 
 /**
