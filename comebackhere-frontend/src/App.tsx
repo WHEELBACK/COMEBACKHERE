@@ -5,6 +5,8 @@ import { ComplianceManager } from "./components/ComplianceManager"
 import { TokenAllowlist } from "./components/TokenAllowlist"
 import { BatchExpireInvoices } from "./components/BatchExpireInvoices"
 import { TreasuryManager } from "./components/TreasuryManager"
+import { RaiseDispute } from "./components/RaiseDispute"
+import { ErrorBoundary } from "./components/ErrorBoundary"
 import { useInvoice } from "./hooks/useInvoice"
 import { useTheme } from "./hooks/useTheme"
 import { useWallet } from "./hooks/useWallet"
@@ -12,7 +14,7 @@ import { CopyableText } from "./components/CopyableText"
 import "./App.css"
 import "./components/ErrorBoundary.css"
 
-type Tab = "payment" | "refund" | "compliance" | "tokens" | "batch-expire" | "treasury"
+type Tab = "payment" | "refund" | "compliance" | "tokens" | "batch-expire" | "treasury" | "dispute"
 
 function RefundTab() {
   const { invoice, loading, error, loadInvoice, refund } = useInvoice()
@@ -151,6 +153,16 @@ export default function App() {
         </button>
         <button
           role="tab"
+          aria-selected={tab === "dispute"}
+          aria-controls="tabpanel-dispute"
+          id="tab-dispute"
+          className={`tab ${tab === "dispute" ? "tab--active" : ""}`}
+          onClick={() => setTab("dispute")}
+        >
+          Raise Dispute
+        </button>
+        <button
+          role="tab"
           aria-selected={tab === "compliance"}
           aria-controls="tabpanel-compliance"
           id="tab-compliance"
@@ -192,19 +204,110 @@ export default function App() {
       </nav>
 
       <main className="app-main">
-        {tab === "payment" ? (
-          <InvoicePayment />
-        ) : tab === "refund" ? (
-          <RefundTab />
-        ) : tab === "tokens" ? (
-          <TokenAllowlist />
-        ) : tab === "compliance" ? (
-          <ComplianceManager />
-        ) : tab === "batch-expire" ? (
-          <BatchExpireInvoices walletAddress={address} />
-        ) : tab === "treasury" ? (
-          <TreasuryManager />
-        ) : null}
+        {tab === "payment" && (
+          <ErrorBoundary
+            tabName="payment"
+            fallbackTitle="Payment tab encountered an error"
+          >
+            <div
+              id="tabpanel-payment"
+              role="tabpanel"
+              aria-labelledby="tab-payment"
+            >
+              <InvoicePayment />
+            </div>
+          </ErrorBoundary>
+        )}
+
+        {tab === "refund" && (
+          <ErrorBoundary
+            tabName="refund"
+            fallbackTitle="Refund tab encountered an error"
+          >
+            <div
+              id="tabpanel-refund"
+              role="tabpanel"
+              aria-labelledby="tab-refund"
+            >
+              <RefundTab />
+            </div>
+          </ErrorBoundary>
+        )}
+
+        {tab === "dispute" && (
+          <ErrorBoundary
+            tabName="dispute"
+            fallbackTitle="Dispute tab encountered an error"
+          >
+            <div
+              id="tabpanel-dispute"
+              role="tabpanel"
+              aria-labelledby="tab-dispute"
+            >
+              <RaiseDispute />
+            </div>
+          </ErrorBoundary>
+        )}
+
+        {tab === "tokens" && (
+          <ErrorBoundary
+            tabName="tokens"
+            fallbackTitle="Token Allowlist tab encountered an error"
+          >
+            <div
+              id="tabpanel-tokens"
+              role="tabpanel"
+              aria-labelledby="tab-tokens"
+            >
+              <TokenAllowlist />
+            </div>
+          </ErrorBoundary>
+        )}
+
+        {tab === "compliance" && (
+          <ErrorBoundary
+            tabName="compliance"
+            fallbackTitle="Compliance tab encountered an error"
+          >
+            <div
+              id="tabpanel-compliance"
+              role="tabpanel"
+              aria-labelledby="tab-compliance"
+            >
+              <ComplianceManager />
+            </div>
+          </ErrorBoundary>
+        )}
+
+        {tab === "batch-expire" && (
+          <ErrorBoundary
+            tabName="batch-expire"
+            fallbackTitle="Batch Expire tab encountered an error"
+          >
+            <div
+              id="tabpanel-batch-expire"
+              role="tabpanel"
+              aria-labelledby="tab-batch-expire"
+            >
+              <BatchExpireInvoices walletAddress={address} />
+            </div>
+          </ErrorBoundary>
+        )}
+
+        {tab === "treasury" && (
+          <ErrorBoundary
+            tabName="treasury"
+            fallbackTitle="Treasury tab encountered an error"
+          >
+            <div
+              id="tabpanel-treasury"
+              role="tabpanel"
+              aria-labelledby="tab-treasury"
+            >
+              <TreasuryManager />
+            </div>
+          </ErrorBoundary>
+        )}
       </main>
     </div>
   )

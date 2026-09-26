@@ -27,29 +27,37 @@ playwright-report/
 coverage/
 .nyc_output/
 
+# Vitest / Jest HTML reports and coverage artefacts
+vitest-report/
+html/
+lcov.info
+*.lcov
+
 # Logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 
 # Editor / OS
 .DS_Store
 Thumbs.db
 .vscode/settings.json
+.vscode/*.code-workspace
 .idea/
+*.iml
 
-# TypeScript cache
+# TypeScript cache / incremental build info
 *.tsbuildinfo
 
 # Vite cache
 .vite/
 .vite-inspect/
 
-# Vitest / Jest output
-vitest-report/
-html/
-lcov.info
+# Vitest extended outputs
+vitest.config.ts.timestamp-*
+**/*.test-d.ts
 
 # Lock files — not committed (each sub-package manages its own lock locally)
 package-lock.json
@@ -68,11 +76,18 @@ Cargo.lock
 .turbo/
 .parcel-cache/
 
-# Vitest extended outputs
-vitest.config.ts.timestamp-*
-**/*.test-d.ts
+# Playwright state
+playwright/.auth/
+playwright-report/
 
 # Editor session files
 *.swp
 *.swo
 *~
+
+# macOS metadata
+__MACOSX/
+
+# Windows thumbnails
+ehthumbs.db
+Desktop.ini
