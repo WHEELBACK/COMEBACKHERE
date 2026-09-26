@@ -56,7 +56,14 @@ fn check_not_past_expiry(e: &Env, until: u64) -> Result<(), ContractError> {
     }
 }
 
-/// Maximum number of addresses accepted by a single `batch_allow_addresses` call.
+fn publish_status_event(e: &Env, event_type: &str, addr: Address, status: &str, until: Option<u64>) {
+    e.events().publish(
+        (Symbol::new(e, event_type),),
+        (addr, Symbol::new(e, status), until),
+    );
+}
+
+/// Maximum number of addresses accepted by a single batch status call.
 const MAX_BATCH_SIZE: u32 = 50;
 
 #[contractimpl]
@@ -92,8 +99,7 @@ impl ComplianceContract {
         e.storage()
             .instance()
             .set(&DataKey::Status(addr.clone()), &AddressStatus::Allowed);
-        e.events()
-            .publish((Symbol::new(&e, "address_allowed"),), addr);
+        publish_status_event(&e, "address_allowed", addr, "Allowed", None);
         Ok(())
     }
 
@@ -103,8 +109,7 @@ impl ComplianceContract {
         e.storage()
             .instance()
             .set(&DataKey::Status(addr.clone()), &AddressStatus::Blocked);
-        e.events()
-            .publish((Symbol::new(&e, "address_blocked"),), addr);
+        publish_status_event(&e, "address_blocked", addr, "Blocked", None);
         Ok(())
     }
 
@@ -121,8 +126,13 @@ impl ComplianceContract {
             &DataKey::Status(addr.clone()),
             &AddressStatus::AllowedUntil(until),
         );
-        e.events()
-            .publish((Symbol::new(&e, "address_allowed_until"),), (addr, until));
+        publish_status_event(
+            &e,
+            "address_allowed_until",
+            addr,
+            "AllowedUntil",
+            Some(until),
+        );
         Ok(())
     }
 
@@ -148,14 +158,43 @@ impl ComplianceContract {
                 &DataKey::Status(addr.clone()),
                 &AddressStatus::AllowedUntil(until),
             );
-            e.events()
-                .publish((Symbol::new(&e, "address_allowed"),), (addr.clone(), until));
+            publish_status_event(
+                &e,
+                "address_allowed_until",
+                addr,
+                "AllowedUntil",
+                Some(until),
+            );
         }
 
         e.events().publish(
             (Symbol::new(&e, "compliance_batch_processed"),),
             (admin, addresses.len()),
         );
+        Ok(())
+    }
+
+    /// Blocks a batch of addresses in a single invocation.
+    /// Enforces the same admin-only authorization and batch-size limit as
+    /// `batch_allow_addresses`, and rejects the whole batch before any writes.
+    pub fn batch_block_addresses(
+        e: Env,
+        admin: Address,
+        addresses: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        check_not_paused(&e)?;
+        admin.require_auth();
+        if addresses.len() > MAX_BATCH_SIZE {
+            return Err(ContractError::BatchTooLarge);
+        }
+
+        for addr in addresses.iter() {
+            e.storage()
+                .instance()
+                .set(&DataKey::Status(addr.clone()), &AddressStatus::Blocked);
+            publish_status_event(&e, "address_blocked", addr, "Blocked", None);
+        }
+
         Ok(())
     }
 
@@ -200,8 +239,7 @@ impl ComplianceContract {
         e.storage()
             .instance()
             .remove(&DataKey::Status(addr.clone()));
-        e.events()
-            .publish((Symbol::new(&e, "address_cleared"),), (addr, status));
+        publish_status_event(&e, "address_cleared", addr, "Cleared", None);
         Ok(())
     }
 
@@ -276,6 +314,43 @@ mod tests {
         c.allow_address_until(&admin, &addr, &2000u64);
         e.ledger().with_mut(|li| li.timestamp = 2001);
         assert!(!c.is_allowed(&addr));
+    }
+
+    #[test]
+    fn test_get_address_status_retains_expiry_at_and_after_boundary() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.allow_address_until(&admin, &addr, &2000u64);
+
+        assert!(matches!(c.get_address_status(&addr), AddressStatus::AllowedUntil(2000)));
+        e.ledger().with_mut(|li| li.timestamp = 2000);
+        assert!(matches!(c.get_address_status(&addr), AddressStatus::AllowedUntil(2000)));
+        e.ledger().with_mut(|li| li.timestamp = 2001);
+        assert!(matches!(c.get_address_status(&addr), AddressStatus::AllowedUntil(2000)));
+    }
+
+    #[test]
+    fn test_permanent_allow_replaces_expiring_allowance() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.allow_address_until(&admin, &addr, &2000u64);
+        c.allow_address(&admin, &addr);
+        e.ledger().with_mut(|li| li.timestamp = 2001);
+
+        assert!(c.is_allowed(&addr));
+        assert!(matches!(c.get_address_status(&addr), AddressStatus::Allowed));
+    }
+
+    #[test]
+    fn test_block_replaces_expiring_allowance() {
+        let (e, cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        c.allow_address_until(&admin, &addr, &2000u64);
+        c.block_address(&admin, &addr);
+        e.ledger().with_mut(|li| li.timestamp = 1500);
+
+        assert!(!c.is_allowed(&addr));
+        assert!(matches!(c.get_address_status(&addr), AddressStatus::Blocked));
     }
 
     // ── allow_address_until past-expiry validation ─────────────────────────────
@@ -360,7 +435,7 @@ mod tests {
         let all_events = e.events().all();
         let allowed_count = all_events
             .iter()
-            .filter(|ev| ev.0 == (cid.clone(), "address_allowed".into()))
+            .filter(|ev| ev.0 == (cid.clone(), "address_allowed_until".into()))
             .count();
         assert_eq!(allowed_count, 3);
 
@@ -444,6 +519,62 @@ mod tests {
         c.pause(&admin);
         let res = c.try_batch_allow_addresses(&admin, &addresses, &2000u64);
         assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_batch_block_addresses_blocks_all_and_emits_per_address_events() {
+        let (e, cid, admin, _addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        let mut addresses = Vec::new(&e);
+        for _ in 0..MAX_BATCH_SIZE {
+            addresses.push_back(Address::generate(&e));
+        }
+
+        c.batch_block_addresses(&admin, &addresses);
+
+        for addr in addresses.iter() {
+            assert!(matches!(c.get_address_status(&addr), AddressStatus::Blocked));
+        }
+        let blocked_count = e
+            .events()
+            .all()
+            .iter()
+            .filter(|ev| ev.0 == (cid.clone(), "address_blocked".into()))
+            .count();
+        assert_eq!(blocked_count, MAX_BATCH_SIZE as usize);
+    }
+
+    #[test]
+    fn test_batch_block_addresses_rejects_over_cap_without_writes() {
+        let (e, cid, admin, _addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &cid);
+        let mut addresses = Vec::new(&e);
+        for _ in 0..51 {
+            addresses.push_back(Address::generate(&e));
+        }
+
+        assert_eq!(
+            c.try_batch_block_addresses(&admin, &addresses),
+            Err(Ok(ContractError::BatchTooLarge))
+        );
+        assert!(matches!(
+            c.get_address_status(&addresses.get(0).unwrap()),
+            AddressStatus::Cleared
+        ));
+        assert!(e.events().all().is_empty());
+    }
+
+    #[test]
+    fn test_batch_block_addresses_rejects_when_paused() {
+        let (e, _cid, admin, addr) = setup(1000);
+        let c = ComplianceContractClient::new(&e, &_cid);
+        let addresses = soroban_sdk::vec![&e, addr];
+        c.pause(&admin);
+
+        assert_eq!(
+            c.try_batch_block_addresses(&admin, &addresses),
+            Err(Ok(ContractError::ContractPaused))
+        );
     }
 
     #[test]
