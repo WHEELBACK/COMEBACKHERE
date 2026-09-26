@@ -2,6 +2,7 @@
   "contract": "compliance",
   "version": "1.0.0",
   "functions": [
+    "version",
     "initialize",
     "is_allowed",
     "get_address_status",

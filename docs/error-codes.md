@@ -53,6 +53,8 @@ Defined in `COMEBACKHERE-contracts/contracts/invoice/src/lib.rs`. Shares some va
 | 16 | `Overflow` | An internal counter (invoice ID, or `created_at + grace_window`) would overflow `u64`. | Practically unreachable outside of adversarial ledger state; not user-actionable. |
 | 17 | `AddressBlocked` | `mark_paids` was called for a customer that the configured compliance contract reports as not allowed. | Confirm the customer's compliance status with `ComplianceContract.is_allowed` before retrying. |
 | 18 | `InvalidStateTransition` | `mark_paids` was called on an invoice in `RefundRequested`, `Released`, `Cancelled`, or `Expired` status — see [ARCHITECTURE.md § Invoice state machine](../ARCHITECTURE.md#invoice-state-machine) for the full legal-transition diagram. | Fetch the current status with `get_invoice_status` first. A refund already in progress must not be overridden by a stale payment confirmation. |
+| 19 | `AmountPrecision` | `create_invoice` was called with an amount below the minimum supported amount. | Use an amount of at least 10,000,000 stroops. |
+| 20 | `ReferenceTooLong` | `create_invoice` was called with a `reference` longer than 64 UTF-8 bytes. | Shorten the reference to 64 bytes or fewer. |
 
 ---
 
@@ -121,6 +123,7 @@ Defined in `COMEBACKHERE-contracts/contracts/treasury/src/lib.rs`.
 | 6 | `InvalidThreshold` | `update_threshold` was called with a threshold of 0. | Pass a positive `u32` threshold; the multi-sig cannot function with zero required weight. |
 | 7 | `DuplicateSigner` | `initialize` was called with the same signer address appearing more than once in the `signers` list. | Ensure every `(address, weight)` pair in the `signers` vector is unique before calling `initialize`. |
 | 8 | `InvalidWeightSum` | `initialize` was called with a `threshold` greater than the sum of all signer weights. | Lower the threshold or add signers with sufficient weight so that `sum(weights) ≥ threshold`. |
+| 14 | `NotDisputed` | `resolve_dispute` was called for a settlement that is not in `OnHold` status. | Raise a dispute on the settlement before resolving it. |
 
 ---
 

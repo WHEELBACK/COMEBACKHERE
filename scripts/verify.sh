@@ -13,6 +13,8 @@
 #   INVOICE_CONTRACT_ID    — deployed invoice contract ID  (C…)
 #   TREASURY_CONTRACT_ID   — deployed treasury contract ID (C…)
 #   COMPLIANCE_CONTRACT_ID — deployed compliance contract ID (C…)
+#   SOROBAN_NETWORK_PASSPHRASE — network passphrase for contract invocation
+#   SOROBAN_SOURCE_ACCOUNT — public G-address used to simulate read-only calls
 #
 # Optional:
 #   CONTRACTS_DIR          — path to built WASM artifacts
@@ -66,12 +68,15 @@ fi
 
 : "${TREASURY_CONTRACT_ID:?TREASURY_CONTRACT_ID is required for WASM verification}"
 : "${COMPLIANCE_CONTRACT_ID:?COMPLIANCE_CONTRACT_ID is required for WASM verification}"
+: "${SOROBAN_NETWORK_PASSPHRASE:?SOROBAN_NETWORK_PASSPHRASE is required to read contract versions}"
+: "${SOROBAN_SOURCE_ACCOUNT:?SOROBAN_SOURCE_ACCOUNT is required to simulate version getters}"
 
 CONTRACTS_DIR="${CONTRACTS_DIR:-$ROOT_DIR/../COMEBACKHERE-contracts/target/wasm32-unknown-unknown/release}"
 
 FAIL=0
 MISMATCHES=()
 CHECKS=()  # For JSON output: array of check results
+VERSIONS=()  # For JSON output: deployed contract versions
 
 verify_contract() {
   local name="$1"
@@ -134,6 +139,25 @@ print(hashlib.sha256(wasm_bytes).hexdigest())
   fi
 }
 
+print_contract_version() {
+  local name="$1"
+  local contract_id="$2"
+  local version
+
+  version=$(stellar contract invoke \
+    --id "$contract_id" \
+    --rpc-url "$SOROBAN_RPC_URL" \
+    --network-passphrase "$SOROBAN_NETWORK_PASSPHRASE" \
+    --source-account "$SOROBAN_SOURCE_ACCOUNT" \
+    --send no \
+    -- version)
+
+  if [[ "$OUTPUT_FORMAT" == "text" ]]; then
+    echo "  $name version: $version"
+  fi
+  VERSIONS+=("{\"contract\":\"$name\",\"version\":\"$version\"}")
+}
+
 echo ""
 echo "Verifying deployed WASM hashes against local build artifacts…"
 
@@ -149,6 +173,10 @@ verify_contract "compliance" \
   "$COMPLIANCE_CONTRACT_ID" \
   "$CONTRACTS_DIR/comebackhere_compliance.wasm"
 
+print_contract_version "invoice" "$INVOICE_CONTRACT_ID"
+print_contract_version "treasury" "$TREASURY_CONTRACT_ID"
+print_contract_version "compliance" "$COMPLIANCE_CONTRACT_ID"
+
 if [[ "$OUTPUT_FORMAT" == "json" ]]; then
   # Output JSON result
   echo "{"
@@ -156,6 +184,11 @@ if [[ "$OUTPUT_FORMAT" == "json" ]]; then
   echo "  \"checks\": ["
   for i in "${!CHECKS[@]}"; do
     echo "    ${CHECKS[$i]}$([ $i -lt $((${#CHECKS[@]} - 1)) ] && echo ',' || echo '')"
+  done
+  echo "  ],"
+  echo "  \"versions\": ["
+  for i in "${!VERSIONS[@]}"; do
+    echo "    ${VERSIONS[$i]}$([ $i -lt $((${#VERSIONS[@]} - 1)) ] && echo ',' || echo '')"
   done
   echo "  ]"
   echo "}"

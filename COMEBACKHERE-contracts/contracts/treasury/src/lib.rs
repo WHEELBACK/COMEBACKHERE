@@ -4,7 +4,7 @@
 extern crate std;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, String, Symbol, Vec,
 };
 
 /// Status of a settlement proposal within the Treasury contract.
@@ -83,6 +83,8 @@ pub enum TreasuryError {
     /// `daily_withdraw_limit` and the withdrawal would push cumulative
     /// withdrawals for the current 24h window above that limit.
     DailyLimitExceeded = 13,
+    /// `resolve_dispute` was called for a settlement that is not on hold.
+    NotDisputed = 14,
 }
 
 /// Storage keys for Treasury contract instance state.
@@ -133,6 +135,10 @@ pub struct TreasuryContract;
 
 #[contractimpl]
 impl TreasuryContract {
+    pub fn version(e: Env) -> String {
+        String::from_str(&e, env!("CARGO_PKG_VERSION"))
+    }
+
     pub fn initialize(
         e: Env,
         signers: Vec<(Address, u64)>,
@@ -711,19 +717,39 @@ impl TreasuryContract {
     /// # Arguments
     /// * `e` - Soroban environment handle.
     /// * `signer` - Authorized signer address resolving the dispute (must authenticate).
-    /// * `_settlement_id` - ID of the disputed settlement.
-    /// * `_resolve_in_favor` - Resolution outcome decision flag.
+    /// * `settlement_id` - ID of the disputed settlement.
+    /// * `resolve_in_favor` - Whether the outcome favors the merchant.
     ///
     /// # Errors
     /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
+    /// * Returns [`TreasuryError::NotDisputed`] if the settlement is not on hold.
     pub fn resolve_dispute(
         e: Env,
         signer: Address,
-        _settlement_id: u64,
-        _resolve_in_favor: bool,
+        settlement_id: u64,
+        resolve_in_favor: bool,
     ) -> Result<(), TreasuryError> {
         check_not_paused(&e)?;
         signer.require_auth();
+        let mut settlement = Self::get_settlement_internal(&e, settlement_id);
+        if settlement.status != SettlementStatus::OnHold {
+            return Err(TreasuryError::NotDisputed);
+        }
+        let resolution_weight = settlement.approval_weight;
+        settlement.status = if resolve_in_favor {
+            SettlementStatus::Pending
+        } else {
+            SettlementStatus::Cancelled
+        };
+        e.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &settlement);
+        crate::events::dispute_resolved(
+            &e,
+            &settlement_id,
+            &resolve_in_favor,
+            &resolution_weight,
+        );
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -33,6 +33,22 @@ pub enum DataKey {
 #[contract]
 pub struct ComplianceContract;
 
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn test_version_returns_package_version() {
+        let env = Env::default();
+        let contract_id = env.register(ComplianceContract, ());
+        let client = ComplianceContractClient::new(&env, &contract_id);
+        assert_eq!(
+            client.version(),
+            String::from_str(&env, env!("CARGO_PKG_VERSION"))
+        );
+    }
+}
+
 fn is_paused(e: &Env) -> bool {
     e.storage()
         .instance()
@@ -61,6 +77,10 @@ const MAX_BATCH_SIZE: u32 = 50;
 
 #[contractimpl]
 impl ComplianceContract {
+    pub fn version(e: Env) -> String {
+        String::from_str(&e, env!("CARGO_PKG_VERSION"))
+    }
+
     pub fn initialize(e: Env, admin: Address) {
         e.storage().instance().set(&DataKey::Admin, &admin);
         e.storage().instance().set(&DataKey::Paused, &false);

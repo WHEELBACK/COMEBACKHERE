@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, vec, Address, Env};
+use soroban_sdk::{testutils::Address as _, vec, Address, Env, IntoVal, Symbol};
 
 fn setup_env() -> (Env, Address) {
     let env = Env::default();
@@ -157,8 +157,69 @@ fn test_resolve_dispute_callable_by_signer() {
     client.raise_dispute(&merchant, &settlement_id, &1u32);
 
     client.resolve_dispute(&signer_a, &settlement_id, &true);
+    assert_eq!(
+        client.get_settlement(&settlement_id).unwrap().status,
+        SettlementStatus::Pending
+    );
 
-    client.resolve_dispute(&signer_b, &settlement_id, &true);
+    let events = env.events().all();
+    let (_, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(topics.get(0).unwrap(), Symbol::new(&env, "dispute_resolved").into_val(&env));
+    assert_eq!(data, (settlement_id, true, 0u64).into_val(&env));
+}
+
+#[test]
+fn test_resolve_dispute_against_merchant_cancels_settlement() {
+    let (env, contract_id) = setup_env();
+    let client = make_client(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let signer = Address::generate(&env);
+    let token = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.initialize(&vec![&env, (signer.clone(), 1u64)], &1u64, &admin);
+    let settlement_id = client.propose_settlement(&signer, &token, &5_000_000u64, &merchant);
+    client.raise_dispute(&merchant, &settlement_id, &1u32);
+
+    client.resolve_dispute(&signer, &settlement_id, &false);
+
+    assert_eq!(
+        client.get_settlement(&settlement_id).unwrap().status,
+        SettlementStatus::Cancelled
+    );
+    let events = env.events().all();
+    let (_, _, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(data, (settlement_id, false, 0u64).into_val(&env));
+}
+
+#[test]
+fn test_resolve_non_disputed_settlement_returns_error() {
+    let (env, contract_id) = setup_env();
+    let client = make_client(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let signer = Address::generate(&env);
+    let token = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    client.initialize(&vec![&env, (signer.clone(), 1u64)], &1u64, &admin);
+    let settlement_id = client.propose_settlement(&signer, &token, &5_000_000u64, &merchant);
+
+    assert_eq!(
+        client.try_resolve_dispute(&signer, &settlement_id, &true),
+        Err(Ok(TreasuryError::NotDisputed))
+    );
+    assert_eq!(
+        client.get_settlement(&settlement_id).unwrap().status,
+        SettlementStatus::Pending
+    );
+}
+
+#[test]
+fn test_treasury_version_returns_package_version() {
+    let (env, contract_id) = setup_env();
+    let client = make_client(&env, &contract_id);
+    assert_eq!(
+        client.version(),
+        soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]

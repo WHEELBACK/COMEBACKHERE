@@ -38,6 +38,8 @@ pub enum ContractError {
     /// (e.g. `mark_paids` called on an invoice that is `RefundRequested`,
     /// `Released`, `Cancelled`, or `Expired`).
     InvalidStateTransition = 18,
+    AmountPrecision = 19,
+    ReferenceTooLong = 20,
 }
 
 #[contracttype]
@@ -116,6 +118,10 @@ pub struct InvoiceContract;
 
 #[contractimpl]
 impl InvoiceContract {
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    }
+
     /// Initialises the contract, setting the admin address and default configuration.
     ///
     /// # Parameters
@@ -765,6 +771,225 @@ mod tests {
         InvoiceContractClient::new(&env, &contract_id).initialize(&admin);
         env.ledger().with_mut(|li| li.timestamp = ts);
         (env, contract_id, admin)
+    }
+
+    #[test]
+    fn test_version_returns_package_version() {
+        let (env, contract_id, _) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        assert_eq!(client.version(), String::from_str(&env, env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn test_reference_length_limit_is_enforced_in_bytes() {
+        let (env, contract_id, _) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &contract_id);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        let valid_text = std::string::String::from("x").repeat(MAX_REFERENCE_LEN as usize);
+        let valid_reference = Some(String::from_str(&env, &valid_text));
+        client.create_invoice(
+            &merchant,
+            &customer,
+            &10_000_000i128,
+            &token,
+            &5000,
+            &1,
+            &valid_reference,
+        );
+
+        let long_text = std::string::String::from("x").repeat(MAX_REFERENCE_LEN as usize + 1);
+        let long_reference = Some(String::from_str(&env, &long_text));
+        assert_eq!(
+            client.try_create_invoice(
+                &merchant,
+                &customer,
+                &10_000_000i128,
+                &token,
+                &5000,
+                &2,
+                &long_reference,
+            ),
+            Err(Ok(ContractError::ReferenceTooLong))
+        );
+    }
+
+    // Keep this transition matrix aligned with the diagram in ARCHITECTURE.md.
+    #[test]
+    fn test_state_machine_transition_matrix() {
+        #[derive(Clone, Copy)]
+        enum Action {
+            MarkPaid,
+            Cancel,
+            RequestRefund,
+            ReleaseEscrow,
+            Expire,
+        }
+
+        let statuses = [
+            InvoiceStatus::Pending,
+            InvoiceStatus::Paid,
+            InvoiceStatus::Expired,
+            InvoiceStatus::Cancelled,
+            InvoiceStatus::RefundRequested,
+            InvoiceStatus::Released,
+        ];
+        let actions = [
+            Action::MarkPaid,
+            Action::Cancel,
+            Action::RequestRefund,
+            Action::ReleaseEscrow,
+            Action::Expire,
+        ];
+
+        for initial_status in statuses {
+            for action in actions {
+                let (env, contract_id, admin) = setup_contract(1000);
+                let client = InvoiceContractClient::new(&env, &contract_id);
+                let merchant = Address::generate(&env);
+                let customer = Address::generate(&env);
+                let token = Address::generate(&env);
+                let invoice_id = client.create_invoice(
+                    &merchant,
+                    &customer,
+                    &10_000_000i128,
+                    &token,
+                    &2000,
+                    &1,
+                    &None,
+                );
+
+                match initial_status.clone() {
+                    InvoiceStatus::Pending => {}
+                    InvoiceStatus::Paid => {
+                        client.mark_paids(&soroban_sdk::vec![&env, invoice_id]);
+                    }
+                    InvoiceStatus::Expired => {
+                        env.ledger().set_timestamp(2000);
+                        client.batch_expire(&soroban_sdk::vec![&env, invoice_id]);
+                    }
+                    InvoiceStatus::Cancelled => client.cancel_invoiced(&invoice_id, &merchant),
+                    InvoiceStatus::RefundRequested => {
+                        client.mark_paids(&soroban_sdk::vec![&env, invoice_id]);
+                        client.request_refund(&invoice_id, &customer);
+                    }
+                    InvoiceStatus::Released => {
+                        client.mark_paids(&soroban_sdk::vec![&env, invoice_id]);
+                        client.request_refund(&invoice_id, &customer);
+                        client.set_grace_window(&admin, &0);
+                        client.release_escrow(&invoice_id, &merchant);
+                    }
+                }
+
+                let expected_error = match (initial_status.clone(), action) {
+                    (InvoiceStatus::Pending, Action::MarkPaid)
+                    | (InvoiceStatus::Pending, Action::Cancel)
+                    | (InvoiceStatus::Paid, Action::Cancel)
+                    | (InvoiceStatus::Paid, Action::RequestRefund)
+                    | (InvoiceStatus::RefundRequested, Action::ReleaseEscrow) => None,
+                    (InvoiceStatus::Paid, Action::MarkPaid) => {
+                        Some(ContractError::InvoiceAlreadyPaid)
+                    }
+                    (InvoiceStatus::Pending, Action::RequestRefund)
+                    | (InvoiceStatus::Expired, Action::RequestRefund)
+                    | (InvoiceStatus::Cancelled, Action::RequestRefund)
+                    | (InvoiceStatus::RefundRequested, Action::RequestRefund)
+                    | (InvoiceStatus::Released, Action::RequestRefund) => {
+                        Some(ContractError::InvoiceNotFound)
+                    }
+                    (InvoiceStatus::RefundRequested, Action::Cancel) => {
+                        Some(ContractError::AlreadyRefundRequested)
+                    }
+                    (InvoiceStatus::Pending, Action::ReleaseEscrow)
+                    | (InvoiceStatus::Paid, Action::ReleaseEscrow)
+                    | (InvoiceStatus::Expired, Action::ReleaseEscrow)
+                    | (InvoiceStatus::Cancelled, Action::ReleaseEscrow)
+                    | (InvoiceStatus::Released, Action::ReleaseEscrow) => {
+                        Some(ContractError::RefundNotRequested)
+                    }
+                    (InvoiceStatus::Expired, Action::Cancel)
+                    | (InvoiceStatus::Cancelled, Action::Cancel)
+                    | (InvoiceStatus::Released, Action::Cancel) => {
+                        Some(ContractError::InvoiceCancelled)
+                    }
+                    (InvoiceStatus::RefundRequested, Action::MarkPaid)
+                    | (InvoiceStatus::Expired, Action::MarkPaid)
+                    | (InvoiceStatus::Cancelled, Action::MarkPaid)
+                    | (InvoiceStatus::Released, Action::MarkPaid) => {
+                        Some(ContractError::InvalidStateTransition)
+                    }
+                    (_, Action::Expire) => None,
+                };
+
+                client.set_grace_window(&admin, &0);
+                if matches!(action, Action::Expire) {
+                    env.ledger().set_timestamp(2000);
+                }
+
+                match action {
+                    Action::MarkPaid => match expected_error {
+                        Some(error) => assert_eq!(
+                            client.try_mark_paids(&soroban_sdk::vec![&env, invoice_id]),
+                            Err(Ok(error))
+                        ),
+                        None => assert_eq!(
+                            client.try_mark_paids(&soroban_sdk::vec![&env, invoice_id]),
+                            Ok(())
+                        ),
+                    },
+                    Action::Cancel => match expected_error {
+                        Some(error) => assert_eq!(
+                            client.try_cancel_invoiced(&invoice_id, &merchant),
+                            Err(Ok(error))
+                        ),
+                        None => assert_eq!(
+                            client.try_cancel_invoiced(&invoice_id, &merchant),
+                            Ok(())
+                        ),
+                    },
+                    Action::RequestRefund => match expected_error {
+                        Some(error) => assert_eq!(
+                            client.try_request_refund(&invoice_id, &customer),
+                            Err(Ok(error))
+                        ),
+                        None => assert_eq!(
+                            client.try_request_refund(&invoice_id, &customer),
+                            Ok(())
+                        ),
+                    },
+                    Action::ReleaseEscrow => match expected_error {
+                        Some(error) => assert_eq!(
+                            client.try_release_escrow(&invoice_id, &merchant),
+                            Err(Ok(error))
+                        ),
+                        None => assert_eq!(
+                            client.try_release_escrow(&invoice_id, &merchant),
+                            Ok(())
+                        ),
+                    },
+                    Action::Expire => assert_eq!(
+                        client.try_batch_expire(&soroban_sdk::vec![&env, invoice_id]),
+                        Ok(())
+                    ),
+                }
+
+                let expected_status = match (initial_status.clone(), action) {
+                    (InvoiceStatus::Pending, Action::MarkPaid) => InvoiceStatus::Paid,
+                    (InvoiceStatus::Pending, Action::Cancel) => InvoiceStatus::Cancelled,
+                    (InvoiceStatus::Pending, Action::Expire) => InvoiceStatus::Expired,
+                    (InvoiceStatus::Paid, Action::Cancel)
+                    | (InvoiceStatus::Paid, Action::RequestRefund) => {
+                        InvoiceStatus::RefundRequested
+                    }
+                    (InvoiceStatus::RefundRequested, Action::ReleaseEscrow) => {
+                        InvoiceStatus::Released
+                    }
+                    (status, _) => status,
+                };
+                assert_eq!(client.get_invoice(&invoice_id).status, expected_status);
+            }
+        }
     }
 
     #[test]

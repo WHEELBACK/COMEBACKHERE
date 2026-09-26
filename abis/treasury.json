@@ -2,6 +2,7 @@
   "contract": "treasury",
   "version": "1.1.0",
   "functions": [
+    "version",
     "initialize",
     "set_signer",
     "propose_settlement",
@@ -31,6 +32,7 @@
     "6": "DisputeNotRaised",
     "7": "AlreadyVoted",
     "8": "UnauthorizedSigner",
-    "9": "ThresholdNotMet"
+    "9": "ThresholdNotMet",
+    "14": "NotDisputed"
   }
 }
