@@ -108,7 +108,7 @@ export async function callComplianceOp(
   const contract = new Contract(contractId)
 
   const account = await client.getAccount(keypair.publicKey())
-  const tx = new TransactionBuilder(account as any, {
+  const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
   })
@@ -119,18 +119,23 @@ export async function callComplianceOp(
   const simulated = await client.simulateTransaction(tx)
   if (SorobanRpc.Api.isSimulationError(simulated)) {
     throw Object.assign(
-      new Error(`Soroban simulation failed: ${(simulated as any).error}`),
+      new Error(`Soroban simulation failed: ${(simulated as { error?: string }).error}`),
       { status: 422 }
     )
   }
 
-  const prepared = SorobanRpc.assembleTransaction(tx, simulated as any).build()
+  const prepared = SorobanRpc.assembleTransaction(
+    tx,
+    simulated as SorobanRpc.Api.SimulateTransactionSuccessResponse,
+  ).build()
   prepared.sign(keypair)
 
   const sendResult = await client.sendTransaction(prepared)
   if (sendResult.status === "ERROR") {
     throw Object.assign(
-      new Error(`Soroban submission failed: ${(sendResult as any).errorResult?.toXDR("base64")}`),
+      new Error(
+        `Soroban submission failed: ${(sendResult as { errorResult?: { toXDR: (format: string) => string } }).errorResult?.toXDR("base64")}`,
+      ),
       { status: 422 }
     )
   }
@@ -157,7 +162,7 @@ export async function callComplianceOp(
   }
 
   return {
-    address: (args[0] as any).address?.toString() ?? "",
+    address: args[0]?.address()?.toString() ?? "",
     status: statusMap[operation],
     hash,
   }

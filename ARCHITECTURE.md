@@ -39,7 +39,7 @@ If your change is brand-new work, target the `COMEBACKHERE-*` tree to inherit fu
 
 Some CI workflows re-check the canonical trees out from upstream rather than using the in-tree copies:
 
-- `ci-contracts.yml`, `ci-abi-snapshots.yml`, `ci-abi-metadata.yml`, `ci-post-deploy-verify.yml`, and `ci-coverage.yml` do `actions/checkout` of `WHEELBACK/COMEBACKHERE-contracts` into the local `COMEBACKHERE-contracts/` path.
+- `ci-abi-snapshots.yml`, `ci-abi-metadata.yml`, `ci-post-deploy-verify.yml`, and `ci-coverage.yml` do `actions/checkout` of `WHEELBACK/COMEBACKHERE-contracts` into the local `COMEBACKHERE-contracts/` path. `ci-contracts.yml` tests the in-tree workspace from the pull request so changes to its members are covered.
 - The local `COMEBACKHERE-contracts/` checkout in this repository exists so that `make update-abi-snapshots` and `scripts/check_abi_snapshot_hygiene.sh` work locally without a separate clone.
 - A consumer running on a developer's machine can equivalently clone `COMEBACKHERE-contracts` as a sibling directory; `scripts/generate_abi_metadata.sh` looks for both locations.
 

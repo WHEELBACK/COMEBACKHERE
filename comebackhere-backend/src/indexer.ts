@@ -421,7 +421,7 @@ export async function recordRetentionGap(
 
 /** The subset of the Soroban RPC client the indexer needs (mockable in tests). */
 export interface IndexerRpc {
-  getEvents: (params: any) => Promise<any>
+  getEvents: (params: Parameters<SorobanRpc.Server["getEvents"]>[0]) => ReturnType<SorobanRpc.Server["getEvents"]>
   getLatestLedger: () => Promise<{ sequence: number }>
   getHealth?: () => Promise<unknown>
 }
@@ -470,7 +470,7 @@ export async function pollOnce(
       limit: EVENT_LIMIT,
     })
 
-  let response: any
+  let response: Awaited<ReturnType<SorobanRpc.Server["getEvents"]>>
   try {
     response = await fetchEvents()
   } catch (err) {
@@ -495,7 +495,7 @@ export async function pollOnce(
     response = await fetchEvents()
   }
 
-  const events: any[] = response?.events ?? []
+  const events = response.events ?? []
   let applied = 0
 
   for (const event of events) {

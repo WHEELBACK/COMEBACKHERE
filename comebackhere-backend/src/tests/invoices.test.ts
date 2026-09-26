@@ -369,3 +369,90 @@ describe("GET /invoices — pagination", () => {
     expect(res.body.error.message).toMatch(/db unavailable/)
   })
 })
+
+describe("GET /invoices/:id/events", () => {
+  const app = createApp()
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("returns event metadata ordered by ledger", async () => {
+    const indexedEvents = [
+      {
+        event_type: "invoice_created",
+        ledger: 12,
+        ledger_closed_at: "2026-09-26T10:00:00.000Z",
+        transaction_hash: "tx-created",
+      },
+      {
+        event_type: "invoice_paid",
+        ledger: 18,
+        ledger_closed_at: "2026-09-26T10:05:00.000Z",
+        transaction_hash: "tx-paid",
+      },
+    ]
+    const cursor = {
+      sort: vi.fn().mockReturnThis(),
+      toArray: vi.fn().mockResolvedValue(indexedEvents),
+    }
+    const invoiceCollection = { findOne: vi.fn().mockResolvedValue({ invoice_id: "42" }) }
+    const eventCollection = { find: vi.fn().mockReturnValue(cursor) }
+
+    vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as never)
+    vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(invoiceCollection as never)
+    vi.spyOn(mongoModule, "getInvoiceEventsCollection").mockReturnValue(eventCollection as never)
+
+    const res = await request(app).get("/invoices/42/events")
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      invoice_id: "42",
+      events: [
+        {
+          event_type: "invoice_created",
+          ledger: 12,
+          timestamp: "2026-09-26T10:00:00.000Z",
+          transaction_hash: "tx-created",
+        },
+        {
+          event_type: "invoice_paid",
+          ledger: 18,
+          timestamp: "2026-09-26T10:05:00.000Z",
+          transaction_hash: "tx-paid",
+        },
+      ],
+    })
+    expect(cursor.sort).toHaveBeenCalledWith({ ledger: 1, event_id: 1 })
+  })
+
+  it("returns an empty event list for an invoice without indexed events", async () => {
+    const cursor = {
+      sort: vi.fn().mockReturnThis(),
+      toArray: vi.fn().mockResolvedValue([]),
+    }
+    vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as never)
+    vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(
+      { findOne: vi.fn().mockResolvedValue({ invoice_id: "42" }) } as never,
+    )
+    vi.spyOn(mongoModule, "getInvoiceEventsCollection").mockReturnValue(
+      { find: vi.fn().mockReturnValue(cursor) } as never,
+    )
+
+    const res = await request(app).get("/invoices/42/events")
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ invoice_id: "42", events: [] })
+  })
+
+  it("returns 404 when the invoice does not exist", async () => {
+    vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as never)
+    vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(
+      { findOne: vi.fn().mockResolvedValue(null) } as never,
+    )
+
+    const res = await request(app).get("/invoices/42/events")
+
+    expect(res.status).toBe(404)
+  })
+})

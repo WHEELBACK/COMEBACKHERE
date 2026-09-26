@@ -68,7 +68,7 @@ async function saveCursor(
             $each: newEventIds,
             $slice: -1000,
           },
-        } as any,
+        },
       },
       { upsert: true },
     )

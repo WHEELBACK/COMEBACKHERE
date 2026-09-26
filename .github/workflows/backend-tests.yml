@@ -102,7 +102,10 @@ jobs:
           restore-keys: node-modules-ts-backend-
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install --no-package-lock
+
+      - name: Lint
+        run: npm run lint
 
       - name: Type check
         run: npx tsc --noEmit

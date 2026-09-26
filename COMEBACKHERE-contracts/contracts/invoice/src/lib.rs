@@ -261,6 +261,16 @@ impl InvoiceContract {
         Ok(invoice.status)
     }
 
+    /// Returns the number of invoices ever created, including cancelled and expired invoices.
+    ///
+    /// This is a read-only view of the counter used to allocate invoice IDs.
+    pub fn get_invoice_count(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::InvoiceCount)
+            .unwrap_or(0)
+    }
+
     /// Returns a paginated list of invoice IDs belonging to a given merchant, most useful
     /// for callers (e.g. the backend indexer) that need to enumerate a merchant's invoices
     /// without tracking IDs off-chain.
@@ -765,6 +775,21 @@ mod tests {
         InvoiceContractClient::new(&env, &contract_id).initialize(&admin);
         env.ledger().with_mut(|li| li.timestamp = ts);
         (env, contract_id, admin)
+    }
+
+    #[test]
+    fn test_get_invoice_count_tracks_created_invoices() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        assert_eq!(client.get_invoice_count(), 0);
+        client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &1, &None);
+        client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &2, &None);
+
+        assert_eq!(client.get_invoice_count(), 2);
     }
 
     #[test]
