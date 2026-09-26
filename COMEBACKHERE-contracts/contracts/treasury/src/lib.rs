@@ -85,6 +85,11 @@ pub enum TreasuryError {
     DailyLimitExceeded = 13,
 }
 
+// At five seconds per ledger, renew instance state from roughly 335 days
+// remaining back to roughly 359 days on each successful mutation.
+const INSTANCE_TTL_THRESHOLD: u32 = 5_800_000;
+const INSTANCE_TTL_EXTEND_TO: u32 = 6_200_000;
+
 /// Storage keys for Treasury contract instance state.
 #[contracttype]
 pub enum DataKey {
@@ -123,8 +128,15 @@ fn check_not_paused(e: &Env) -> Result<(), TreasuryError> {
     if is_paused(e) {
         Err(TreasuryError::ContractPaused)
     } else {
+        extend_instance_ttl(e);
         Ok(())
     }
+}
+
+fn extend_instance_ttl(e: &Env) {
+    e.storage()
+        .instance()
+        .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 }
 
 /// Main Treasury contract managing multi-sig settlement approvals, token allowlists, and contract pauses.
@@ -164,6 +176,7 @@ impl TreasuryContract {
             signer_list.push_back(signer.clone());
         }
         e.storage().instance().set(&DataKey::SignerList, &signer_list);
+        extend_instance_ttl(&e);
         Ok(())
     }
 
@@ -572,6 +585,7 @@ impl TreasuryContract {
     pub fn pause(e: Env, admin: Address) -> Result<(), TreasuryError> {
         Self::check_admin(&e, &admin)?;
         e.storage().instance().set(&DataKey::Paused, &true);
+        extend_instance_ttl(&e);
         e.events().publish(
             (Symbol::new(&e, "contract_paused"),),
             (),
@@ -590,6 +604,7 @@ impl TreasuryContract {
     pub fn unpause(e: Env, admin: Address) -> Result<(), TreasuryError> {
         Self::check_admin(&e, &admin)?;
         e.storage().instance().set(&DataKey::Paused, &false);
+        extend_instance_ttl(&e);
         e.events().publish(
             (Symbol::new(&e, "contract_unpaused"),),
             (),
@@ -809,9 +824,18 @@ impl TreasuryContract {
     ) -> Result<(), TreasuryError> {
         check_not_paused(&e)?;
         Self::check_admin(&e, &admin)?;
-        e.storage()
-            .instance()
-            .set(&DataKey::DailyWithdrawLimit(token.clone()), &limit);
+        if limit == 0 {
+            e.storage()
+                .instance()
+                .remove(&DataKey::DailyWithdrawLimit(token.clone()));
+            e.storage()
+                .instance()
+                .remove(&DataKey::WithdrawWindow(token.clone()));
+        } else {
+            e.storage()
+                .instance()
+                .set(&DataKey::DailyWithdrawLimit(token.clone()), &limit);
+        }
         e.events().publish(
             (Symbol::new(&e, "daily_withdraw_limit_set"),),
             (token, limit),
@@ -1612,9 +1636,31 @@ mod tests {
             Err(Ok(TreasuryError::DailyLimitExceeded))
         );
 
-        e.ledger().with_mut(|li| li.timestamp += 86_400);
-        // A full window has elapsed, so the cap applies fresh.
+        e.ledger().with_mut(|li| li.timestamp += 86_399);
+        assert_eq!(
+            c.try_withdraw(&admin, &token, &user, &1_000u64),
+            Err(Ok(TreasuryError::DailyLimitExceeded))
+        );
+
+        e.ledger().with_mut(|li| li.timestamp += 1);
         c.withdraw(&admin, &token, &user, &1_000u64);
+    }
+
+    #[test]
+    fn test_zero_daily_withdraw_limit_clears_cap_and_window() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.set_daily_withdraw_limit(&admin, &token, &1_000u64);
+        c.withdraw(&admin, &token, &user, &1_000u64);
+        c.set_daily_withdraw_limit(&admin, &token, &0u64);
+
+        assert_eq!(c.get_daily_withdraw_limit(&token), None);
+        c.withdraw(&admin, &token, &user, &1_000_000u64);
     }
 
     #[test]
