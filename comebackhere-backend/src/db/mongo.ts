@@ -40,11 +40,13 @@ export interface SettlementRecord {
 }
 
 export type ComplianceAuditEventType = "address_allowed" | "address_allowed_until" | "address_blocked" | "address_cleared"
+export type ComplianceAuditStatus = "Allowed" | "AllowedUntil" | "Blocked" | "Cleared"
 
 export interface ComplianceAuditRecord {
   event_id: string
   event_type: ComplianceAuditEventType
   address: string
+  status?: ComplianceAuditStatus
   expires_at: number | null
   ledger: number
   ledger_closed_at: string | null

@@ -1,6 +1,6 @@
 import { xdr } from "stellar-sdk"
 import { buildSorobanClient, type SorobanClient } from "../lib/soroban.js"
-import { connectMongo, getCursorsCollection, getComplianceAuditCollection, type ComplianceAuditRecord } from "../db/mongo.js"
+import { connectMongo, getCursorsCollection, getComplianceAuditCollection, type ComplianceAuditRecord, type ComplianceAuditStatus } from "../db/mongo.js"
 
 const CURSOR_ID = "compliance_audit_events"
 const EVENT_LIMIT = 100
@@ -15,15 +15,45 @@ function address(value: xdr.ScVal | undefined): string {
   return value?.address()?.toString() ?? ""
 }
 
+function status(value: xdr.ScVal | undefined): string {
+  try { return value?.sym()?.toString() ?? "" }
+  catch { return "" }
+}
+
+function values(event: any): xdr.ScVal[] | undefined {
+  try { return event.value?.vec() }
+  catch { return undefined }
+}
+
+function isU64(value: xdr.ScVal | undefined): boolean {
+  try { return value?.u64() !== undefined }
+  catch { return false }
+}
+
 function eventAddress(event: any, eventType: string): string {
-  return address(eventType === "address_cleared" || eventType === "address_allowed_until"
-    ? event.value?.vec()?.[0]
-    : event.value)
+  const payload = values(event)
+  return address(payload?.[0] ?? event.value)
+}
+
+function eventStatus(event: any, eventType: string): ComplianceAuditStatus {
+  const payload = values(event)
+  const emittedStatus = status(payload?.[1])
+  if (emittedStatus === "Allowed" || emittedStatus === "AllowedUntil" || emittedStatus === "Blocked" || emittedStatus === "Cleared") {
+    return emittedStatus
+  }
+  if (isU64(payload?.[1])) return "AllowedUntil"
+  if (eventType === "address_allowed_until") return "AllowedUntil"
+  if (eventType === "address_blocked") return "Blocked"
+  if (eventType === "address_cleared") return "Cleared"
+  return "Allowed"
 }
 
 function eventExpiry(event: any, eventType: string): number | null {
-  if (eventType !== "address_allowed_until") return null
-  return Number(event.value?.vec()?.[1]?.u64()?.toString() ?? 0) || null
+  const payload = values(event)
+  const expiry = status(payload?.[1]) ? payload?.[2] : payload?.[1]
+  if (eventType !== "address_allowed_until" && !isU64(expiry)) return null
+  if (!isU64(expiry)) return null
+  return Number(expiry?.u64().toString()) || null
 }
 
 export function complianceEventId(event: any, eventType: string, addressValue: string): string {
@@ -66,6 +96,7 @@ export async function processComplianceIndexerBatch(
       event_id: id,
       event_type: eventType as ComplianceAuditRecord["event_type"],
       address: addressValue,
+      status: eventStatus(event, eventType),
       expires_at: eventExpiry(event, eventType),
       ledger: event.ledger ?? 0,
       ledger_closed_at: event.ledgerClosedAt ?? null,

@@ -81,14 +81,13 @@ Defined in `COMEBACKHERE-contracts/contracts/compliance/src/lib.rs`. Every state
 
 | Event topic | Emitted by | Data payload | Notes |
 | ------------- | ------------ | --------------- | ------- |
-| `address_allowed` | `allow_address` | `Address` | Permanent allow, no expiry. |
-| `address_allowed` | `batch_allow_addresses` | `(Address, u64)` — address and its `until` timestamp | One event per address processed. Same topic as `allow_address`, but the payload additionally carries the `until` value shared by the whole batch. |
-| `address_allowed_until` | `allow_address_until` | `(Address, u64)` — address and its `until` timestamp | Single-address, time-bounded allow. |
-| `address_blocked` | `block_address` | `Address` | |
-| `address_cleared` | `clear_address` | `(Address, AddressStatus)` — address and the status it held immediately before clearing | Never emitted when the address was already `Cleared` (that call fails with `AddressNotFound` instead). |
-| `compliance_batch_processed` | `batch_allow_addresses` | `(Address, u32)` — the calling admin and the number of addresses processed | Emitted once per `batch_allow_addresses` call, after all per-address `address_allowed` events for that call. Lets an indexer confirm a batch operation has fully landed (`processed_count` matches the number of `address_allowed` events it should have seen in that transaction) without treating event counting as the sole source of truth. |
+| `address_allowed` | `allow_address` | `(Address, Symbol, Option<u64>)` — address, `Allowed`, and no expiry | Permanent allow. |
+| `address_allowed_until` | `allow_address_until`, `batch_allow_addresses` | `(Address, Symbol, Option<u64>)` — address, `AllowedUntil`, and expiry | Batch allow emits one event per address. |
+| `address_blocked` | `block_address`, `batch_block_addresses` | `(Address, Symbol, Option<u64>)` — address, `Blocked`, and no expiry | Batch block emits one event per address. |
+| `address_cleared` | `clear_address` | `(Address, Symbol, Option<u64>)` — address, `Cleared`, and no expiry | Never emitted when the address was already `Cleared` (that call fails with `AddressNotFound` instead). |
+| `compliance_batch_processed` | `batch_allow_addresses` | `(Address, u32)` — the calling admin and the number of addresses processed | Emitted once per `batch_allow_addresses` call, after all per-address `address_allowed_until` events for that call. Lets an indexer confirm a batch operation has fully landed (`processed_count` matches the number of address events it should have seen in that transaction) without treating event counting as the sole source of truth. |
 
-`batch_allow_addresses` caps `addresses` at 50 entries per call (`ContractError::BatchTooLarge` above that) and validates `until` the same way `allow_address_until` does (`ContractError::PastExpiry` if `until <= env.ledger().timestamp()`). Both checks run before any storage writes or events, so a rejected call has no partial effects.
+Both batch operations cap `addresses` at 50 entries per call (`ContractError::BatchTooLarge` above that). `batch_allow_addresses` validates `until` the same way `allow_address_until` does (`ContractError::PastExpiry` if `until <= env.ledger().timestamp()`). These checks run before any storage writes or per-address events, so a rejected call has no partial effects.
 
 ---
 
@@ -114,13 +113,19 @@ Defined in `COMEBACKHERE-contracts/contracts/treasury/src/lib.rs`.
 | Code | Name | Trigger condition | Remediation |
 | ------ | ------ | ------------------- | ------------- |
 | 1 | `ContractPaused` | A state-changing call was made while the treasury is in a paused state. | Defer transactions until the admin runs `unpause`. |
-| 2 | `NotPending` | `approve_settlement` or `execute_settlement` was called on a settlement that is not in `Pending` status. | Confirm pending status with `get_pending_settlements` before approving or executing. |
+| 2 | `NotPending` | `approve_settlement`, `execute_settlement`, or `cancel_settlement` was called on a settlement that is not in `Pending` status. | Confirm pending status with `get_pending_settlements` before approving, executing, or cancelling. |
 | 3 | `InsufficientApprovals` | `execute_settlement` was called before accumulated signer weight reached the configured threshold. | Continue gathering approvals until `approval_weight ≥ threshold`, then call `execute_settlement`. |
 | 4 | `TokenNotAllowed` | `propose_settlement` was called with a token not present in the allowlist (when the allowlist is non-empty). | Admin must call `add_token_to_allowlist` for the token before settlements may be proposed against it. |
-| 5 | `Unauthorized` | Caller is not registered as a signer (for `propose_settlement`/`approve_settlement`) or not the admin (for `set_signer`, `pause`, etc). | Use a key registered via `initialize` or `set_signer`; admin-only operations require the admin key. |
+| 5 | `Unauthorized` | A caller other than the admin or proposer attempted to cancel, or an admin-only operation was called by a non-admin. | Cancel as the settlement proposer or configured admin; use the admin key for admin-only operations. |
 | 6 | `InvalidThreshold` | `update_threshold` was called with a threshold of 0. | Pass a positive `u32` threshold; the multi-sig cannot function with zero required weight. |
 | 7 | `DuplicateSigner` | `initialize` was called with the same signer address appearing more than once in the `signers` list. | Ensure every `(address, weight)` pair in the `signers` vector is unique before calling `initialize`. |
 | 8 | `InvalidWeightSum` | `initialize` was called with a `threshold` greater than the sum of all signer weights. | Lower the threshold or add signers with sufficient weight so that `sum(weights) ≥ threshold`. |
+| 9 | `NotSettlementParty` | `raise_dispute` was called by an address other than the merchant. | Sign with the merchant address associated with the settlement. |
+| 10 | `ThresholdExceedsWeight` | `update_threshold` was called with a threshold greater than the total registered signer weight. | Reduce the threshold or register enough signer weight. |
+| 11 | `InvalidPagination` | `get_pending_settlements` was called with a limit above the maximum page size. | Request no more than 100 settlements per page. |
+| 12 | `SignerNotFound` | `rotate_signer` was called with an address that is not a registered signer. | Use a current signer address as `old_signer`. |
+| 13 | `DailyLimitExceeded` | `withdraw` would exceed the configured rolling 24-hour withdrawal limit. | Wait for the window to reset or configure a higher limit. |
+| 14 | `SettlementNotFound` | `cancel_settlement` or `simulate_settlement` was called with an unknown settlement ID. | Confirm the ID returned by `propose_settlement`. |
 
 ---
 

@@ -83,6 +83,8 @@ pub enum TreasuryError {
     /// `daily_withdraw_limit` and the withdrawal would push cumulative
     /// withdrawals for the current 24h window above that limit.
     DailyLimitExceeded = 13,
+    /// The requested settlement ID does not exist.
+    SettlementNotFound = 14,
 }
 
 /// Storage keys for Treasury contract instance state.
@@ -349,6 +351,39 @@ impl TreasuryContract {
             .set(&DataKey::NextSettlementId, &(settlement_id + 1));
 
         Ok(settlement_id)
+    }
+
+    /// Cancels a pending settlement when called by its proposer or the admin.
+    pub fn cancel_settlement(
+        e: Env,
+        caller: Address,
+        settlement_id: u64,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        caller.require_auth();
+
+        let mut settlement: Settlement = e
+            .storage()
+            .instance()
+            .get(&DataKey::Settlement(settlement_id))
+            .ok_or(TreasuryError::SettlementNotFound)?;
+        if settlement.status != SettlementStatus::Pending {
+            return Err(TreasuryError::NotPending);
+        }
+        let admin: Address = e.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != settlement.proposer && caller != admin {
+            return Err(TreasuryError::Unauthorized);
+        }
+
+        settlement.status = SettlementStatus::Cancelled;
+        e.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &settlement);
+        e.events().publish(
+            (Symbol::new(&e, "settlement_cancelled"),),
+            (settlement_id, caller, SettlementStatus::Cancelled),
+        );
+        Ok(())
     }
 
     /// Casts an approval vote on a pending settlement proposal.
@@ -1010,6 +1045,84 @@ mod tests {
         c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
         let result = c.get_pending_settlements(&None, &None);
         assert_eq!(result, Vec::new(&e));
+    }
+
+    #[test]
+    fn test_proposer_can_cancel_and_record_remains_readable() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let proposer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (proposer.clone(), 1u64)], &1, &admin);
+        let settlement_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+
+        c.cancel_settlement(&proposer, &settlement_id);
+
+        let settlement = c.get_settlement(&settlement_id).unwrap();
+        assert_eq!(settlement.status, SettlementStatus::Cancelled);
+        assert_eq!(
+            c.try_approve_settlement(&proposer, &settlement_id),
+            Err(Ok(TreasuryError::NotPending))
+        );
+        assert!(!c
+            .get_pending_settlements(&None, &None)
+            .contains(&settlement_id));
+        assert!(e
+            .events()
+            .all()
+            .iter()
+            .any(|event| event.0 == (id.clone(), "settlement_cancelled".into())));
+    }
+
+    #[test]
+    fn test_admin_can_cancel_and_other_callers_are_rejected() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let proposer = soroban_sdk::Address::generate(&e);
+        let other = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (proposer.clone(), 1u64)], &1, &admin);
+        let settlement_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+
+        assert_eq!(
+            c.try_cancel_settlement(&other, &settlement_id),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
+        c.cancel_settlement(&admin, &settlement_id);
+        assert_eq!(
+            c.get_settlement(&settlement_id).unwrap().status,
+            SettlementStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn test_executed_and_disputed_settlements_cannot_be_cancelled() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let proposer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (proposer.clone(), 1u64)], &1, &admin);
+
+        let executed_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+        c.approve_settlement(&proposer, &executed_id);
+        c.execute_settlement(&proposer, &executed_id, &token);
+        assert_eq!(
+            c.try_cancel_settlement(&proposer, &executed_id),
+            Err(Ok(TreasuryError::NotPending))
+        );
+
+        let disputed_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+        c.raise_dispute(&merchant, &disputed_id, &1u32);
+        assert_eq!(
+            c.try_cancel_settlement(&proposer, &disputed_id),
+            Err(Ok(TreasuryError::NotPending))
+        );
     }
 
     #[test]
