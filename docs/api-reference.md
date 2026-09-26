@@ -105,6 +105,79 @@ Fetch the on-chain status of an invoice by its numeric ID.
 
 ---
 
+### `POST /invoices/:id/cancel`
+
+Cancel an invoice using the configured Soroban signer. Cancelling a `Pending`
+invoice changes it to `Cancelled`; cancelling a `Paid` invoice starts the
+refund flow and changes it to `RefundRequested`.
+
+**Response `200`**
+
+```json
+{ "invoice_id": "42", "status": "RefundRequested", "tx_hash": "..." }
+```
+
+| Status | Description                                      |
+| ------ | ------------------------------------------------ |
+| `400`  | Invalid invoice ID                               |
+| `403`  | Caller is not authorized to cancel the invoice   |
+| `404`  | Invoice not found                                |
+| `409`  | Invoice state does not allow cancellation        |
+| `503`  | Missing required environment variables           |
+
+### `POST /invoices/:id/refund`
+
+Request a refund for a `Paid` invoice using the configured Soroban signer.
+The response reports the updated `RefundRequested` status.
+
+**Response `200`**
+
+```json
+{ "invoice_id": "42", "status": "RefundRequested", "tx_hash": "..." }
+```
+
+| Status | Description                                          |
+| ------ | ---------------------------------------------------- |
+| `400`  | Invalid invoice ID                                   |
+| `403`  | Caller is not the invoice customer                  |
+| `404`  | Invoice not found                                    |
+| `409`  | Invoice is not `Paid` or a refund is already pending |
+| `503`  | Missing required environment variables               |
+
+---
+
+### `GET /invoices`
+
+Lists invoices, newest first. Cursor pagination is the default. Pass the
+returned `next_cursor` to fetch the next page; it is `null` when no more
+invoices are available.
+
+| Parameter | Type    | Description                                  |
+| --------- | ------- | -------------------------------------------- |
+| `cursor`  | string  | Opaque cursor from the previous response     |
+| `limit`   | integer | Page size, 1–100 (default 20)                |
+| `status`  | string  | Optional invoice status filter               |
+| `merchant` | string | Optional merchant address filter              |
+| `page`    | integer | Deprecated; use `cursor`, supported one release |
+| `offset`  | integer | Deprecated; use `cursor`, supported one release |
+
+**Cursor response `200`**
+
+```json
+{
+  "data": [],
+  "limit": 20,
+  "next_cursor": "eyJjcmVhdGVkQXQiOjE3MDAwMDAwMDAwMDAsImludm9pY2VJZCI6IjQyIn0"
+}
+```
+
+When `page` or `offset` is supplied without a cursor, the legacy response
+metadata (`total`, `page`, `limit`, `totalPages`, and `offset`) remains
+available during the deprecation period. Legacy parameters cannot be combined
+with a cursor.
+
+---
+
 ### `POST /invoices`
 
 Create a new invoice by submitting `create_invoice` to the Soroban RPC.
@@ -837,6 +910,17 @@ function verifyWebhook(
 Always use a **constant-time comparison** (e.g. `crypto.timingSafeEqual`) when
 comparing signatures to prevent timing side-channel attacks.
 
+### Dead-letter operations
+
+Failed webhook deliveries are retained in MongoDB's `webhook_dead_letters`
+collection with the target URL, original payload, final error, and attempt
+history. These operator endpoints require `x-admin-key`:
+
+| Method and path | Description |
+| --------------- | ----------- |
+| `GET /webhooks/dead-letters` | List the latest 100 permanently failed deliveries |
+| `POST /webhooks/dead-letters/:id/replay` | Retry one delivery by its idempotency key; remove the dead letter only on success |
+
 ### Webhook event payload shape
 
 All events share a common `event` field plus event-specific fields:
@@ -933,5 +1017,9 @@ handlers are wrapped in `asyncHandler` so rejected promises reach it.
 | `NETWORK_PASSPHRASE`   | Stellar network passphrase                                |
 | `WEBHOOK_URL`          | Merchant webhook endpoint URL                             |
 | `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 signing secret for outbound webhooks        |
+| `WEBHOOK_MAX_ATTEMPTS` | Maximum webhook attempts (default `5`)                     |
+| `WEBHOOK_BASE_DELAY_MS` | Initial retry delay in ms (default `1000`)                 |
+| `WEBHOOK_MAX_DELAY_MS` | Maximum backoff delay in ms (default `60000`)               |
+| `WEBHOOK_JITTER_RATIO` | Retry jitter from `0` to `1` (default `0.2`)                |
 | `PORT`                 | HTTP server port (default `3000`)                         |
 | `CORS_ORIGINS`         | Comma-separated allowlist of browser origins, e.g. `http://localhost:5173,https://app.example.com`. Bare origins only (no path, trailing slash or `*`); invalid entries fail startup. Unset = no cross-origin access. |

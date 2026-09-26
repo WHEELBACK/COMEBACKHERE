@@ -19,6 +19,10 @@ the configuration environment variables.
 | ------------------------ | ---------------------------------------------------------------------- |
 | `WEBHOOK_URL`            | Your endpoint that receives `POST` requests from the backend           |
 | `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 signing secret (minimum 32 characters recommended)         |
+| `WEBHOOK_MAX_ATTEMPTS`   | Maximum delivery attempts (default `5`)                                 |
+| `WEBHOOK_BASE_DELAY_MS`  | Initial retry delay in milliseconds (default `1000`)                    |
+| `WEBHOOK_MAX_DELAY_MS`   | Maximum exponential backoff delay in milliseconds (default `60000`)     |
+| `WEBHOOK_JITTER_RATIO`   | Randomized delay variation from `0` to `1` (default `0.2`)              |
 
 If `WEBHOOK_URL` is not set, webhook delivery is skipped silently — no error is
 logged and no retries are attempted.
@@ -281,24 +285,29 @@ or a network error occurs (connection refused, timeout, etc.).
 
 | Parameter          | Value                                              |
 | ------------------ | -------------------------------------------------- |
-| Maximum attempts   | **5**                                              |
-| Base delay         | **1 000 ms** (1 second)                            |
-| Backoff formula    | `delay = base_delay × 2^attempt` (zero-indexed)    |
+| Maximum attempts   | **5** by default; configurable with `WEBHOOK_MAX_ATTEMPTS` |
+| Base delay         | **1 000 ms** by default; configurable with `WEBHOOK_BASE_DELAY_MS` |
+| Maximum delay      | **60 000 ms** by default; configurable with `WEBHOOK_MAX_DELAY_MS` |
+| Jitter             | **±20%** by default; configurable with `WEBHOOK_JITTER_RATIO` |
+| Backoff formula    | `min(max_delay, base_delay × 2^attempt)`, with jitter |
 | Request timeout    | **10 000 ms** (10 seconds) per attempt             |
 
 ### Retry schedule (default)
 
-| Attempt | Delay before attempt | Cumulative wait |
-| ------- | -------------------- | --------------- |
-| 1       | 0 ms (immediate)     | 0 s             |
-| 2       | 1 000 ms             | 1 s             |
-| 3       | 2 000 ms             | 3 s             |
-| 4       | 4 000 ms             | 7 s             |
-| 5       | 8 000 ms             | 15 s            |
+| Attempt | Nominal delay before attempt | Cumulative wait |
+| ------- | ---------------------------- | --------------- |
+| 1       | 0 ms (immediate)             | 0 s             |
+| 2       | 1 000 ms (±20%)              | about 1 s        |
+| 3       | 2 000 ms (±20%)              | about 3 s        |
+| 4       | 4 000 ms (±20%)              | about 7 s        |
+| 5       | 8 000 ms (±20%)              | about 15 s       |
 
-After all 5 attempts are exhausted the delivery record is marked `failed` and
-no further retries occur. A delivery error is logged with the idempotency key,
-endpoint URL, and last error message.
+After all configured attempts are exhausted the delivery record is marked `failed` and
+the full record is saved in MongoDB's `webhook_dead_letters` collection. It
+includes the payload, endpoint, final error, and timestamped attempt history.
+Administrators can inspect dead letters with `GET /webhooks/dead-letters` and
+replay one with `POST /webhooks/dead-letters/:id/replay`; both require the
+`x-admin-key` header. A letter is removed only after replay succeeds.
 
 ### Delivery record fields
 
@@ -314,6 +323,7 @@ The backend maintains an internal delivery record for every webhook event:
 | `last_status_code`  | number \| null   | HTTP status returned by the last attempt          |
 | `last_error`        | string \| null   | Error message from the last failed attempt        |
 | `request_id`        | string \| null   | Correlation ID forwarded as `X-Request-Id`        |
+| `attempt_history`   | array            | Timestamp, status code, and error for every attempt |
 
 ---
 

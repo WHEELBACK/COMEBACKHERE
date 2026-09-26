@@ -2,6 +2,7 @@ import express from "express"
 import helmet from "helmet"
 import swaggerUi from "swagger-ui-express"
 import invoicesRouter from "./routes/invoices.js"
+import invoiceActionsRouter from "./routes/invoice-actions.js"
 import complianceRouter from "./routes/compliance.js"
 import releaseEscrowRouter from "./routes/release-escrow.js"
 import treasuryRouter from "./routes/treasury.js"
@@ -9,6 +10,7 @@ import invoiceSettingsRouter from "./routes/invoice-settings.js"
 import thresholdRouter from "./routes/threshold.js"
 import disputesRouter from "./routes/disputes.js"
 import analyticsRouter from "./routes/analytics.js"
+import webhookDeadLettersRouter from "./routes/webhook-dead-letters.js"
 import { startComplianceIndexer } from "./services/compliance-indexer.js"
 import { rateLimitMiddleware } from "./middleware/rateLimiter.js"
 import { correlationIdMiddleware } from "./middleware/correlationId.js"
@@ -96,6 +98,7 @@ export function createApp(options: CreateAppOptions = {}) {
 
   // ── Application routes ──────────────────────────────────────────────────────
   app.use("/invoices", invoicesRouter)
+  app.use("/invoices", invoiceActionsRouter)
   app.use("/invoices", releaseEscrowRouter)
   app.use("/compliance", complianceRouter)
   app.use("/api/treasury", treasuryRouter)
@@ -103,6 +106,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use("/api/treasury", thresholdRouter)
   app.use("/disputes", disputesRouter)
   app.use("/api/analytics", analyticsRouter)
+  app.use("/webhooks/dead-letters", webhookDeadLettersRouter)
 
   // ── Errors ──────────────────────────────────────────────────────────────────
   // Everything below produces { error: { code, message, details, correlationId } }

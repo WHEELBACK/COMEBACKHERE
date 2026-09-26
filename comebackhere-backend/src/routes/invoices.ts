@@ -5,8 +5,8 @@ import { connectMongo, getInvoicesCollection, type InvoiceRecord, type InvoiceSt
 import { requireEnv } from "../lib/env.js"
 import { asyncHandler, NotFoundError } from "../lib/errors.js"
 import { cacheGet, cacheSet } from "../lib/cache.js"
-import { validateBody, validateParams } from "../middleware/validate.js"
-import { createInvoiceSchema, invoiceIdParamSchema } from "../schemas/index.js"
+import { validateBody, validateParams, validateQuery } from "../middleware/validate.js"
+import { createInvoiceSchema, invoiceIdParamSchema, invoiceListQuerySchema } from "../schemas/index.js"
 
 const router = Router()
 
@@ -134,6 +134,36 @@ export function buildListFilter(filters: ListFilters): Record<string, unknown> {
   if (filters.status) filter.status = filters.status
   if (filters.merchant) filter.merchant_address = filters.merchant
   return filter
+}
+
+interface InvoiceCursor {
+  createdAt: number
+  invoiceId: string
+}
+
+export function encodeInvoiceCursor(invoice: Pick<InvoiceRecord, "created_at" | "invoice_id">): string {
+  const createdAt = invoice.created_at instanceof Date
+    ? invoice.created_at.getTime()
+    : Number(invoice.created_at)
+  return Buffer.from(JSON.stringify({ createdAt, invoiceId: invoice.invoice_id })).toString("base64url")
+}
+
+export function decodeInvoiceCursor(cursor: string): InvoiceCursor {
+  try {
+    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Partial<InvoiceCursor>
+    if (
+      !Number.isSafeInteger(decoded.createdAt) ||
+      decoded.createdAt! < 0 ||
+      Number.isNaN(new Date(decoded.createdAt!).getTime()) ||
+      typeof decoded.invoiceId !== "string" ||
+      !decoded.invoiceId
+    ) {
+      throw new Error("invalid cursor payload")
+    }
+    return { createdAt: decoded.createdAt!, invoiceId: decoded.invoiceId }
+  } catch {
+    throw Object.assign(new Error("cursor is invalid"), { status: 400 })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -319,15 +349,31 @@ router.get("/export.csv", async (req: Request, res: Response) => {
  *     summary: List invoices with pagination and filtering
  *     parameters:
  *       - in: query
- *         name: page
+ *         name: cursor
+ *         description: Opaque cursor returned as next_cursor; omit it for the first page.
  *         schema:
- *           type: integer
- *           default: 1
+ *           type: string
  *       - in: query
  *         name: limit
  *         schema:
  *           type: integer
  *           default: 20
+ *           minimum: 1
+ *           maximum: 100
+ *       - in: query
+ *         name: page
+ *         deprecated: true
+ *         description: Deprecated; use cursor instead. Supported for one release.
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: offset
+ *         deprecated: true
+ *         description: Deprecated; use cursor instead. Supported for one release.
+ *         schema:
+ *           type: integer
+ *           minimum: 0
  *       - in: query
  *         name: status
  *         schema:
@@ -351,56 +397,70 @@ router.get("/export.csv", async (req: Request, res: Response) => {
  *                     $ref: '#/components/schemas/Invoice'
  *                 total:
  *                   type: integer
+ *                   description: Deprecated pagination metadata; returned only with page or offset.
  *                 page:
  *                   type: integer
+ *                   description: Deprecated; returned only with page or offset.
  *                 limit:
  *                   type: integer
  *                 totalPages:
  *                   type: integer
+ *                   description: Deprecated; returned only with page or offset.
+ *                 offset:
+ *                   type: integer
+ *                   description: Deprecated; returned only with page or offset.
+ *                 next_cursor:
+ *                   type: string
+ *                   nullable: true
  */
-router.get("/", asyncHandler(async (req: Request, res: Response) => {
-  const page = Math.max(1, parseInt(req.query.page as string, 10) || 1)
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20))
+router.get("/", validateQuery(invoiceListQuerySchema), asyncHandler(async (req: Request, res: Response) => {
+  const query = invoiceListQuerySchema.parse(req.query)
+  const page = query.page ? Number(query.page) : 1
+  const limit = Math.min(100, query.limit ? Number(query.limit) : 20)
+  const legacyPagination = !query.cursor && (query.page !== undefined || query.offset !== undefined)
+  const offset = query.offset !== undefined ? Number(query.offset) : (page - 1) * limit
   const { status, merchant: merchantFilter } = parseListFilters(req.query)
+  const merchant = merchantFilter ?? (typeof req.query.merchant_address === "string" ? req.query.merchant_address : undefined)
+  const cursor = query.cursor ? decodeInvoiceCursor(query.cursor) : undefined
 
-  const cacheKey = `invoices:${page}:${limit}:${status ?? "all"}:${merchantFilter ?? "all"}`
+  const pageKey = legacyPagination ? `legacy-${page}-${offset}` : `cursor-${query.cursor ?? "first"}`
+  const cacheKey = `invoices:${pageKey}:${limit}:${status ?? "all"}:${merchant ?? "all"}`
 
-  const cached = await cacheGet<{ data: InvoiceRecord[]; total: number; page: number; limit: number; totalPages: number }>(cacheKey)
+  const cached = await cacheGet<Record<string, unknown>>(cacheKey)
   if (cached) {
     res.json(cached)
     return
   }
 
-  try {
-    const db = await connectMongo()
-    const collection = getInvoicesCollection(db)
+  const db = await connectMongo()
+  const collection = getInvoicesCollection(db)
 
-    const filter = buildListFilter({ status, merchant: merchantFilter })
+  const filter = buildListFilter({ status, merchant })
+  const pageFilter: Record<string, unknown> = cursor
+    ? {
+        $and: [
+          filter,
+          {
+            $or: [
+              { created_at: { $lt: new Date(cursor.createdAt) } },
+              { created_at: new Date(cursor.createdAt), invoice_id: { $lt: cursor.invoiceId } },
+            ],
+          },
+        ],
+      }
+    : filter
 
+  let findCursor = collection.find(pageFilter).sort({ created_at: -1, invoice_id: -1 })
+  if (legacyPagination) findCursor = findCursor.skip(offset)
+  const rows = await findCursor.limit(limit + 1).toArray()
+  const hasMore = rows.length > limit
+  const data = rows.slice(0, limit)
+  const next_cursor = hasMore && data.length > 0 ? encodeInvoiceCursor(data[data.length - 1]) : null
+  const result: Record<string, unknown> = { data, limit, next_cursor }
+
+  if (legacyPagination) {
     const total = await collection.countDocuments(filter)
-    const totalPages = Math.ceil(total / limit)
-    const skip = (page - 1) * limit
-
-    const data = await collection
-      .find(filter)
-      .sort({ created_at: -1 })
-      .skip(skip)
-      .limit(limit)
-      .toArray()
-
-    const result = {
-      data,
-      total,
-      page,
-      limit,
-      totalPages,
-    }
-
-    await cacheSet(cacheKey, result, 30)
-    res.json(result)
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(500).json({ error: message })
+    Object.assign(result, { total, page, totalPages: Math.ceil(total / limit), offset })
   }
 
   await cacheSet(cacheKey, result, 30)

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import request from "supertest"
 import { createApp } from "../app.js"
-import { createInvoice, type SorobanClient } from "../routes/invoices.js"
+import { createInvoice, decodeInvoiceCursor, type SorobanClient } from "../routes/invoices.js"
 import { SorobanRpc, SorobanDataBuilder, xdr } from "stellar-sdk"
 import * as mongoModule from "../db/mongo.js"
 
@@ -217,7 +217,7 @@ describe("GET /invoices — pagination", () => {
     token: "USDC",
     amount: "1000000",
     status: "Pending",
-    created_at: 1_700_000_000 - n * 1000,
+    created_at: new Date((1_700_000_000 - n * 1000) * 1000),
     expires_at: 1_700_100_000,
     paid_at: null,
     tx_hash: null,
@@ -263,12 +263,12 @@ describe("GET /invoices — pagination", () => {
     vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
     vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(col as any)
 
-    const res = await request(app).get("/invoices")
+    const res = await request(app).get("/invoices?page=1")
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ total: 35, limit: 20, offset: 0 })
     expect(res.body.data).toHaveLength(20)
     expect(col._cursor.skip).toHaveBeenCalledWith(0)
-    expect(col._cursor.limit).toHaveBeenCalledWith(20)
+    expect(col._cursor.limit).toHaveBeenCalledWith(21)
   })
 
   it("respects limit param", async () => {
@@ -278,11 +278,11 @@ describe("GET /invoices — pagination", () => {
     vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
     vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(col as any)
 
-    const res = await request(app).get("/invoices?limit=5")
+    const res = await request(app).get("/invoices?page=1&limit=5")
     expect(res.status).toBe(200)
     expect(res.body.limit).toBe(5)
     expect(res.body.data).toHaveLength(5)
-    expect(col._cursor.limit).toHaveBeenCalledWith(5)
+    expect(col._cursor.limit).toHaveBeenCalledWith(6)
   })
 
   it("respects offset param", async () => {
@@ -304,10 +304,10 @@ describe("GET /invoices — pagination", () => {
     vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
     vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(col as any)
 
-    const res = await request(app).get("/invoices?limit=9999")
+    const res = await request(app).get("/invoices?page=1&limit=9999")
     expect(res.status).toBe(200)
     // limit is capped at 100 internally
-    expect(col._cursor.limit).toHaveBeenCalledWith(100)
+    expect(col._cursor.limit).toHaveBeenCalledWith(101)
   })
 
   it("400 when limit is not a positive integer", async () => {
@@ -334,7 +334,7 @@ describe("GET /invoices — pagination", () => {
     vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
     vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(col as any)
 
-    const res = await request(app).get("/invoices")
+    const res = await request(app).get("/invoices?page=1")
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ data: [], total: 0, limit: 20, offset: 0 })
   })
@@ -359,6 +359,35 @@ describe("GET /invoices — pagination", () => {
     expect(col.find).toHaveBeenCalledWith(
       expect.objectContaining({ merchant_address: MERCHANT_ADDRESS }),
     )
+  })
+
+  it("pages through every invoice with opaque cursors and no skip", async () => {
+    const col = mockCollection(ALL_INVOICES.slice(0, 21), 35)
+    col._cursor.toArray
+      .mockResolvedValueOnce(ALL_INVOICES.slice(0, 21))
+      .mockResolvedValueOnce(ALL_INVOICES.slice(20))
+
+    vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
+    vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(col as any)
+
+    const first = await request(app).get("/invoices?limit=20&merchant=cursor-check")
+    expect(first.status).toBe(200)
+    expect(first.body.data).toHaveLength(20)
+    expect(first.body.next_cursor).toEqual(expect.any(String))
+    expect(decodeInvoiceCursor(first.body.next_cursor).invoiceId).toBe(first.body.data[19].invoice_id)
+    expect(col._cursor.skip).not.toHaveBeenCalled()
+
+    const second = await request(app)
+      .get(`/invoices?limit=20&merchant=cursor-check&cursor=${encodeURIComponent(first.body.next_cursor)}`)
+    expect(second.status).toBe(200)
+    expect(second.body.data).toHaveLength(15)
+    expect(second.body.next_cursor).toBeNull()
+    expect(col._cursor.skip).not.toHaveBeenCalled()
+  })
+
+  it("400 when a cursor cannot be decoded", async () => {
+    const res = await request(app).get("/invoices?cursor=not-a-valid-cursor!")
+    expect(res.status).toBe(400)
   })
 
   it("500 on database error", async () => {

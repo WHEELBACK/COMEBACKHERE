@@ -15,6 +15,7 @@
  */
 
 import { connectMongo } from "../db/mongo.js"
+import { getWebhookRetryConfig, type WebhookRetryConfig } from "../lib/env.js"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -46,6 +47,18 @@ export interface WebhookDeliveryRecord {
   last_error: string | null
   /** Correlation ID forwarded as `X-Request-Id`, or null when none was supplied. */
   request_id: string | null
+  attempt_history: WebhookAttemptRecord[]
+}
+
+export interface WebhookAttemptRecord {
+  attempt: number
+  attempted_at: string
+  status_code: number | null
+  error: string | null
+}
+
+export interface WebhookDeadLetterRecord extends WebhookDeliveryRecord {
+  failed_at: string
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +68,8 @@ export interface WebhookDeliveryRecord {
 export const DEFAULT_MAX_ATTEMPTS = 5
 /** Base delay in ms for exponential backoff: delay = BASE_DELAY_MS * 2^attempt */
 export const BASE_DELAY_MS = 1_000
+export const MAX_DELAY_MS = 60_000
+export const DEFAULT_JITTER_RATIO = 0.2
 
 // ---------------------------------------------------------------------------
 // Internal: single HTTP post with a timeout
@@ -131,9 +146,22 @@ export async function deliverWebhook(
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
   fetchFn: typeof fetch = fetch,
   delayFn: (ms: number) => Promise<void> = defaultDelay,
-  correlationId?: string,
+  correlationIdOrOptions?: string | WebhookDeliveryOptions,
 ): Promise<WebhookDeliveryRecord> {
-  const { signal, startAttempt = 0, onAttempt } = options
+  const options: WebhookDeliveryOptions = typeof correlationIdOrOptions === "string"
+    ? { correlationId: correlationIdOrOptions }
+    : correlationIdOrOptions ?? {}
+  const {
+    signal,
+    startAttempt = 0,
+    onAttempt,
+    correlationId,
+    baseDelayMs = BASE_DELAY_MS,
+    maxDelayMs = MAX_DELAY_MS,
+    jitterRatio = DEFAULT_JITTER_RATIO,
+    randomFn = Math.random,
+    attemptHistory = [],
+  } = options
   const record: WebhookDeliveryRecord = {
     idempotency_key: payload.idempotency_key,
     endpoint,
@@ -144,41 +172,48 @@ export async function deliverWebhook(
     last_status_code: null,
     last_error: null,
     request_id: correlationId ?? null,
+    attempt_history: attemptHistory,
   }
 
   for (let attempt = startAttempt; attempt < maxAttempts; attempt++) {
-    // Shutting down — leave the record "pending" so the caller can persist it.
     if (signal?.aborted) return record
 
     onAttempt?.(attempt + 1)
     record.attempts = attempt + 1
     record.last_attempt_at = new Date().toISOString()
+    const attemptRecord: WebhookAttemptRecord = {
+      attempt: attempt + 1,
+      attempted_at: record.last_attempt_at,
+      status_code: null,
+      error: null,
+    }
+    record.attempt_history.push(attemptRecord)
 
     try {
       const statusCode = await postWebhook(endpoint, payload, fetchFn, undefined, correlationId)
       record.last_status_code = statusCode
+      attemptRecord.status_code = statusCode
 
       if (statusCode >= 200 && statusCode < 300) {
         record.status = "delivered"
         return record
       }
 
-      // Non-2xx response — treat as a retryable failure
       record.last_error = `HTTP ${statusCode}`
+      attemptRecord.error = record.last_error
     } catch (err) {
       record.last_error = err instanceof Error ? err.message : String(err)
       record.last_status_code = null
+      attemptRecord.error = record.last_error
     }
 
-    // Apply exponential backoff before the next attempt (skip after last attempt)
-    const isLastAttempt = attempt === maxAttempts - 1
-    if (!isLastAttempt) {
-      const backoffMs = BASE_DELAY_MS * Math.pow(2, attempt)
-      await delayFn(backoffMs)
+    if (attempt !== maxAttempts - 1) {
+      const exponential = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attempt))
+      const jitterMultiplier = 1 - jitterRatio + randomFn() * 2 * jitterRatio
+      await delayFn(Math.min(maxDelayMs, Math.max(0, Math.round(exponential * jitterMultiplier))))
     }
   }
 
-  // All attempts exhausted — record terminal failure
   record.status = "failed"
   console.error(
     `[webhook] delivery failed after ${record.attempts} attempt(s) ` +
@@ -186,6 +221,18 @@ export async function deliverWebhook(
     `endpoint=${endpoint} last_error=${record.last_error}`,
   )
   return record
+}
+
+export interface WebhookDeliveryOptions {
+  signal?: AbortSignal
+  startAttempt?: number
+  onAttempt?: (attempt: number) => void
+  correlationId?: string
+  baseDelayMs?: number
+  maxDelayMs?: number
+  jitterRatio?: number
+  randomFn?: () => number
+  attemptHistory?: WebhookAttemptRecord[]
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +262,6 @@ export function buildWebhookPayload(
   }
 }
 
-// ---------------------------------------------------------------------------
 // Delivery queue with graceful drain
 // ---------------------------------------------------------------------------
 
@@ -225,6 +271,7 @@ export interface WebhookDeliveryJob {
   payload: WebhookPayload
   /** Attempts already made; a resumed job continues from here. */
   attempts: number
+  attempt_history?: WebhookAttemptRecord[]
 }
 
 /** Durable storage for deliveries that did not finish before shutdown. */
@@ -232,6 +279,57 @@ export interface PendingDeliveryStore {
   save(jobs: WebhookDeliveryJob[]): Promise<void>
   /** Returns every stored job and removes it from the store. */
   takeAll(): Promise<WebhookDeliveryJob[]>
+}
+
+export interface DeadLetterStore {
+  save(record: WebhookDeliveryRecord): Promise<void>
+  find(idempotencyKey: string): Promise<WebhookDeadLetterRecord | null>
+  list(limit: number): Promise<WebhookDeadLetterRecord[]>
+  delete(idempotencyKey: string): Promise<void>
+}
+
+/** MongoDB-backed terminal failure store, keyed by the delivery idempotency key. */
+export function createMongoDeadLetterStore(): DeadLetterStore {
+  return {
+    async save(record) {
+      const database = await connectMongo()
+      const deadLetter = {
+        ...record,
+        failed_at: new Date().toISOString(),
+        _id: record.idempotency_key,
+      }
+      await database.collection<WebhookDeadLetterRecord & { _id: string }>("webhook_dead_letters").replaceOne(
+        { _id: record.idempotency_key },
+        deadLetter,
+        { upsert: true },
+      )
+    },
+    async find(idempotencyKey) {
+      const database = await connectMongo()
+      const record = await database.collection<WebhookDeadLetterRecord & { _id: string }>("webhook_dead_letters")
+        .findOne({ _id: idempotencyKey })
+      if (!record) return null
+      const { _id, ...deadLetter } = record
+      void _id
+      return deadLetter
+    },
+    async list(limit) {
+      const database = await connectMongo()
+      const records = await database.collection<WebhookDeadLetterRecord & { _id: string }>("webhook_dead_letters")
+        .find()
+        .sort({ failed_at: -1 })
+        .limit(limit)
+        .toArray()
+      return records.map(({ _id, ...record }) => {
+        void _id
+        return record
+      })
+    },
+    async delete(idempotencyKey) {
+      const database = await connectMongo()
+      await database.collection("webhook_dead_letters").deleteOne({ _id: idempotencyKey })
+    },
+  }
 }
 
 const PENDING_DELIVERIES_COLLECTION = "webhook_pending_deliveries"
@@ -263,7 +361,7 @@ export function createMongoPendingDeliveryStore(): PendingDeliveryStore {
       if (docs.length > 0) {
         await collection.deleteMany({ _id: { $in: docs.map((d) => d._id) } })
       }
-      return docs.map(({ endpoint, payload, attempts }) => ({ endpoint, payload, attempts }))
+      return docs.map(({ endpoint, payload, attempts, attempt_history }) => ({ endpoint, payload, attempts, attempt_history }))
     },
   }
 }
@@ -287,9 +385,11 @@ function abortableDelay(
 
 export interface WebhookDeliveryQueueOptions {
   store?: PendingDeliveryStore
+  deadLetterStore?: DeadLetterStore
   maxAttempts?: number
   fetchFn?: typeof fetch
   delayFn?: (ms: number) => Promise<void>
+  retryConfig?: Partial<WebhookRetryConfig>
 }
 
 export interface DrainResult {
@@ -307,13 +407,17 @@ export class WebhookDeliveryQueue {
   /** Jobs submitted after shutdown began; persisted rather than started. */
   private deferred: WebhookDeliveryJob[] = []
   private readonly store: PendingDeliveryStore
+  private readonly deadLetterStore: DeadLetterStore
   private readonly maxAttempts: number
+  private readonly retryConfig: WebhookRetryConfig
   private readonly fetchFn: typeof fetch
   private readonly delayFn: (ms: number) => Promise<void>
 
   constructor(options: WebhookDeliveryQueueOptions = {}) {
+    this.retryConfig = { ...getWebhookRetryConfig(), ...options.retryConfig }
     this.store = options.store ?? createMongoPendingDeliveryStore()
-    this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
+    this.deadLetterStore = options.deadLetterStore ?? createMongoDeadLetterStore()
+    this.maxAttempts = options.maxAttempts ?? this.retryConfig.maxAttempts
     this.fetchFn = options.fetchFn ?? ((...args) => fetch(...args))
     this.delayFn = options.delayFn ?? defaultDelay
   }
@@ -335,8 +439,9 @@ export class WebhookDeliveryQueue {
     endpoint: string,
     payload: WebhookPayload,
     attempts = 0,
+    attemptHistory: WebhookAttemptRecord[] = [],
   ): Promise<WebhookDeliveryRecord> | null {
-    const job: WebhookDeliveryJob = { endpoint, payload, attempts }
+    const job: WebhookDeliveryJob = { endpoint, payload, attempts, attempt_history: attemptHistory }
 
     if (!this.accepting) {
       console.warn(
@@ -361,13 +466,26 @@ export class WebhookDeliveryQueue {
       {
         signal: this.abort.signal,
         startAttempt: attempts,
+        attemptHistory,
+        ...this.retryConfig,
         onAttempt: (n) => {
           job.attempts = n
         },
       },
-    ).then((record) => {
+    ).then(async (record) => {
       // A "pending" record was interrupted by drain; keep it tracked so it is
       // persisted. Finished deliveries (delivered/failed) are dropped.
+      if (record.status === "pending") {
+        job.attempts = record.attempts
+        job.attempt_history = record.attempt_history
+      }
+      if (record.status === "failed") {
+        try {
+          await this.deadLetterStore.save(record)
+        } catch (err: unknown) {
+          console.error("[webhook] failed to save dead letter:", err instanceof Error ? err.message : err)
+        }
+      }
       if (record.status !== "pending") this.active.delete(entry)
       return record
     })
@@ -423,11 +541,26 @@ export class WebhookDeliveryQueue {
   /** Re-enqueues deliveries persisted by a previous process. */
   async resumePending(): Promise<number> {
     const jobs = await this.store.takeAll()
-    for (const job of jobs) this.enqueue(job.endpoint, job.payload, job.attempts)
+    for (const job of jobs) this.enqueue(job.endpoint, job.payload, job.attempts, job.attempt_history)
     if (jobs.length > 0) {
       console.log(`[webhook] resumed ${jobs.length} persisted deliver${jobs.length === 1 ? "y" : "ies"}`)
     }
     return jobs.length
+  }
+
+  listDeadLetters(limit = 100): Promise<WebhookDeadLetterRecord[]> {
+    return this.deadLetterStore.list(Math.max(1, Math.min(100, limit)))
+  }
+
+  /** Replays a dead letter, retaining it unless the delivery succeeds. */
+  async replayDeadLetter(idempotencyKey: string): Promise<WebhookDeliveryRecord | null> {
+    const deadLetter = await this.deadLetterStore.find(idempotencyKey)
+    if (!deadLetter) return null
+    const delivery = this.enqueue(deadLetter.endpoint, deadLetter.payload, 0, deadLetter.attempt_history)
+    if (!delivery) return null
+    const result = await delivery
+    if (result.status === "delivered") await this.deadLetterStore.delete(idempotencyKey)
+    return result
   }
 
   private async persist(jobs: WebhookDeliveryJob[]): Promise<void> {

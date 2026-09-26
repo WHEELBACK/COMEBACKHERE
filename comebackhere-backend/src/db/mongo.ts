@@ -182,6 +182,7 @@ export async function connectMongo(): Promise<Db> {
   await invoices.createIndex({ merchant_address: 1 })
   await invoices.createIndex({ status: 1, merchant_address: 1 })
   await invoices.createIndex({ created_at: -1 })
+  await invoices.createIndex({ created_at: -1, invoice_id: -1 })
 
   const cursors = db.collection<IndexerCursor>("indexer_cursors")
   await cursors.createIndex({ _id: 1 }, { unique: true })
@@ -189,6 +190,8 @@ export async function connectMongo(): Promise<Db> {
   const invoiceEvents = db.collection<InvoiceEventRecord>("invoice_events")
   await invoiceEvents.createIndex({ event_id: 1 }, { unique: true })
   await invoiceEvents.createIndex({ invoice_id: 1, ledger: 1 })
+
+  await db.collection("webhook_dead_letters").createIndex({ failed_at: -1 })
 
   const complianceAudit = db.collection<ComplianceAuditRecord>("compliance_audit")
   await complianceAudit.createIndex({ event_id: 1 }, { unique: true })
