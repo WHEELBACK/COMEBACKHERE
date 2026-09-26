@@ -98,3 +98,6 @@ comebackhere-backend/coverage/
 
 # Playwright state
 playwright/.auth/
+
+# Playwright screenshots (generated during e2e runs)
+**/e2e/screenshots/
