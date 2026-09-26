@@ -3,12 +3,15 @@
 mod events;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, String, Symbol,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, IntoVal, String,
+    Symbol, Vec,
 };
 
 /// Maximum length, in bytes, allowed for the optional `reference` field on an invoice.
 const MAX_REFERENCE_LEN: u32 = 64;
+
+/// Maximum number of invoice IDs accepted by a single batch operation.
+const MAX_BATCH_SIZE: u32 = 50;
 
 /// Minimum invoice amount, in stroops (10,000,000 stroops == 1 USDC given 7 decimals).
 const MIN_AMOUNT_USDC: i128 = 10_000_000;
@@ -38,6 +41,8 @@ pub enum ContractError {
     /// (e.g. `mark_paids` called on an invoice that is `RefundRequested`,
     /// `Released`, `Cancelled`, or `Expired`).
     InvalidStateTransition = 18,
+    /// A batch operation was called with more than `MAX_BATCH_SIZE` invoice IDs.
+    BatchTooLarge = 19,
 }
 
 #[contracttype]
@@ -116,6 +121,17 @@ pub struct InvoiceContract;
 
 #[contractimpl]
 impl InvoiceContract {
+    /// Replaces this contract's Wasm while preserving its address and storage.
+    /// The stored admin must authorize the call.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+        let contract_admin = admin(&env);
+        contract_admin.require_auth();
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        events::upgraded(&env, new_wasm_hash);
+        Ok(())
+    }
+
     /// Initialises the contract, setting the admin address and default configuration.
     ///
     /// # Parameters
@@ -335,6 +351,7 @@ impl InvoiceContract {
     /// # Errors
     /// - [`ContractError::ContractPaused`] if the contract is currently paused.
     /// - [`ContractError::InvoiceNotFound`] if any ID in the batch does not exist.
+    /// - [`ContractError::BatchTooLarge`] if `invoice_ids` has more than `MAX_BATCH_SIZE` IDs.
     /// - [`ContractError::InvalidStateTransition`] if any invoice is `RefundRequested`,
     ///   `Released`, `Cancelled`, or `Expired` — a payment confirmation must never
     ///   silently override a refund already in progress or a closed invoice.
@@ -345,6 +362,9 @@ impl InvoiceContract {
     /// Emits `invoice_paid(invoice_id)` for each successfully marked invoice.
     pub fn mark_paids(env: Env, invoice_ids: Vec<u64>) -> Result<(), ContractError> {
         check_not_paused(&env)?;
+        if invoice_ids.len() > MAX_BATCH_SIZE {
+            return Err(ContractError::BatchTooLarge);
+        }
 
         // Resolve compliance contract once; if set, every invoice
         // customer must be allowed.
@@ -573,11 +593,15 @@ impl InvoiceContract {
     /// # Errors
     /// - [`ContractError::ContractPaused`] if the contract is currently paused.
     /// - [`ContractError::InvoiceNotFound`] if any ID in the batch does not exist.
+    /// - [`ContractError::BatchTooLarge`] if `invoice_ids` has more than `MAX_BATCH_SIZE` IDs.
     ///
     /// # Events
     /// Emits `invoice_expired(invoice_id)` for each invoice that transitions to `Expired`.
     pub fn batch_expire(env: Env, invoice_ids: Vec<u64>) -> Result<(), ContractError> {
         check_not_paused(&env)?;
+        if invoice_ids.len() > MAX_BATCH_SIZE {
+            return Err(ContractError::BatchTooLarge);
+        }
         let now = env.ledger().timestamp();
         for id in invoice_ids.iter() {
             let mut invoice = env

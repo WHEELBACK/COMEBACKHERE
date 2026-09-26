@@ -54,6 +54,13 @@ def invoice_events() -> list[str]:
     return re.findall(r'Symbol::new\([^,]+,\s*"([^"]+)"\)', events_rs)
 
 
+def contract_events(crate_dir: str) -> list[str]:
+    lib = CONTRACTS_ROOT / "contracts" / crate_dir / "src" / "lib.rs"
+    text = lib.read_text(encoding="utf-8")
+    events = re.findall(r'Symbol::new\([^,]+,\s*"([^"]+)"\)', text)
+    return list(dict.fromkeys(events))
+
+
 def format_invoice(payload: dict) -> str:
     functions = ",\n    ".join(f'"{name}"' for name in payload["functions"])
     events = ", ".join(f'"{name}"' for name in payload["events"])
@@ -69,11 +76,13 @@ def format_invoice(payload: dict) -> str:
 
 def format_treasury(payload: dict) -> str:
     functions = ",\n    ".join(f'"{name}"' for name in payload["functions"])
+    events = ", ".join(f'"{name}"' for name in payload["events"])
     return (
         "{\n"
         f'  "contract": "{payload["contract"]}",\n'
         f'  "version": "{payload["version"]}",\n'
         f'  "functions": [\n    {functions}\n  ],\n'
+        f'  "events": [{events}],\n'
         f'  "threshold": "{payload["threshold"]}"\n'
         "}\n"
     )
@@ -96,6 +105,7 @@ def compliance_errors(crate_dir: str) -> dict[str, str]:
 
 def format_compliance(payload: dict) -> str:
     functions = ",\n    ".join(f'"{name}"' for name in payload["functions"])
+    events = ", ".join(f'"{name}"' for name in payload["events"])
     errors_items = ",\n    ".join(
         f'"{k}": "{v}"'
         for k, v in sorted(payload["errors"].items(), key=lambda x: int(x[0]))
@@ -105,6 +115,7 @@ def format_compliance(payload: dict) -> str:
         f'  "contract": "{payload["contract"]}",\n'
         f'  "version": "{payload["version"]}",\n'
         f'  "functions": [\n    {functions}\n  ],\n'
+        f'  "events": [{events}],\n'
         f'  "errors": {{\n    {errors_items}\n  }}\n'
         "}\n"
     )
@@ -126,6 +137,7 @@ def main() -> None:
         "contract": "treasury",
         "version": package_version("treasury"),
         "functions": contract_public_functions("treasury"),
+        "events": contract_events("treasury"),
         "threshold": "2-of-3",
     }
     (out_dir / "treasury.json").write_text(format_treasury(treasury), encoding="utf-8")
@@ -134,6 +146,7 @@ def main() -> None:
         "contract": "compliance",
         "version": package_version("compliance"),
         "functions": contract_public_functions("compliance"),
+        "events": contract_events("compliance"),
         "errors": compliance_errors("compliance"),
     }
     (out_dir / "compliance.json").write_text(format_compliance(compliance), encoding="utf-8")

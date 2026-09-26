@@ -4,7 +4,8 @@
 extern crate std;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, IntoVal, Symbol,
+    Vec,
 };
 
 /// Status of a settlement proposal within the Treasury contract.
@@ -83,6 +84,8 @@ pub enum TreasuryError {
     /// `daily_withdraw_limit` and the withdrawal would push cumulative
     /// withdrawals for the current 24h window above that limit.
     DailyLimitExceeded = 13,
+    /// An upgrade was requested while a settlement was partially executed.
+    UpgradeInProgress = 14,
 }
 
 /// Storage keys for Treasury contract instance state.
@@ -133,6 +136,39 @@ pub struct TreasuryContract;
 
 #[contractimpl]
 impl TreasuryContract {
+    /// Replaces this contract's Wasm while preserving its address and storage.
+    /// The stored admin must authorize the call. Upgrades are rejected while any
+    /// settlement is in the partially executed state.
+    pub fn upgrade(e: Env, new_wasm_hash: BytesN<32>) -> Result<(), TreasuryError> {
+        let admin: Address = e.storage().instance().get(&DataKey::Admin).unwrap();
+        Self::check_admin(&e, &admin)?;
+
+        let next_settlement_id: u64 = e
+            .storage()
+            .instance()
+            .get(&DataKey::NextSettlementId)
+            .unwrap_or(1u64);
+        for settlement_id in 1..next_settlement_id {
+            if let Some(settlement) = e
+                .storage()
+                .instance()
+                .get::<DataKey, Settlement>(&DataKey::Settlement(settlement_id))
+            {
+                if settlement.status == SettlementStatus::PartiallyExecuted {
+                    return Err(TreasuryError::UpgradeInProgress);
+                }
+            }
+        }
+
+        e.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        e.events().publish(
+            (Symbol::new(&e, "upgraded"),),
+            new_wasm_hash,
+        );
+        Ok(())
+    }
+
     pub fn initialize(
         e: Env,
         signers: Vec<(Address, u64)>,

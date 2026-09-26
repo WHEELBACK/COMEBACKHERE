@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec,
+};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -61,6 +63,20 @@ const MAX_BATCH_SIZE: u32 = 50;
 
 #[contractimpl]
 impl ComplianceContract {
+    /// Replaces this contract's Wasm while preserving its address and storage.
+    /// The stored admin must authorize the call.
+    pub fn upgrade(e: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+        let admin: Address = e.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+        e.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        e.events().publish(
+            (Symbol::new(&e, "upgraded"),),
+            new_wasm_hash,
+        );
+        Ok(())
+    }
+
     pub fn initialize(e: Env, admin: Address) {
         e.storage().instance().set(&DataKey::Admin, &admin);
         e.storage().instance().set(&DataKey::Paused, &false);

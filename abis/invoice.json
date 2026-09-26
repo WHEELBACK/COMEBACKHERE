@@ -2,6 +2,7 @@
   "contract": "invoice",
   "version": "1.1.0",
   "functions": [
+    "upgrade",
     "initialize",
     "create_invoice",
     "get_invoice",
@@ -20,5 +21,5 @@
     "set_grace_window",
     "get_grace_window"
   ],
-  "events": ["invoice_created", "invoice_paid", "invoice_expired", "invoice_cancelled", "invoice_refund_req", "escrow_released", "contract_paused", "contract_unpaused", "dispute_raised"]
+  "events": ["upgraded", "invoice_created", "invoice_paid", "invoice_expired", "invoice_cancelled", "invoice_refund_req", "escrow_released", "contract_paused", "contract_unpaused", "dispute_raised"]
 }
