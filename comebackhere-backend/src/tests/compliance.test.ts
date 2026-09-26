@@ -232,7 +232,7 @@ describe("POST /compliance/allow", () => {
       .post("/compliance/allow")
       .send({ address: VALID_ADDRESS })
     expect(res.status).toBe(401)
-    expect(res.body.error).toMatch(/unauthorized/i)
+    expect(res.body.error.message).toMatch(/unauthorized/i)
   })
 
   it("401 when x-admin-key header is wrong", async () => {
@@ -249,7 +249,7 @@ describe("POST /compliance/allow", () => {
       .set("x-admin-key", ADMIN_KEY)
       .send({})
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/address/)
+    expect(res.body.error.message).toMatch(/address/)
   })
 
   it("400 when address is not a valid Stellar public key", async () => {
@@ -258,7 +258,7 @@ describe("POST /compliance/allow", () => {
       .set("x-admin-key", ADMIN_KEY)
       .send({ address: "NOT_A_STELLAR_KEY" })
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/address/)
+    expect(res.body.error.message).toMatch(/address/)
   })
 
   it("400 when until is provided but is not a positive integer", async () => {
@@ -267,7 +267,7 @@ describe("POST /compliance/allow", () => {
       .set("x-admin-key", ADMIN_KEY)
       .send({ address: VALID_ADDRESS, until: -1 })
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/until/)
+    expect(res.body.error.message).toMatch(/until/)
   })
 
   it("503 when required env vars are missing", async () => {
@@ -277,7 +277,7 @@ describe("POST /compliance/allow", () => {
       .set("x-admin-key", ADMIN_KEY)
       .send({ address: VALID_ADDRESS })
     expect(res.status).toBe(503)
-    expect(res.body.error).toMatch(/misconfiguration/i)
+    expect(res.body.error.message).toMatch(/misconfiguration/i)
   })
 })
 
@@ -309,7 +309,7 @@ describe("POST /compliance/block", () => {
       .post("/compliance/block")
       .send({ address: VALID_ADDRESS })
     expect(res.status).toBe(401)
-    expect(res.body.error).toMatch(/unauthorized/i)
+    expect(res.body.error.message).toMatch(/unauthorized/i)
   })
 
   it("401 when x-admin-key header is wrong", async () => {
@@ -326,7 +326,7 @@ describe("POST /compliance/block", () => {
       .set("x-admin-key", ADMIN_KEY)
       .send({})
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/address/)
+    expect(res.body.error.message).toMatch(/address/)
   })
 
   it("400 when address has invalid format (e.g. G... but not a real key)", async () => {
@@ -335,7 +335,7 @@ describe("POST /compliance/block", () => {
       .set("x-admin-key", ADMIN_KEY)
       .send({ address: "GNOTAVALIDADDRESSATALL" })
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/address/)
+    expect(res.body.error.message).toMatch(/address/)
   })
 
   it("503 when required env vars are missing", async () => {
@@ -345,6 +345,6 @@ describe("POST /compliance/block", () => {
       .set("x-admin-key", ADMIN_KEY)
       .send({ address: VALID_ADDRESS })
     expect(res.status).toBe(503)
-    expect(res.body.error).toMatch(/misconfiguration/i)
+    expect(res.body.error.message).toMatch(/misconfiguration/i)
   })
 })

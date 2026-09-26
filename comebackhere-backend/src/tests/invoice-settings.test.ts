@@ -49,7 +49,7 @@ describe("POST /api/invoice/grace-window — boundary validation", () => {
       .send({ grace_window_seconds: -1 })
 
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/positive integer/)
+    expect(res.body.error.message).toMatch(/positive integer/)
   })
 
   it("400 when grace_window_seconds is zero", async () => {
@@ -58,7 +58,7 @@ describe("POST /api/invoice/grace-window — boundary validation", () => {
       .send({ grace_window_seconds: 0 })
 
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/positive integer/)
+    expect(res.body.error.message).toMatch(/positive integer/)
   })
 
   it("400 when grace_window_seconds is a float", async () => {
@@ -67,7 +67,7 @@ describe("POST /api/invoice/grace-window — boundary validation", () => {
       .send({ grace_window_seconds: 1.5 })
 
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/positive integer/)
+    expect(res.body.error.message).toMatch(/positive integer/)
   })
 
   it("400 when grace_window_seconds is a string", async () => {
@@ -76,7 +76,7 @@ describe("POST /api/invoice/grace-window — boundary validation", () => {
       .send({ grace_window_seconds: "86400" })
 
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/positive integer/)
+    expect(res.body.error.message).toMatch(/positive integer/)
   })
 
   it("400 when grace_window_seconds is missing", async () => {
@@ -85,7 +85,7 @@ describe("POST /api/invoice/grace-window — boundary validation", () => {
       .send({})
 
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/positive integer/)
+    expect(res.body.error.message).toMatch(/positive integer/)
   })
 
   // ── Upper-bound validation ───────────────────────────────────────────────────
@@ -96,8 +96,8 @@ describe("POST /api/invoice/grace-window — boundary validation", () => {
       .send({ grace_window_seconds: MAX_GRACE_WINDOW_SECONDS + 1 })
 
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/must not exceed/)
-    expect(res.body.error).toContain(String(MAX_GRACE_WINDOW_SECONDS))
+    expect(res.body.error.message).toMatch(/must not exceed/)
+    expect(res.body.error.message).toContain(String(MAX_GRACE_WINDOW_SECONDS))
   })
 
   it("400 when grace_window_seconds is a very large number (e.g., MAX_SAFE_INTEGER)", async () => {
@@ -106,7 +106,7 @@ describe("POST /api/invoice/grace-window — boundary validation", () => {
       .send({ grace_window_seconds: Number.MAX_SAFE_INTEGER })
 
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/must not exceed/)
+    expect(res.body.error.message).toMatch(/must not exceed/)
   })
 
   // ── Valid boundary values ───────────────────────────────────────────────────
@@ -121,7 +121,7 @@ describe("POST /api/invoice/grace-window — boundary validation", () => {
 
     // Should reach the env-check layer, not a validation layer
     expect(res.status).toBe(503)
-    expect(res.body.error).toMatch(/misconfiguration/)
+    expect(res.body.error.message).toMatch(/misconfiguration/)
   })
 
   it("reaches the Soroban layer (503 env error) with grace_window_seconds = 86400 (1 day)", async () => {
@@ -131,7 +131,7 @@ describe("POST /api/invoice/grace-window — boundary validation", () => {
       .send({ grace_window_seconds: 86_400 })
 
     expect(res.status).toBe(503)
-    expect(res.body.error).toMatch(/misconfiguration/)
+    expect(res.body.error.message).toMatch(/misconfiguration/)
   })
 
   it("reaches the Soroban layer (503 env error) with grace_window_seconds at the 30-day max", async () => {
@@ -141,7 +141,7 @@ describe("POST /api/invoice/grace-window — boundary validation", () => {
       .send({ grace_window_seconds: MAX_GRACE_WINDOW_SECONDS })
 
     expect(res.status).toBe(503)
-    expect(res.body.error).toMatch(/misconfiguration/)
+    expect(res.body.error.message).toMatch(/misconfiguration/)
   })
 
   // ── Error message is consumable by GraceWindowSettings ─────────────────────
@@ -152,8 +152,8 @@ describe("POST /api/invoice/grace-window — boundary validation", () => {
       .send({ grace_window_seconds: -100 })
 
     expect(res.body).toHaveProperty("error")
-    expect(typeof res.body.error).toBe("string")
-    expect(res.body.error.length).toBeGreaterThan(0)
+    expect(typeof res.body.error.message).toBe("string")
+    expect(res.body.error.message.length).toBeGreaterThan(0)
   })
 })
 

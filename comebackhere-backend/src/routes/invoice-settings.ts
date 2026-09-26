@@ -7,6 +7,7 @@ import {
   type SorobanClient,
 } from "../lib/soroban.js"
 import { requireEnv } from "../lib/env.js"
+import { asyncHandler } from "../lib/errors.js"
 import { validateBody } from "../middleware/validate.js"
 import { graceWindowSchema } from "../schemas/index.js"
 
@@ -36,32 +37,25 @@ const router = Router()
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get("/grace-window", async (_req: Request, res: Response) => {
-  const env = requireEnv(res, {
+router.get("/grace-window", asyncHandler(async (_req: Request, res: Response) => {
+  const env = requireEnv({
     invoiceContractId: "INVOICE_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",
   })
-  if (!env) return
 
-  try {
-    const client = buildSorobanClient(env.rpcUrl)
-    const sourceAccount = Keypair.fromSecret(env.signerSecret).publicKey()
-    const retval = await simulateContractRead(
-      client,
-      env.invoiceContractId,
-      "get_grace_window",
-      [],
-      sourceAccount,
-      env.networkPassphrase,
-    )
-    const seconds = Number(retval.u64()?.toString() ?? "86400")
-    res.json({ grace_window_seconds: seconds })
-  } catch (err: unknown) {
-    const status = (err as { status?: number })?.status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(status).json({ error: message })
-  }
-})
+  const client = buildSorobanClient(env.rpcUrl)
+  const sourceAccount = Keypair.fromSecret(env.signerSecret).publicKey()
+  const retval = await simulateContractRead(
+    client,
+    env.invoiceContractId,
+    "get_grace_window",
+    [],
+    sourceAccount,
+    env.networkPassphrase,
+  )
+  const seconds = Number(retval.u64()?.toString() ?? "86400")
+  res.json({ grace_window_seconds: seconds })
+}))
 
 /**
  * POST /api/invoice/grace-window
@@ -142,23 +136,16 @@ export async function setGraceWindow(
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/grace-window", validateBody(graceWindowSchema), async (req: Request, res: Response) => {
-  const env = requireEnv(res, {
+router.post("/grace-window", validateBody(graceWindowSchema), asyncHandler(async (req: Request, res: Response) => {
+  const env = requireEnv({
     invoiceContractId: "INVOICE_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",
   })
-  if (!env) return
 
   const graceWindowSeconds = req.body.grace_window_seconds
 
-  try {
-    const result = await setGraceWindow(graceWindowSeconds, env)
-    res.json(result)
-  } catch (err: unknown) {
-    const status = (err as { status?: number })?.status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(status).json({ error: message })
-  }
-})
+  const result = await setGraceWindow(graceWindowSeconds, env)
+  res.json(result)
+}))
 
 export default router

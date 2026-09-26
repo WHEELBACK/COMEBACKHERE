@@ -1,10 +1,10 @@
-import { useState } from "react"
-import { useSigners } from "../../hooks/useSigners"
-import type { SignerInfo } from "../../hooks/useSigners"
-import { useWallet } from "../../hooks/useWallet"
-import "./SignerManagement.css"
+import { useState } from 'react'
+import { useSigners } from '../../hooks/useSigners'
+import type { SignerInfo } from '../../types'
+import { generateIdenticon } from '../../utils/identicon'
+import './SignerManagement.css'
 
-const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/
+const STELLAR_ADDRESS_RE = /^[G][A-Z0-9]{55}$/
 
 function shorten(addr: string): string {
   if (!addr || addr.length < 12) return addr
@@ -12,46 +12,11 @@ function shorten(addr: string): string {
 }
 
 /**
- * Renders a deterministic colour-block identicon for the given signer address.
- * Generated entirely client-side — no network requests.
+ * Renders a deterministic identicon for the given signer address.
+ * The SVG is generated entirely client-side with no network requests.
  */
 function Identicon({ address, size = 32 }: { address: string; size?: number }) {
-  // Simple deterministic hash → colour
-  let hash = 2166136261
-  for (let i = 0; i < address.length; i++) {
-    hash ^= address.charCodeAt(i)
-    hash = (Math.imul(hash, 16777619) >>> 0)
-  }
-  const r = ((hash >> 16) & 0xff)
-  const g = ((hash >> 8) & 0xff)
-  const b = (hash & 0xff)
-  const boost = (v: number) => Math.round(v * 0.6 + 40)
-  const fg = `rgb(${boost(r)},${boost(g)},${boost(b)})`
-
-  const GRID = 5
-  const COLS = Math.ceil(GRID / 2)
-  const seed = (Math.imul(hash, 2654435769) >>> 0)
-  const cellSize = size / GRID
-
-  const rects: string[] = []
-  for (let row = 0; row < GRID; row++) {
-    for (let col = 0; col < COLS; col++) {
-      const bit = (seed >> (row * COLS + col)) & 1
-      if (!bit) continue
-      rects.push(`<rect x="${col * cellSize}" y="${row * cellSize}" width="${cellSize}" height="${cellSize}" fill="${fg}"/>`)
-      const mirror = GRID - 1 - col
-      if (mirror !== col) {
-        rects.push(`<rect x="${mirror * cellSize}" y="${row * cellSize}" width="${cellSize}" height="${cellSize}" fill="${fg}"/>`)
-      }
-    }
-  }
-
-  const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">` +
-    `<rect width="${size}" height="${size}" fill="#f0f0f0"/>` +
-    rects.join("") +
-    `</svg>`
-
+  const svg = generateIdenticon(address, { size })
   return (
     <span
       className="signer-identicon"
@@ -61,10 +26,6 @@ function Identicon({ address, size = 32 }: { address: string; size?: number }) {
     />
   )
 }
-
-// ---------------------------------------------------------------------------
-// Confirmation modal (generic)
-// ---------------------------------------------------------------------------
 
 function ConfirmModal({
   title,
@@ -80,23 +41,14 @@ function ConfirmModal({
   danger?: boolean
 }) {
   return (
-    <div
-      className="modal-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="modal-title"
-    >
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <div className="modal">
-        <h3 id="modal-title" className="modal__title">
-          {title}
-        </h3>
+        <h3 id="modal-title" className="modal__title">{title}</h3>
         <p className="modal__message">{message}</p>
         <div className="modal__actions">
-          <button className="btn btn--secondary" onClick={onCancel}>
-            Cancel
-          </button>
+          <button className="btn btn--secondary" onClick={onCancel}>Cancel</button>
           <button
-            className={`btn ${danger ? "btn--danger" : "btn--primary"}`}
+            className={`btn ${danger ? 'btn--danger' : 'btn--primary'}`}
             onClick={onConfirm}
           >
             Confirm
@@ -107,10 +59,11 @@ function ConfirmModal({
   )
 }
 
-// ---------------------------------------------------------------------------
-// Rotation confirmation modal
-// ---------------------------------------------------------------------------
-
+/** Dedicated confirmation modal for signer rotation.
+ *  Shows the outgoing (current) signer addresses and the incoming
+ *  new-signer address, then disables the Confirm button while the
+ *  transaction is in-flight.
+ */
 function RotateConfirmModal({
   signers,
   newSignerAddress,
@@ -125,30 +78,20 @@ function RotateConfirmModal({
   pending: boolean
 }) {
   return (
-    <div
-      className="modal-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="rotate-modal-title"
-    >
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="rotate-modal-title">
       <div className="modal modal--rotate">
-        <h3 id="rotate-modal-title" className="modal__title">
-          Confirm Signer Rotation
-        </h3>
+        <h3 id="rotate-modal-title" className="modal__title">Confirm Signer Rotation</h3>
         <p className="modal__message">
-          This is a high-impact governance action. Review the addresses carefully
-          before confirming.
+          This is a high-impact governance action. Review the addresses carefully before confirming.
         </p>
 
         <div className="modal__address-section">
-          <p className="modal__address-label">
-            Outgoing signer{signers.length !== 1 ? "s" : ""}
-          </p>
+          <p className="modal__address-label">Outgoing signer{signers.length !== 1 ? 's' : ''}</p>
           {signers.length === 0 ? (
             <p className="modal__address-empty">No current signers.</p>
           ) : (
             <ul className="modal__address-list" aria-label="Outgoing signers">
-              {signers.map((s) => (
+              {signers.map(s => (
                 <li key={s.address} className="modal__address-item">
                   <span className="modal__address-mono" title={s.address}>
                     <span className="modal__address-full">{s.address}</span>
@@ -185,7 +128,7 @@ function RotateConfirmModal({
             disabled={pending}
             aria-busy={pending}
           >
-            {pending ? "Rotating…" : "Confirm Rotation"}
+            {pending ? 'Rotating…' : 'Confirm Rotation'}
           </button>
         </div>
 
@@ -199,54 +142,46 @@ function RotateConfirmModal({
   )
 }
 
-// ---------------------------------------------------------------------------
-// Add signer form
-// ---------------------------------------------------------------------------
-
-function AddSignerForm({
-  onAdd,
-}: {
-  onAdd: (address: string, weight: number) => Promise<void>
-}) {
-  const [address, setAddress] = useState("")
-  const [weight, setWeight] = useState("")
-  const [addressErr, setAddressErr] = useState("")
-  const [weightErr, setWeightErr] = useState("")
+function AddSignerForm({ onAdd }: { onAdd: (address: string, weight: number) => Promise<void> }) {
+  const [address, setAddress] = useState('')
+  const [weight, setWeight] = useState('')
+  const [addressErr, setAddressErr] = useState('')
+  const [weightErr, setWeightErr] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [submitErr, setSubmitErr] = useState("")
+  const [submitErr, setSubmitErr] = useState('')
 
   const validateAddress = (val: string) => {
     if (!STELLAR_ADDRESS_RE.test(val)) {
-      setAddressErr("Invalid Stellar address (G + 55 alphanumeric chars)")
+      setAddressErr('Invalid Stellar address (G + 55 alphanumeric chars)')
       return false
     }
-    setAddressErr("")
+    setAddressErr('')
     return true
   }
 
   const validateWeight = (val: string) => {
     const n = parseInt(val, 10)
     if (!val || isNaN(n) || n <= 0 || !Number.isInteger(n)) {
-      setWeightErr("Weight must be a positive integer")
+      setWeightErr('Weight must be a positive integer')
       return false
     }
-    setWeightErr("")
+    setWeightErr('')
     return true
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    setSubmitErr("")
+    setSubmitErr('')
     const addrOk = validateAddress(address)
     const wtOk = validateWeight(weight)
     if (!addrOk || !wtOk) return
     setSubmitting(true)
     try {
       await onAdd(address, parseInt(weight, 10))
-      setAddress("")
-      setWeight("")
+      setAddress('')
+      setWeight('')
     } catch (err: unknown) {
-      setSubmitErr(err instanceof Error ? err.message : "Unknown error")
+      setSubmitErr(err instanceof Error ? err.message : 'Unknown error')
     } finally {
       setSubmitting(false)
     }
@@ -257,60 +192,42 @@ function AddSignerForm({
       <h3 className="signer-section-title">Add Signer</h3>
       <div className="form-row">
         <div className="form-field">
-          <label className="form-label" htmlFor="signer-address">
-            Address
-          </label>
+          <label className="form-label" htmlFor="signer-address">Address</label>
           <input
             id="signer-address"
-            className={`form-input${addressErr ? " form-input--error" : ""}`}
+            className={`form-input${addressErr ? ' form-input--error' : ''}`}
             type="text"
             placeholder="GXXXXXXX..."
             maxLength={56}
             value={address}
-            onChange={(e) => {
-              setAddress(e.target.value)
-              if (addressErr) validateAddress(e.target.value)
-            }}
+            onChange={e => { setAddress(e.target.value); if (addressErr) validateAddress(e.target.value) }}
             onBlur={() => address && validateAddress(address)}
           />
           {addressErr && <p className="form-error">{addressErr}</p>}
         </div>
         <div className="form-field form-field--weight">
-          <label className="form-label" htmlFor="signer-weight">
-            Weight
-          </label>
+          <label className="form-label" htmlFor="signer-weight">Weight</label>
           <input
             id="signer-weight"
-            className={`form-input${weightErr ? " form-input--error" : ""}`}
+            className={`form-input${weightErr ? ' form-input--error' : ''}`}
             type="number"
             min="1"
             step="1"
             placeholder="1"
             value={weight}
-            onChange={(e) => {
-              setWeight(e.target.value)
-              if (weightErr) validateWeight(e.target.value)
-            }}
+            onChange={e => { setWeight(e.target.value); if (weightErr) validateWeight(e.target.value) }}
             onBlur={() => weight && validateWeight(weight)}
           />
           {weightErr && <p className="form-error">{weightErr}</p>}
         </div>
-        <button
-          className="btn btn--primary form-submit-btn"
-          type="submit"
-          disabled={submitting}
-        >
-          {submitting ? "Adding..." : "Add Signer"}
+        <button className="btn btn--primary form-submit-btn" type="submit" disabled={submitting}>
+          {submitting ? 'Adding...' : 'Add Signer'}
         </button>
       </div>
       {submitErr && <p className="form-error">{submitErr}</p>}
     </form>
   )
 }
-
-// ---------------------------------------------------------------------------
-// Signer table row
-// ---------------------------------------------------------------------------
 
 function SignerRow({
   signer,
@@ -344,25 +261,8 @@ function SignerRow({
   )
 }
 
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
-
-/**
- * SignerManagement — treasury admin panel for managing signing keys.
- *
- * Reads the signer list from the `get_signers` backend endpoint and exposes
- * add, remove, and rotate actions. Only visible to the treasury admin (the
- * caller's wallet address must match a configured admin address or the
- * component is rendered conditionally by the parent). Destructive actions
- * (remove, rotate) require explicit confirmation via a modal, reusing the
- * modal and focus-trap pattern from the rest of the canonical frontend.
- */
 export default function SignerManagement() {
-  const { connected } = useWallet()
-  const { signers, loading, error, addSigner, removeSigner, rotateSigners } =
-    useSigners()
-
+  const { signers, loading, error, addSigner, removeSigner, rotateSigners } = useSigners()
   const [removeTarget, setRemoveTarget] = useState<string | null>(null)
   const [showRotateConfirm, setShowRotateConfirm] = useState(false)
   const [rotatePending, setRotatePending] = useState(false)
@@ -374,9 +274,7 @@ export default function SignerManagement() {
     try {
       await removeSigner(removeTarget)
     } catch (e: unknown) {
-      setActionErr(
-        `Failed to remove signer: ${e instanceof Error ? e.message : "Unknown error"}`,
-      )
+      setActionErr(`Failed to remove signer: ${e instanceof Error ? e.message : 'Unknown error'}`)
     } finally {
       setRemoveTarget(null)
     }
@@ -389,43 +287,27 @@ export default function SignerManagement() {
       await rotateSigners()
       setShowRotateConfirm(false)
     } catch (e: unknown) {
-      setActionErr(
-        `Failed to rotate signers: ${e instanceof Error ? e.message : "Unknown error"}`,
-      )
+      setActionErr(`Failed to rotate signers: ${e instanceof Error ? e.message : 'Unknown error'}`)
       setShowRotateConfirm(false)
     } finally {
       setRotatePending(false)
     }
   }
 
-  if (!connected) {
-    return (
-      <div className="signer-panel">
-        <p className="signer-empty">Connect your wallet to manage signers.</p>
-      </div>
-    )
-  }
-
   if (loading && signers.length === 0) {
-    return (
-      <div className="signer-panel">
-        <p>Loading signers...</p>
-      </div>
-    )
+    return <div className="signer-panel"><p>Loading signers...</p></div>
   }
 
   if (error && signers.length === 0) {
-    return (
-      <div className="signer-panel">
-        <p className="signer-panel__error">Error: {error}</p>
-      </div>
-    )
+    return <div className="signer-panel"><p className="signer-panel__error">Error: {error}</p></div>
   }
 
-  // The incoming signer address shown in the rotation preview — best-effort:
-  // uses the last signer in the current list as the "incoming" address.
-  const incomingSignerAddress =
-    signers.length > 0 ? signers[signers.length - 1].address : ""
+  // Derive the "incoming" signer address for display in the rotation modal.
+  // In a propose_signer_rotation flow the new signer comes from the pending
+  // rotation proposal stored on-chain. As a best-effort UI hint, we show the
+  // last signer in the current list as the outgoing signer and surface the
+  // pending rotation note to the user.
+  const incomingSignerAddress = signers.length > 0 ? signers[signers.length - 1].address : ''
 
   return (
     <div className="signer-panel">
@@ -434,17 +316,12 @@ export default function SignerManagement() {
         <button
           className="btn btn--secondary"
           onClick={() => setShowRotateConfirm(true)}
-          aria-label="Trigger signer rotation"
         >
           Trigger Rotation
         </button>
       </div>
 
-      {actionErr && (
-        <p className="signer-panel__error" role="alert">
-          {actionErr}
-        </p>
-      )}
+      {actionErr && <p className="signer-panel__error">{actionErr}</p>}
 
       <div className="signer-table-wrap">
         {signers.length === 0 ? (
@@ -459,7 +336,7 @@ export default function SignerManagement() {
               </tr>
             </thead>
             <tbody>
-              {signers.map((s) => (
+              {signers.map(s => (
                 <SignerRow key={s.address} signer={s} onRemove={setRemoveTarget} />
               ))}
             </tbody>
@@ -484,9 +361,7 @@ export default function SignerManagement() {
           signers={signers}
           newSignerAddress={incomingSignerAddress}
           onConfirm={handleRotateConfirm}
-          onCancel={() => {
-            if (!rotatePending) setShowRotateConfirm(false)
-          }}
+          onCancel={() => { if (!rotatePending) setShowRotateConfirm(false) }}
           pending={rotatePending}
         />
       )}

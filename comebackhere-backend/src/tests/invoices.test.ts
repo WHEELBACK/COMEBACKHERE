@@ -79,46 +79,46 @@ describe("POST /invoices — HTTP layer", () => {
       const { merchant_address: _, ...body } = VALID_BODY
       const res = await request(app).post("/invoices").send(body)
       expect(res.status).toBe(400)
-      expect(res.body.error).toMatch(/merchant_address/)
+      expect(res.body.error.message).toMatch(/merchant_address/)
     })
 
     it("400 when merchant_address is not a valid Stellar key", async () => {
       const res = await request(app).post("/invoices").send({ ...VALID_BODY, merchant_address: "NOTAKEY" })
       expect(res.status).toBe(400)
-      expect(res.body.error).toMatch(/merchant_address/)
+      expect(res.body.error.message).toMatch(/merchant_address/)
     })
 
     it("400 when token is missing", async () => {
       const { token: _, ...body } = VALID_BODY
       const res = await request(app).post("/invoices").send(body)
       expect(res.status).toBe(400)
-      expect(res.body.error).toMatch(/token/)
+      expect(res.body.error.message).toMatch(/token/)
     })
 
     it("400 when amount is missing", async () => {
       const { amount: _, ...body } = VALID_BODY
       const res = await request(app).post("/invoices").send(body)
       expect(res.status).toBe(400)
-      expect(res.body.error).toMatch(/amount/)
+      expect(res.body.error.message).toMatch(/amount/)
     })
 
     it("400 when amount is zero or negative", async () => {
       const res = await request(app).post("/invoices").send({ ...VALID_BODY, amount: -1 })
       expect(res.status).toBe(400)
-      expect(res.body.error).toMatch(/amount/)
+      expect(res.body.error.message).toMatch(/amount/)
     })
 
     it("400 when due_date is missing", async () => {
       const { due_date: _, ...body } = VALID_BODY
       const res = await request(app).post("/invoices").send(body)
       expect(res.status).toBe(400)
-      expect(res.body.error).toMatch(/due_date/)
+      expect(res.body.error.message).toMatch(/due_date/)
     })
 
     it("400 when due_date is in the past", async () => {
       const res = await request(app).post("/invoices").send({ ...VALID_BODY, due_date: 1000 })
       expect(res.status).toBe(400)
-      expect(res.body.error).toMatch(/due_date/)
+      expect(res.body.error.message).toMatch(/due_date/)
     })
   })
 
@@ -126,7 +126,7 @@ describe("POST /invoices — HTTP layer", () => {
     delete process.env.SOROBAN_RPC_URL
     const res = await request(app).post("/invoices").send(VALID_BODY)
     expect(res.status).toBe(503)
-    expect(res.body.error).toMatch(/misconfiguration/)
+    expect(res.body.error.message).toMatch(/misconfiguration/)
   })
 })
 
@@ -313,19 +313,19 @@ describe("GET /invoices — pagination", () => {
   it("400 when limit is not a positive integer", async () => {
     const res = await request(app).get("/invoices?limit=abc")
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/limit/)
+    expect(res.body.error.message).toMatch(/limit/)
   })
 
   it("400 when limit is zero", async () => {
     const res = await request(app).get("/invoices?limit=0")
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/limit/)
+    expect(res.body.error.message).toMatch(/limit/)
   })
 
   it("400 when offset is negative", async () => {
     const res = await request(app).get("/invoices?offset=-1")
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/offset/)
+    expect(res.body.error.message).toMatch(/offset/)
   })
 
   it("returns empty data array with correct total when no invoices match", async () => {
@@ -366,6 +366,6 @@ describe("GET /invoices — pagination", () => {
 
     const res = await request(app).get("/invoices")
     expect(res.status).toBe(500)
-    expect(res.body.error).toMatch(/db unavailable/)
+    expect(res.body.error.message).toMatch(/db unavailable/)
   })
 })

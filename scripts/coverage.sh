@@ -1,5 +1,5 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
 # Generate coverage report for COMEBACKHERE contract tests.
 # Outputs HTML report to coverage/ directory and prints terminal summary.

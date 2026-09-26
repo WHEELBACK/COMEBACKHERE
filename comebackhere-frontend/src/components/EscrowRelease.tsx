@@ -3,10 +3,20 @@ import { useInvoice } from "../hooks/useInvoice"
 import { useWallet } from "../hooks/useWallet"
 import { usePolling } from "../hooks/usePolling"
 import { fetchBalances } from "../utils/treasury"
+import { formatAmount, compareRawAmounts, USDC_DECIMALS } from "../utils/format"
 import { StatusBadge } from "./StatusBadge"
 import { InvoiceStatus } from "../types"
 
 const TREASURY_BALANCE_POLL_MS = 10_000
+
+/** Exact comparison of raw stroop amounts; unparseable values never block. */
+function isBelow(balance: string, amount: string): boolean {
+  try {
+    return compareRawAmounts(balance, amount) < 0
+  } catch {
+    return false
+  }
+}
 
 export function EscrowRelease() {
   const { invoice, loading, error, loadInvoice, release } = useInvoice()
@@ -65,7 +75,7 @@ export function EscrowRelease() {
   const insufficientTreasuryFunds =
     invoice != null &&
     treasuryBalance !== null &&
-    Number(treasuryBalance) < Number(invoice.amount_usdc)
+    isBelow(treasuryBalance, invoice.amount_usdc)
 
   return (
     <div className="escrow-release">
@@ -123,8 +133,8 @@ export function EscrowRelease() {
               </span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">Amount (USDC)</span>
-              <span className="detail-value">{invoice.amount_usdc}</span>
+              <span className="detail-label">Amount</span>
+              <span className="detail-value">{formatAmount(invoice.amount_usdc, USDC_DECIMALS, "USDC")}</span>
             </div>
             <div className="detail-row">
               <span className="detail-label">Status</span>
@@ -138,7 +148,7 @@ export function EscrowRelease() {
                     ? "Unavailable"
                     : treasuryBalance === null
                     ? "Loading..."
-                    : treasuryBalance}
+                    : formatAmount(treasuryBalance, USDC_DECIMALS, "USDC")}
                 </span>
               </div>
             )}
@@ -169,8 +179,9 @@ export function EscrowRelease() {
                 role="alert"
               >
                 <span style={{ flex: 1 }}>
-                  Treasury balance ({treasuryBalance} USDC) is below this invoice's amount
-                  ({invoice.amount_usdc} USDC). Releasing now would likely fail.
+                  Treasury balance ({formatAmount(treasuryBalance ?? "0", USDC_DECIMALS, "USDC")}) is
+                  below this invoice's amount ({formatAmount(invoice.amount_usdc, USDC_DECIMALS, "USDC")}).
+                  Releasing now would likely fail.
                 </span>
                 <button
                   className="btn btn--primary"

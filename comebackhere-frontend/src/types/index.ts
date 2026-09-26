@@ -44,3 +44,8 @@ export interface PaymentResult {
   transaction_hash?: string
   error?: string
 }
+
+export interface SignerInfo {
+  address: string
+  weight: number
+}
