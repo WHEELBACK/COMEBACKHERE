@@ -9,6 +9,8 @@ import invoiceSettingsRouter from "./routes/invoice-settings.js"
 import thresholdRouter from "./routes/threshold.js"
 import disputesRouter from "./routes/disputes.js"
 import analyticsRouter from "./routes/analytics.js"
+import apiKeysRouter from "./routes/api-keys.js"
+import webhooksRouter from "./routes/webhooks.js"
 import { startComplianceIndexer } from "./services/compliance-indexer.js"
 import { rateLimitMiddleware } from "./middleware/rateLimiter.js"
 import { correlationIdMiddleware } from "./middleware/correlationId.js"
@@ -103,6 +105,8 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use("/api/treasury", thresholdRouter)
   app.use("/disputes", disputesRouter)
   app.use("/api/analytics", analyticsRouter)
+  app.use("/api/merchant-keys", apiKeysRouter)
+  app.use("/webhooks", webhooksRouter)
 
   // ── Errors ──────────────────────────────────────────────────────────────────
   // Everything below produces { error: { code, message, details, correlationId } }

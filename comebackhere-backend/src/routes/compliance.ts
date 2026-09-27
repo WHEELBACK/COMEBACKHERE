@@ -9,7 +9,8 @@ import {
 } from "stellar-sdk"
 import { validateBody, validateQuery } from "../middleware/validate.js"
 import { requireEnv } from "../lib/env.js"
-import { asyncHandler, UnauthorizedError } from "../lib/errors.js"
+import { asyncHandler } from "../lib/errors.js"
+import { requireAdmin } from "../middleware/adminAuth.js"
 import { allowBodySchema, blockBodySchema, complianceAuditQuerySchema } from "../schemas/index.js"
 import { connectMongo, getComplianceAuditCollection } from "../db/mongo.js"
 
@@ -178,12 +179,7 @@ export interface AllowBody {
  * Body: { address: string, until?: number }
  * Returns: { address, status, hash }
  */
-router.post("/allow", validateBody(allowBodySchema), asyncHandler(async (req: Request, res: Response) => {
-  const adminKey = req.headers["x-admin-key"]
-  if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
-    throw new UnauthorizedError()
-  }
-
+router.post("/allow", requireAdmin, validateBody(allowBodySchema), asyncHandler(async (req: Request, res: Response) => {
   const { address, until } = req.body as { address: string; until?: number }
 
   const env = requireEnv({
@@ -222,12 +218,7 @@ export interface BlockBody {
  * Body: { address: string }
  * Returns: { address, status, hash }
  */
-router.post("/block", validateBody(blockBodySchema), asyncHandler(async (req: Request, res: Response) => {
-  const adminKey = req.headers["x-admin-key"]
-  if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
-    throw new UnauthorizedError()
-  }
-
+router.post("/block", requireAdmin, validateBody(blockBodySchema), asyncHandler(async (req: Request, res: Response) => {
   const { address } = req.body as { address: string }
 
   const env = requireEnv({
@@ -235,8 +226,7 @@ router.post("/block", validateBody(blockBodySchema), asyncHandler(async (req: Re
     signerSecret: "SIGNER_SECRET_KEY",
   })
 
-  // Audit log — admin identity + timestamp
-  console.log(`[compliance] block_address admin="${adminKey}" address="${address}" ts="${new Date().toISOString()}"`)
+  // The shared middleware logs the admin identity and correlation ID.
 
   const client = buildSorobanClient(env.rpcUrl)
   const result = await callComplianceOp(

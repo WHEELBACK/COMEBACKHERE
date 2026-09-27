@@ -27,23 +27,29 @@ logged and no retries are attempted.
 
 ## Signature verification
 
-Every outbound webhook `POST` includes an `X-COMEBACKHERE-Signature` header
-containing a lowercase hex-encoded HMAC-SHA256 digest of the **raw request
-body** (the exact bytes sent over the wire), keyed by your
-`WEBHOOK_SIGNING_SECRET`.
+Every outbound webhook `POST` includes an `X-COMEBACKHERE-Timestamp` header and
+an `X-COMEBACKHERE-Signature` header containing a lowercase hex-encoded
+HMAC-SHA256 digest of `timestamp.rawBody`, keyed by your
+`WEBHOOK_SIGNING_SECRET`. The timestamp is Unix seconds. Reject requests whose
+timestamp differs from your current time by more than the recommended five
+minutes.
 
 ### Algorithm summary
 
 1. Read the raw request body **before** calling `JSON.parse()`.
-2. Compute `HMAC-SHA256(secret, rawBody)` and hex-encode it.
-3. Compare the result to the `X-COMEBACKHERE-Signature` header using a
+2. Read the Unix timestamp from `X-COMEBACKHERE-Timestamp` and reject values
+  outside a five-minute tolerance.
+3. Compute `HMAC-SHA256(secret, timestamp + "." + rawBody)` and hex-encode it.
+4. Compare the result to the `X-COMEBACKHERE-Signature` header using a
    **constant-time comparison** to prevent timing side-channel attacks.
 
 ### Header reference
 
 | Header                      | Value                                        |
 | --------------------------- | -------------------------------------------- |
-| `X-COMEBACKHERE-Signature`  | Lowercase hex-encoded HMAC-SHA256 digest     |
+| `X-COMEBACKHERE-Signature`  | HMAC-SHA256 of `timestamp.rawBody`, lowercase hex |
+| `X-COMEBACKHERE-Timestamp`  | Unix timestamp in seconds                    |
+| `X-COMEBACKHERE-Legacy-Signature` | Temporary body-only HMAC for one-release migration |
 | `Content-Type`              | `application/json`                           |
 | `X-Idempotency-Key`         | Stable per-event key (see [Idempotency](#idempotency)) |
 | `X-Request-Id`              | Correlation ID forwarded from the originating request (when available) |
@@ -59,16 +65,20 @@ import { createHmac, timingSafeEqual } from "crypto"
  *
  * @param rawBody   The unparsed request body string (read before JSON.parse).
  * @param signature The value of the X-COMEBACKHERE-Signature header.
+ * @param timestamp The value of the X-COMEBACKHERE-Timestamp header.
  * @param secret    Your WEBHOOK_SIGNING_SECRET environment variable.
  */
 function verifyWebhookSignature(
   rawBody: string,
   signature: string,
+  timestamp: string,
   secret: string,
 ): boolean {
   try {
+    const seconds = Number(timestamp)
+    if (!Number.isSafeInteger(seconds) || Math.abs(Date.now() / 1000 - seconds) > 300) return false
     const expected = createHmac("sha256", secret)
-      .update(rawBody, "utf8")
+      .update(`${timestamp}.${rawBody}`, "utf8")
       .digest("hex")
 
     const expectedBuf = Buffer.from(expected, "hex")
@@ -89,16 +99,35 @@ function verifyWebhookSignature(
 ```python
 import hashlib
 import hmac
+import time
 
-def verify_webhook_signature(raw_body: bytes, signature: str, secret: str) -> bool:
-    """Return True if the signature is a valid HMAC-SHA256 of raw_body."""
-    expected = hmac.new(
-        secret.encode("utf-8"),
-        raw_body,
-        hashlib.sha256,
-    ).hexdigest()
-    return hmac.compare_digest(expected, signature)
+def verify_webhook_signature(raw_body: bytes, signature: str, timestamp: str, secret: str) -> bool: return (
+    timestamp.isdigit()
+    and abs(time.time() - int(timestamp)) <= 300
+    and hmac.compare_digest(
+        hmac.new(
+            secret.encode("utf-8"),
+            timestamp.encode("utf-8") + b"." + raw_body,
+            hashlib.sha256,
+        ).hexdigest(),
+        signature,
+    )
+)
 ```
+
+During the one-release migration window, receivers that have not yet deployed
+timestamp verification can temporarily validate the body-only digest from
+`X-COMEBACKHERE-Legacy-Signature`. Switch to the timestamped signature and
+remove that fallback after upgrading.
+
+## Replay a failed delivery
+
+Merchant API keys can replay only their own failed deliveries. Send
+`POST /webhooks/{deliveryId}/replay` with
+`Authorization: Bearer <merchant-api-key>`. The backend sends the stored payload
+to its original endpoint with a fresh timestamped signature and appends the
+attempt and correlation ID to delivery history. Successful deliveries cannot
+be replayed through this endpoint.
 
 > **Always use a constant-time comparison.** Standard string equality (`===`,
 > `==`) leaks information about how many bytes match, which can be exploited

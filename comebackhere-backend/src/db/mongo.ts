@@ -25,6 +25,36 @@ export interface InvoiceRecord {
   updated_at: Date
 }
 
+export interface MerchantApiKeyRecord {
+  key_id: string
+  merchant_address: string
+  key_hash: string
+  created_at: Date
+  revoked_at?: Date
+}
+
+export interface WebhookReplayRecord {
+  replay_id: string
+  request_id: string | null
+  attempted_at: Date
+  status: "delivered" | "failed"
+  status_code: number | null
+  error: string | null
+}
+
+export interface WebhookDeliveryHistoryRecord {
+  delivery_id: string
+  merchant_address: string
+  endpoint: string
+  payload: unknown
+  status: "delivered" | "failed"
+  attempts: number
+  last_status_code: number | null
+  last_error: string | null
+  created_at: Date
+  replays: WebhookReplayRecord[]
+}
+
 export interface SettlementRecord {
   id: number
   merchant_address: string
@@ -189,6 +219,15 @@ export async function connectMongo(): Promise<Db> {
   const invoiceEvents = db.collection<InvoiceEventRecord>("invoice_events")
   await invoiceEvents.createIndex({ event_id: 1 }, { unique: true })
   await invoiceEvents.createIndex({ invoice_id: 1, ledger: 1 })
+
+  const merchantApiKeys = db.collection<MerchantApiKeyRecord>("merchant_api_keys")
+  await merchantApiKeys.createIndex({ key_id: 1 }, { unique: true })
+  await merchantApiKeys.createIndex({ key_hash: 1 }, { unique: true })
+  await merchantApiKeys.createIndex({ merchant_address: 1, revoked_at: 1 })
+
+  const webhookDeliveries = db.collection<WebhookDeliveryHistoryRecord>("webhook_deliveries")
+  await webhookDeliveries.createIndex({ delivery_id: 1 }, { unique: true })
+  await webhookDeliveries.createIndex({ merchant_address: 1, created_at: -1 })
 
   const complianceAudit = db.collection<ComplianceAuditRecord>("compliance_audit")
   await complianceAudit.createIndex({ event_id: 1 }, { unique: true })

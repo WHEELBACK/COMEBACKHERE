@@ -31,8 +31,8 @@ docs rather than duplicating them.
 ```bash
 curl -X POST http://localhost:3000/invoices \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MERCHANT_API_KEY" \
   -d '{
-    "merchant_address": "G...",
     "token": "USDC",
     "amount": 1000000,
     "due_date": 1720000000
@@ -49,16 +49,24 @@ Configure `WEBHOOK_URL` and `WEBHOOK_SIGNING_SECRET` in your environment so
 the backend can notify your system when payments land.
 
 All outbound webhook POSTs are signed with HMAC-SHA256. Verify the
-`X-COMEBACKHERE-Signature` header before processing:
+`X-COMEBACKHERE-Signature` and `X-COMEBACKHERE-Timestamp` headers before
+processing. Reject timestamps more than five minutes from your current time:
 
 ```typescript
 import { createHmac, timingSafeEqual } from "crypto"
 
-function verifyWebhook(rawBody: string, signature: string, secret: string): boolean {
-  const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex")
-  return timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(signature, "hex"))
+function verifyWebhook(rawBody: string, signature: string, timestamp: string, secret: string): boolean {
+  const seconds = Number(timestamp)
+  if (!Number.isSafeInteger(seconds) || Math.abs(Date.now() / 1000 - seconds) > 300) return false
+  const expected = createHmac("sha256", secret).update(`${timestamp}.${rawBody}`, "utf8").digest("hex")
+  const expectedBytes = Buffer.from(expected, "hex")
+  const actualBytes = Buffer.from(signature, "hex")
+  return expectedBytes.length === actualBytes.length && timingSafeEqual(expectedBytes, actualBytes)
 }
 ```
+
+The body-only digest is temporarily available as `X-COMEBACKHERE-Legacy-Signature`
+for one release while receivers migrate.
 
 > Webhook events and configuration: [docs/api-reference.md](docs/api-reference.md#webhooks)
 

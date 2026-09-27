@@ -9,6 +9,7 @@ import {
 import { requireEnv } from "../lib/env.js"
 import { asyncHandler } from "../lib/errors.js"
 import { validateBody } from "../middleware/validate.js"
+import { requireAdmin } from "../middleware/adminAuth.js"
 import { graceWindowSchema } from "../schemas/index.js"
 
 const router = Router()
@@ -136,7 +137,7 @@ export async function setGraceWindow(
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/grace-window", validateBody(graceWindowSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post("/grace-window", requireAdmin, validateBody(graceWindowSchema), asyncHandler(async (req: Request, res: Response) => {
   const env = requireEnv({
     invoiceContractId: "INVOICE_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",

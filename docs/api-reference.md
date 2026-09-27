@@ -73,6 +73,32 @@ Checks Soroban RPC reachability and current ledger.
 ---
 
 
+## Merchant authentication
+
+Invoice creation and webhook replay require a merchant API key. An admin
+creates or rotates a key with `POST /api/merchant-keys`, sending `x-admin-key`
+and a JSON body containing the merchant's Stellar address. The returned
+`api_key` is shown only once; MongoDB stores only its SHA-256 hash. Creating a
+new key revokes the merchant's prior active keys. Revoke a key with
+`DELETE /api/merchant-keys/{keyId}` and the admin header.
+
+```http
+POST /api/merchant-keys
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{"merchant_address":"G..."}
+```
+
+The `201` response contains `key_id`, `merchant_address`, `api_key`, and
+`created_at`. The key is returned only at creation time; store it securely.
+Revocation returns `204 No Content`.
+
+Use `Authorization: Bearer <api_key>` on merchant requests. Missing, invalid,
+or revoked keys return `401 UNAUTHORIZED` in the standard error envelope.
+
+---
+
 ## Invoices
 
 ### `GET /invoices/:id`
@@ -113,7 +139,6 @@ Create a new invoice by submitting `create_invoice` to the Soroban RPC.
 
 ```json
 {
-  "merchant_address": "G...",
   "token": "USDC",
   "amount": 1000000,
   "due_date": 1720000000
@@ -122,10 +147,12 @@ Create a new invoice by submitting `create_invoice` to the Soroban RPC.
 
 | Field              | Type   | Description                                       |
 | ------------------ | ------ | ------------------------------------------------- |
-| `merchant_address` | string | Valid Stellar public key (G…)                    |
 | `token`            | string | Token identifier                                  |
 | `amount`           | number | Positive number (in stroops / smallest unit)      |
 | `due_date`         | number | Future Unix timestamp (seconds) for the due date  |
+
+The merchant identity is taken from the API key, never from the request body.
+Include `Authorization: Bearer <api_key>`.
 
 **Response `201`**
 
@@ -141,6 +168,7 @@ Create a new invoice by submitting `create_invoice` to the Soroban RPC.
 | Status | Description                                                    |
 | ------ | -------------------------------------------------------------- |
 | `400`  | Validation error — see `error.details` for field-level detail  |
+| `401`  | Missing, invalid, or revoked merchant API key                   |
 | `422`  | Soroban simulation or transaction failure                      |
 | `503`  | Missing required environment variables                         |
 | `504`  | Transaction confirmation timeout                               |
@@ -811,10 +839,14 @@ can verify payload authenticity before processing it.
 
 | Header                      | Value                                    |
 | --------------------------- | ---------------------------------------- |
-| `X-COMEBACKHERE-Signature`  | Lowercase hex-encoded HMAC-SHA256 digest |
+| `X-COMEBACKHERE-Signature`  | HMAC-SHA256 of `timestamp.rawBody`, lowercase hex |
+| `X-COMEBACKHERE-Timestamp`  | Unix timestamp in seconds                |
+| `X-COMEBACKHERE-Legacy-Signature` | Temporary body-only HMAC for one release |
 
-The digest is computed over the **raw JSON request body** (exactly as sent over
-the wire) using the `WEBHOOK_SIGNING_SECRET` environment variable as the key.
+The primary digest is computed over `timestamp + "." + rawBody` (the exact raw
+JSON request bytes) using `WEBHOOK_SIGNING_SECRET`. Reject a timestamp more than
+five minutes old or in the future. The legacy header supports receiver
+migration for one release and must not be used for freshness validation.
 
 ### Verification (Node.js example)
 
@@ -824,9 +856,12 @@ import { createHmac, timingSafeEqual } from "crypto"
 function verifyWebhook(
   rawBody: string,     // The unparsed request body string
   signature: string,   // Value of X-COMEBACKHERE-Signature header
+  timestamp: string,   // Value of X-COMEBACKHERE-Timestamp header
   secret: string,      // Your WEBHOOK_SIGNING_SECRET
 ): boolean {
-  const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex")
+  const seconds = Number(timestamp)
+  if (!Number.isSafeInteger(seconds) || Math.abs(Date.now() / 1000 - seconds) > 300) return false
+  const expected = createHmac("sha256", secret).update(`${timestamp}.${rawBody}`, "utf8").digest("hex")
   const expectedBuf = Buffer.from(expected, "hex")
   const actualBuf   = Buffer.from(signature, "hex")
   if (expectedBuf.length !== actualBuf.length) return false
@@ -836,6 +871,13 @@ function verifyWebhook(
 
 Always use a **constant-time comparison** (e.g. `crypto.timingSafeEqual`) when
 comparing signatures to prevent timing side-channel attacks.
+
+### Replay a failed delivery
+
+`POST /webhooks/{deliveryId}/replay` re-sends a stored failed webhook to its
+original endpoint with a new timestamped signature. It requires the owning
+merchant's API key. Replays are appended to the original delivery history with
+their outcome and correlation ID; successful deliveries cannot be replayed.
 
 ### Webhook event payload shape
 

@@ -249,7 +249,7 @@ export async function processIndexerBatch(
           amount: amount.toString(),
           token,
           tx_hash: txHash,
-        }).catch((err: unknown) => {
+        }, undefined, fetch, { merchantAddress: merchant }).catch((err: unknown) => {
           console.error(
             "[treasury-indexer] webhook dispatch failed (settlement_proposed):",
             err instanceof Error ? err.message : err,
@@ -260,6 +260,7 @@ export async function processIndexerBatch(
       const signer = valueAddress(event.value, 1)
       const newWeight = valueU64(event.value, 3)
       await processSettlementApproved(settlements, settlementId, signer, newWeight)
+      const settlement = await settlements.findOne({ id: settlementId })
 
       // Dispatch signed webhook for settlement_approved
       const webhookUrl = process.env.WEBHOOK_URL
@@ -270,7 +271,7 @@ export async function processIndexerBatch(
           signer,
           approval_weight: newWeight.toString(),
           tx_hash: txHash,
-        }).catch((err: unknown) => {
+        }, undefined, fetch, { merchantAddress: settlement?.merchant_address }).catch((err: unknown) => {
           console.error(
             "[treasury-indexer] webhook dispatch failed (settlement_approved):",
             err instanceof Error ? err.message : err,
@@ -279,6 +280,7 @@ export async function processIndexerBatch(
       }
     } else if (eventType === "settlement_executed") {
       await processSettlementExecuted(settlements, settlementId, txHash)
+      const settlement = await settlements.findOne({ id: settlementId })
 
       // Treasury balances changed on-chain; drop the cached copy so the next
       // GET /api/treasury/balances reads fresh data instead of waiting for TTL.
@@ -291,7 +293,7 @@ export async function processIndexerBatch(
           event: "settlement_executed",
           settlement_id: settlementId,
           tx_hash: txHash,
-        }).catch((err: unknown) => {
+        }, undefined, fetch, { merchantAddress: settlement?.merchant_address }).catch((err: unknown) => {
           console.error(
             "[treasury-indexer] webhook dispatch failed (settlement_executed):",
             err instanceof Error ? err.message : err,
