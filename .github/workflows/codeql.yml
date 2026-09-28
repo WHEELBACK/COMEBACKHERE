@@ -23,7 +23,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@b4ffde65f46336ab88eb53be0f245cb558a0176b # v4.1.1
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.1.1
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@959cbb7472c4d4ad70f4d6894a946c4ee1f27409 # v3.24.10
