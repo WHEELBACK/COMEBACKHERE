@@ -1,6 +1,6 @@
 import { SorobanRpc, xdr } from "stellar-sdk"
 import { buildSorobanClient, type SorobanClient } from "../lib/soroban.js"
-import { connectMongo, getCursorsCollection, getComplianceAuditCollection, type ComplianceAuditRecord } from "../db/mongo.js"
+import { connectMongo, getCursorsCollection, getComplianceAuditCollection, type ComplianceAuditRecord, type ComplianceAuditStatus } from "../db/mongo.js"
 
 const CURSOR_ID = "compliance_audit_events"
 const EVENT_LIMIT = 100
@@ -67,6 +67,7 @@ export async function processComplianceIndexerBatch(
       event_id: id,
       event_type: eventType as ComplianceAuditRecord["event_type"],
       address: addressValue,
+      status: eventStatus(event, eventType),
       expires_at: eventExpiry(event, eventType),
       ledger: event.ledger ?? 0,
       ledger_closed_at: event.ledgerClosedAt ?? null,
