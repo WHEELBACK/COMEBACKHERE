@@ -53,3 +53,17 @@ pub fn dispute_raised(env: &Env, invoice_id: &u64, settlement_id: &u64, claimant
         (*invoice_id, *settlement_id, claimant),
     );
 }
+
+pub fn admin_transfer_initiated(env: &Env, current_admin: &Address, new_admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "admin_transfer_initiated"),),
+        (current_admin, new_admin),
+    );
+}
+
+pub fn admin_transfer_accepted(env: &Env, new_admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "admin_transfer_accepted"),),
+        new_admin,
+    );
+}
