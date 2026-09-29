@@ -14,6 +14,7 @@
 
 import type { Server } from "http"
 import type { WebhookDeliveryQueue } from "./services/webhook-delivery.js"
+import { logger } from "./lib/logger.js"
 
 export interface ShutdownDeps {
   server: Pick<Server, "close">
@@ -43,9 +44,7 @@ export function resolveWebhookDrainTimeout(
   const ceiling = Math.max(0, shutdownTimeoutMs - marginMs)
   if (!Number.isFinite(configuredMs) || configuredMs < 0) return ceiling
   if (configuredMs > ceiling) {
-    console.warn(
-      `[shutdown] WEBHOOK_DRAIN_TIMEOUT_MS=${configuredMs} exceeds shutdown budget; using ${ceiling}ms`,
-    )
+    logger.warn({ configuredMs, effectiveMs: ceiling }, "Webhook drain timeout exceeds shutdown budget")
     return ceiling
   }
   return configuredMs
@@ -59,11 +58,11 @@ export function createShutdownHandler(deps: ShutdownDeps): (signal: string) => P
     if (shuttingDown) return
     shuttingDown = true
 
-    console.log(`[shutdown] received ${signal} — starting graceful shutdown`)
+    logger.info({ signal }, "Starting graceful shutdown")
 
     // Hard-timeout safety net: if clean shutdown takes too long, force exit.
     const hardTimeout = setTimeout(() => {
-      console.error("[shutdown] hard timeout reached — forcing exit")
+      logger.error("Hard shutdown timeout reached; forcing exit")
       exit(1)
     }, deps.shutdownTimeoutMs)
     // Allow the process to exit even if the timer is still pending.
@@ -77,25 +76,25 @@ export function createShutdownHandler(deps: ShutdownDeps): (signal: string) => P
       await new Promise<void>((resolve, reject) => {
         deps.server.close((err) => (err ? reject(err) : resolve()))
       })
-      console.log("[shutdown] HTTP server closed")
+      logger.info("HTTP server closed")
 
       // 3. Stop indexer poll loops.
       deps.stopIndexers()
-      console.log("[shutdown] indexers stopped")
+      logger.info("Indexers stopped")
 
       // 4. Drain webhook deliveries; unfinished ones are persisted for retry.
       await deps.webhookQueue.drain(deps.webhookDrainTimeoutMs)
 
       // 5. Close MongoDB connection.
       await deps.closeMongo()
-      console.log("[shutdown] MongoDB connection closed")
+      logger.info("MongoDB connection closed")
 
       clearTimeout(hardTimeout)
-      console.log("[shutdown] clean exit")
+      logger.info("Clean shutdown complete")
       exit(0)
     } catch (err) {
       clearTimeout(hardTimeout)
-      console.error("[shutdown] error during shutdown:", err)
+      logger.error({ errorName: err instanceof Error ? err.name : "UnknownError" }, "Shutdown failed")
       exit(1)
     }
   }

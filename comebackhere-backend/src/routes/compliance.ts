@@ -240,8 +240,8 @@ router.post("/block", validateBody(blockBodySchema), asyncHandler(async (req: Re
     signerSecret: "SIGNER_SECRET_KEY",
   })
 
-  // Audit log — admin identity + timestamp
-  console.log(`[compliance] block_address admin="${adminKey}" address="${address}" ts="${new Date().toISOString()}"`)
+  // The admin key is a credential and must never be included in logs.
+  res.locals.logger.info({ address }, "Compliance address block requested")
 
   const client = buildSorobanClient(env.rpcUrl)
   const result = await callComplianceOp(

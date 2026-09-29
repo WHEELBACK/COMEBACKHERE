@@ -19,7 +19,15 @@ import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js"
 import { createCorsMiddleware } from "./middleware/cors.js"
 import { parseCorsOrigins } from "./lib/env.js"
 import { openapiSpec } from "./openapi.js"
-import { renderMetrics } from "./lib/metrics.js"
+import { connectMongo } from "./db/mongo.js"
+import { pingIndexerRedis } from "./indexer.js"
+import { buildSorobanClient } from "./lib/soroban.js"
+import {
+  httpRequestDuration,
+  metricsEnabled,
+  metricsRegistry,
+  renderMetrics,
+} from "./lib/metrics.js"
 
 /** Maximum accepted JSON body size; larger requests get a 413 envelope. */
 export const JSON_BODY_LIMIT = "100kb"
@@ -69,6 +77,20 @@ export function createApp(options: CreateAppOptions = {}) {
   // line, downstream call and error envelope can reference the same
   // correlation ID — including body-parsing errors.
   app.use(correlationIdMiddleware)
+  app.use((req, res, next) => {
+    if (req.path !== "/metrics") {
+      const startedAt = process.hrtime.bigint()
+      res.on("finish", () => {
+        const routePath = req.route ? String(req.route.path) : "unmatched"
+        const route = `${req.baseUrl}${routePath}` || "/"
+        httpRequestDuration.observe(
+          { method: req.method, route, status_code: String(res.statusCode) },
+          Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
+        )
+      })
+    }
+    next()
+  })
   app.use((req, res, next) =>
     req.path === "/api-docs" || req.path.startsWith("/api-docs/")
       ? swaggerHelmet(req, res, next)
@@ -83,11 +105,51 @@ export function createApp(options: CreateAppOptions = {}) {
 
   // ── Health ──────────────────────────────────────────────────────────────────
   app.get("/health", (_req, res) => res.json({ status: "ok" }))
+  app.get("/health/ready", async (_req, res) => {
+    const check = async (probe: () => Promise<unknown>): Promise<boolean> => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          probe().then(() => true, () => false),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), 1_500)
+            timer.unref?.()
+          }),
+        ])
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
+
+    const rpcUrl = process.env.SOROBAN_RPC_URL
+    const [mongo, redis, sorobanRpc] = await Promise.all([
+      check(async () => (await connectMongo()).command({ ping: 1 })),
+      check(async () => {
+        if ((await pingIndexerRedis()) !== "PONG") throw new Error("Redis ping failed")
+      }),
+      check(async () => {
+        if (!rpcUrl) throw new Error("Soroban RPC is not configured")
+        const getHealth = buildSorobanClient(rpcUrl).getHealth
+        if (!getHealth) throw new Error("Soroban RPC health is unsupported")
+        await getHealth()
+      }),
+    ])
+    const dependencies = { mongo, redis, sorobanRpc }
+    const ready = Object.values(dependencies).every(Boolean)
+    res.status(ready ? 200 : 503).json({
+      status: ready ? "ok" : "error",
+      dependencies: Object.fromEntries(
+        Object.entries(dependencies).map(([name, healthy]) => [name, healthy ? "ok" : "unavailable"]),
+      ),
+    })
+  })
 
   // ── Prometheus metrics ──────────────────────────────────────────────────────
-  app.get("/metrics", (_req, res) => {
-    res.type("text/plain; version=0.0.4").send(renderMetrics())
-  })
+  if (metricsEnabled()) {
+    app.get("/metrics", async (_req, res) => {
+      res.type(metricsRegistry.contentType).send(await renderMetrics())
+    })
+  }
 
   // ── OpenAPI spec (Issue #218) ───────────────────────────────────────────────
   // Raw JSON spec at a stable, machine-readable URL

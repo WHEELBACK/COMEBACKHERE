@@ -257,7 +257,10 @@ router.get("/metrics", validateQuery(analyticsQuerySchema), async (req: Request,
 
     res.json(analyticsData)
   } catch (error) {
-    console.error("Error fetching analytics metrics:", error)
+    res.locals.logger.error(
+      { errorName: error instanceof Error ? error.name : "UnknownError" },
+      "Analytics metrics request failed",
+    )
     res.status(500).json({ error: "Failed to fetch analytics metrics" })
   }
 
