@@ -19,6 +19,11 @@ check-abi-snapshots: check-snapshot
 lint-docs:
     @./scripts/lint-docs.sh
 
+# Verify webhook and rate-limit docs match the backend implementation
+check-docs-sync:
+    @./scripts/check_webhook_docs_sync.sh
+    @./scripts/check_ratelimit_docs_sync.sh
+
 # Run deployment verification checks
 verify:
     @./scripts/verify.sh
@@ -26,6 +31,14 @@ verify:
 # Start local Docker environment
 dev:
     docker-compose up -d
+
+# Check that the whole stack came up (no contracts needed)
+smoke:
+    @./tests/smoke_stack.sh
+
+# Start the stack and smoke test it, then tear it down
+smoke-up:
+    @./tests/smoke_stack.sh --up --down
 
 # Run contract tests
 test:

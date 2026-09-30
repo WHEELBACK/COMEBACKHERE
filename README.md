@@ -48,15 +48,21 @@ The response includes `invoice_id` — share this with your payer.
 Configure `WEBHOOK_URL` and `WEBHOOK_SIGNING_SECRET` in your environment so
 the backend can notify your system when payments land.
 
-All outbound webhook POSTs are signed with HMAC-SHA256. Verify the
-`X-COMEBACKHERE-Signature` header before processing:
+All outbound webhook POSTs are signed with HMAC-SHA256 over the exact raw body
+bytes. Verify the `X-COMEBACKHERE-Signature` header before processing:
 
 ```typescript
 import { createHmac, timingSafeEqual } from "crypto"
 
 function verifyWebhook(rawBody: string, signature: string, secret: string): boolean {
   const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex")
-  return timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(signature, "hex"))
+  const expectedBuf = Buffer.from(expected, "hex")
+  const actualBuf = Buffer.from(signature, "hex")
+
+  // timingSafeEqual throws on a length mismatch, so reject short or
+  // malformed signatures before comparing.
+  if (expectedBuf.length !== actualBuf.length) return false
+  return timingSafeEqual(expectedBuf, actualBuf)
 }
 ```
 

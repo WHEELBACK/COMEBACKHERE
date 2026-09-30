@@ -161,7 +161,7 @@ This document outlines potential threats to fund-handling and critical-path oper
 
 | Threat | Description | Existing Mitigations | Known Gaps |
 | --- | --- | --- | --- |
-| Attacker forges webhook signature | Attacker sends fake webhook claiming to be from the backend. | Backend signs webhooks with `WEBHOOK_SECRET` (HMAC-SHA256); merchant must verify signature. | If `WEBHOOK_SECRET` is leaked or weak, signature is forgeable. **Mitigation:** Strong secret (≥32 chars); docs recommend env-var-based secrets. |
+| Attacker forges webhook signature | Attacker sends fake webhook claiming to be from the backend. | Backend signs webhooks with `WEBHOOK_SIGNING_SECRET` (HMAC-SHA256); merchant must verify signature. | If `WEBHOOK_SIGNING_SECRET` is leaked or weak, signature is forgeable. **Mitigation:** Strong secret (≥32 chars); docs recommend env-var-based secrets. |
 | Webhook receiver spoofed | Attacker redirects webhook URL to their server during env setup. | Backend reads webhook URL from merchant profile in MongoDB. | If MongoDB is compromised, webhook URL can be changed. **Mitigation:** MongoDB authentication + network isolation. |
 
 #### Tampering with Data
@@ -180,7 +180,7 @@ This document outlines potential threats to fund-handling and critical-path oper
 
 | Threat | Description | Existing Mitigations | Known Gaps |
 | --- | --- | --- | --- |
-| Attacker floods webhook delivery queue | Attacker creates many invoices to trigger webhook storms. | Backend rate-limits invoice creation per merchant (IP, account). Redis pub/sub has message limits. | If rate-limiting is disabled in config, webhooks can overwhelm merchant receivers. **Mitigation:** Document rate-limits in webhook guide; enable by default. |
+| Attacker floods webhook delivery queue | Attacker creates many invoices to trigger webhook storms. | The rate limiter runs as global middleware on every route, so invoice creation shares the caller's per-IP budget (`RATE_LIMIT_POINTS`, default 60/min). | Buckets are keyed on IP or the unauthenticated `X-API-Key` header — a caller can present a fresh `X-API-Key` per request to draw the larger per-key budget. There is no switch that turns the limiter off, but there is no per-merchant or per-wallet bucket. **Mitigation:** rate-limit at the edge (reverse proxy/WAF) for untrusted traffic; see [rate-limits.md](./rate-limits.md). |
 | Webhook delivery fails, events lost | Merchant receiver is down; backend cannot redeliver. | Backend uses Redis for durable queue; failed webhooks are retried. | If Redis loses data (crash without persistence), webhooks are lost. **Mitigation:** Redis `AOF` or RDB persistence enabled; see [#160](https://github.com/WHEELBACK/COMEBACKHERE/issues/160). |
 
 #### Elevation of Privilege
@@ -226,7 +226,7 @@ This document outlines potential threats to fund-handling and critical-path oper
 
 | Threat | Description | Existing Mitigations | Known Gaps |
 | --- | --- | --- | --- |
-| Admin routes hammered by requests | Attacker with admin key makes thousands of requests to exhaust backend resources. | Depends on rate-limiting implementation; not yet deployed. | If rate-limiting is missing, attacker can crash the backend. **Mitigation:** Rate-limit all admin routes; see [#140](https://github.com/WHEELBACK/COMEBACKHERE/issues/140). |
+| Admin routes hammered by requests | Attacker with admin key makes thousands of requests to exhaust backend resources. | The rate limiter is global middleware mounted before every router, so admin routes such as `/webhooks/dead-letters*` are covered by the same per-IP budget. | An attacker who presents a distinct `X-API-Key` per request is limited only by `RATE_LIMIT_API_KEY_POINTS`. **Mitigation:** rate-limit admin routes at the edge by path, or set `RATE_LIMIT_API_KEY_POINTS` equal to `RATE_LIMIT_POINTS`; see [rate-limits.md](./rate-limits.md). |
 
 #### Elevation of Privilege
 

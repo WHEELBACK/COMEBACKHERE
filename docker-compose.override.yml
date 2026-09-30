@@ -1,3 +1,13 @@
+# Local development overrides for the base docker-compose.yml.
+#
+# Docker Compose merges this file automatically on `docker compose up`, so the
+# service set stays defined in docker-compose.yml and only the local-dev
+# specifics live here.
+#
+# These overrides replace the legacy Rust `backend/` with the TypeScript
+# `comebackhere-backend/` (the live service, per docs/adr-0001-dual-source-trees.md)
+# and publish both ports so tests/smoke_stack.sh can reach them from the host.
+
 version: '3.8'
 
 services:
@@ -5,18 +15,45 @@ services:
     build:
       context: ../comebackhere-backend
       dockerfile: Dockerfile
+      # The dev target runs from source, which the bind mount below requires.
+      target: dev
     ports:
       - "3000:3000"
     environment:
       - STELLAR_NETWORK=standalone
       - SOROBAN_RPC_URL=http://soroban:8000
       - HORIZON_URL=http://soroban:8000
+      - MONGODB_URI=mongodb://mongodb:27017
       - REDIS_URL=redis://redis:6379
+      - NETWORK_PASSPHRASE=Standalone Network ; February 2025
+      - CORS_ORIGINS=http://localhost:5173
+      # validateEnv() refuses to start unless these are set. The contract ids
+      # below are format-valid placeholders so a fresh `docker compose up`
+      # reaches a listening server; override them with real values (or export
+      # them into a .env file) once contracts are deployed.
+      - INVOICE_CONTRACT_ID=${INVOICE_CONTRACT_ID:-CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ}
+      - TREASURY_CONTRACT_ID=${TREASURY_CONTRACT_ID:-CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526}
+      - ADMIN_KEY=${ADMIN_KEY:-local-development-admin-key}
+      - WEBHOOK_SIGNING_SECRET=${WEBHOOK_SIGNING_SECRET:-local-development-webhook-signing-secret}
+      - WEBHOOK_URL=${WEBHOOK_URL:-}
+    # Optional: a developer may keep secrets in comebackhere-backend/.env
+    # instead of the environment. `required: false` keeps `docker compose up`
+    # working when the file is absent.
     env_file:
-      - ../comebackhere-backend/.env
+      - path: ../comebackhere-backend/.env
+        required: false
     volumes:
       - ../comebackhere-backend:/app
-      - /app/target
+      - /app/node_modules
+    # The base file's healthcheck targets the legacy Rust backend on 3001.
+    # This one matches the Node service: /health on 3000, via busybox wget
+    # (node:alpine has no curl).
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
     depends_on:
       soroban:
         condition: service_healthy
@@ -30,18 +67,32 @@ services:
     build:
       context: ../comebackhere-frontend
       dockerfile: Dockerfile
+      target: dev
     ports:
       - "5173:5173"
     environment:
       - VITE_API_URL=http://localhost:3000
+      - VITE_API_BASE=http://localhost:3000
       - VITE_SOROBAN_RPC=http://localhost:8000
       - VITE_HORIZON_URL=http://localhost:8000
       - VITE_NETWORK_PASSPHRASE=Standalone Network ; February 2025
     env_file:
-      - ../comebackhere-frontend/.env
+      - path: ../comebackhere-frontend/.env
+        required: false
     volumes:
       - ../comebackhere-frontend:/app
       - /app/node_modules
+    # wget comes from busybox in node:alpine; curl is not installed, and the
+    # base file's `curl -f` probe would fail in every container.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5173/"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    # Mapping form, matching the base file, so Compose merges rather than
+    # replacing: the frontend waits for the backend to report healthy.
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped

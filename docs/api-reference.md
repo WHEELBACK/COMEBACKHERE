@@ -25,9 +25,13 @@ gets a relaxed CSP that allows its same-origin scripts, inline styles and
 > [`GET /api-docs/swagger.json`](http://localhost:3000/api-docs/swagger.json) (raw JSON)
 > and [`GET /api-docs`](http://localhost:3000/api-docs) (interactive Swagger UI).
 >
-> **Rate limits:** All endpoints are subject to per-IP rate limiting. See
-> [docs/rate-limits.md](./rate-limits.md) for default limits, configuration,
-> and the 429 response shape.
+> **Rate limits:** All endpoints — including `/health` and `/metrics` — are
+> subject to rate limiting. Requests are bucketed per IP (default 60 per 60s),
+> or per `X-API-Key` when that header is present (default 600 per 60s). Every
+> response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and
+> `X-RateLimit-Reset`; 429 responses add `Retry-After`. See
+> [docs/rate-limits.md](./rate-limits.md) for defaults, configuration, and the
+> 429 response shape.
 >
 > **Errors:** Every error uses one envelope,
 > `{ "error": { "code", "message", "details", "correlationId" } }`. See
@@ -906,7 +910,12 @@ can verify payload authenticity before processing it.
 | `X-COMEBACKHERE-Signature`  | Lowercase hex-encoded HMAC-SHA256 digest |
 
 The digest is computed over the **raw JSON request body** (exactly as sent over
-the wire) using the `WEBHOOK_SIGNING_SECRET` environment variable as the key.
+the wire) using the `WEBHOOK_SIGNING_SECRET` environment variable as the key. It
+is a bare 64-character lowercase hex digest — there is no `t=…,v1=…` envelope
+and no timestamp, so the signature alone provides no replay window. Deduplicate
+on your own key.
+
+> There is no `WEBHOOK_SECRET`: the backend reads `WEBHOOK_SIGNING_SECRET` only.
 
 ### Verification (Node.js example)
 
@@ -940,9 +949,14 @@ history. These operator endpoints require `x-admin-key`:
 | `GET /webhooks/dead-letters` | List the latest 100 permanently failed deliveries |
 | `POST /webhooks/dead-letters/:id/replay` | Retry one delivery by its idempotency key; remove the dead letter only on success |
 
+> These routes are live, but nothing populates the collection today: the live
+> dispatch path makes a single attempt and never enqueues a retry. See
+> [The two delivery paths](./webhooks.md#the-two-delivery-paths).
+
 ### Webhook event payload shape
 
-All events share a common `event` field plus event-specific fields:
+Events are flat objects with an `event` field plus event-specific fields at the
+top level — there is no `data` envelope and no `event_type` key:
 
 ```json
 {
@@ -952,21 +966,24 @@ All events share a common `event` field plus event-specific fields:
 }
 ```
 
-| Event                   | Extra fields                                               |
-| ----------------------- | ---------------------------------------------------------- |
-| `settlement_proposed`   | `settlement_id`, `merchant_address`, `amount`, `token`, `tx_hash` |
-| `settlement_approved`   | `settlement_id`, `signer`, `approval_weight`, `tx_hash`    |
-| `settlement_executed`   | `settlement_id`, `tx_hash`                                 |
+| Event                   | Extra fields                                               | Types |
+| ----------------------- | ---------------------------------------------------------- | ----- |
+| `settlement_proposed`   | `settlement_id`, `merchant_address`, `amount`, `token`, `tx_hash` | number, string, string, string, string |
+| `settlement_approved`   | `settlement_id`, `signer`, `approval_weight`, `tx_hash`    | number, string, string, string |
+| `settlement_executed`   | `settlement_id`, `tx_hash`                                 | number, string |
+
+`settlement_id` is a number; `amount` and `approval_weight` are strings.
 
 ### Configuration
 
 | Variable                | Description                                                        |
 | ----------------------- | ------------------------------------------------------------------ |
 | `WEBHOOK_URL`           | Merchant endpoint that receives webhook POSTs                      |
-| `WEBHOOK_SIGNING_SECRET`| HMAC-SHA256 signing secret (minimum 32 characters recommended)     |
+| `WEBHOOK_SIGNING_SECRET`| HMAC-SHA256 signing secret (minimum 32 characters recommended). **Required at startup.** |
 
 Set both variables in your deployment environment. If `WEBHOOK_URL` is not set,
-webhook delivery is skipped silently (no error).
+webhook delivery is skipped silently (no error). If `WEBHOOK_SIGNING_SECRET` is
+unset the backend exits at startup rather than sending unsigned webhooks.
 
 ---
 
@@ -1156,7 +1173,7 @@ header and `correlationId`. Otherwise the server generates a UUID v4.
 | 413  | `PAYLOAD_TOO_LARGE`     | JSON body exceeds 100 kB                                         | `{ limitBytes }`                       |
 | 4xx/5xx | `CONTRACT_ERROR`     | A Soroban contract returned `Error(Contract, #N)`                | `{ contractCode: N }` — see [error-codes.md](./error-codes.md) |
 | 422  | `UNPROCESSABLE_ENTITY`  | Soroban simulation / submission failed without a contract code   | `null`                                 |
-| 429  | `RATE_LIMITED`          | Per-IP rate limit exceeded                                       | `{ retryAfter }` (seconds)             |
+| 429  | `RATE_LIMITED`          | Rate limit exceeded for this request's bucket (IP, or `X-API-Key`)  | `error.details.retryAfter` (seconds)    |
 | 500  | `INTERNAL_ERROR`        | Unexpected server error                                          | `null`                                 |
 | 503  | `SERVICE_MISCONFIGURED` | Required environment variables are missing                       | `null`                                 |
 | 503  | `SERVICE_UNAVAILABLE`   | A dependency (e.g. MongoDB) is unreachable                       | `null`                                 |
@@ -1174,18 +1191,30 @@ handlers are wrapped in `asyncHandler` so rejected promises reach it.
 
 | Variable               | Description                                               |
 | ---------------------- | --------------------------------------------------------- |
+| `MONGODB_URI`          | MongoDB connection string (required at startup)            |
+| `REDIS_URL`            | Redis connection string for the rate limiter (required at startup) |
 | `SOROBAN_RPC_URL`      | Soroban RPC endpoint (e.g. `http://localhost:8000/soroban/rpc`) |
-| `INVOICE_CONTRACT_ID`  | Deployed invoice contract address                         |
-| `TREASURY_CONTRACT_ID` | Deployed treasury contract address                        |
+| `INVOICE_CONTRACT_ID`  | Deployed invoice contract address (required at startup)   |
+| `TREASURY_CONTRACT_ID` | Deployed treasury contract address (required at startup)  |
+| `ADMIN_KEY`            | Admin key sent as `x-admin-key` on the `/webhooks/dead-letters*` routes (required at startup) |
+| `WEBHOOK_URL`          | Merchant webhook endpoint URL. Unset disables webhooks.   |
+| `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 signing secret for outbound webhooks. Required at startup; there is no `WEBHOOK_SECRET`. |
 | `USDC_CONTRACT_ID`     | USDC token contract address                               |
 | `SETTLEMENT_CONTRACT_ID` | Settlement contract address (disputes)                  |
 | `SIGNER_SECRET_KEY`    | Stellar secret key for signing transactions               |
 | `NETWORK_PASSPHRASE`   | Stellar network passphrase                                |
-| `WEBHOOK_URL`          | Merchant webhook endpoint URL                             |
-| `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 signing secret for outbound webhooks        |
 | `WEBHOOK_MAX_ATTEMPTS` | Maximum webhook attempts (default `5`)                     |
 | `WEBHOOK_BASE_DELAY_MS` | Initial retry delay in ms (default `1000`)                 |
 | `WEBHOOK_MAX_DELAY_MS` | Maximum backoff delay in ms (default `60000`)               |
 | `WEBHOOK_JITTER_RATIO` | Retry jitter from `0` to `1` (default `0.2`)                |
+| `RATE_LIMIT_POINTS`    | Requests per window for the per-IP bucket (default `60`)   |
+| `RATE_LIMIT_API_KEY_POINTS` | Requests per window for the per-`X-API-Key` bucket (default `600`) |
+| `RATE_LIMIT_DURATION`  | Rate limit window in seconds (default `60`)                |
 | `PORT`                 | HTTP server port (default `3000`)                         |
 | `CORS_ORIGINS`         | Comma-separated allowlist of browser origins, e.g. `http://localhost:5173,https://app.example.com`. Bare origins only (no path, trailing slash or `*`); invalid entries fail startup. Unset = no cross-origin access. |
+
+The "required at startup" variables are enforced by `validateEnv()` in
+`comebackhere-backend/src/lib/env.ts` before the server binds its port, and by
+`scripts/validate_backend_env.sh` for local setup. See
+[docs/dev-environment.md](./dev-environment.md#full-environment-variable-reference)
+for the complete list and defaults.
