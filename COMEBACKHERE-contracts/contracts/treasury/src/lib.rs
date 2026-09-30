@@ -4,9 +4,11 @@
 extern crate std;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, IntoVal, Symbol,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, Symbol,
     Vec,
 };
+
+mod events;
 
 const DEFAULT_SETTLEMENT_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
 
@@ -1004,13 +1006,39 @@ impl TreasuryContract {
     /// # Arguments
     /// * `e` - Soroban environment handle.
     /// * `from` - Depositor address (must authenticate).
-    /// * `_amount` - Amount to deposit.
+    /// * `token` - Token contract address to deposit.
+    /// * `amount` - Amount of tokens to deposit.
     ///
     /// # Errors
+    /// * Returns [`TreasuryError::TokenNotAllowed`] if token is not on the allowlist.
     /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
-    pub fn deposit(e: Env, from: Address, _amount: u64) -> Result<(), TreasuryError> {
+    pub fn deposit(
+        e: Env,
+        from: Address,
+        token: Address,
+        amount: u64,
+    ) -> Result<(), TreasuryError> {
+        let allowlist: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAllowlist)
+            .unwrap_or_else(|| Vec::new(&e));
+        if !allowlist.contains(&token) {
+            return Err(TreasuryError::TokenNotAllowed);
+        }
+
         check_not_paused(&e)?;
         from.require_auth();
+
+        token::Client::new(&e, &token).transfer(
+            &from,
+            &e.current_contract_address(),
+            &(amount as i128),
+        );
+
+        // (Symbol::new(&e, "deposit"),)
+        events::deposit(&e, &token, &from, &amount);
+
         Ok(())
     }
 
@@ -1773,11 +1801,102 @@ mod tests {
         let c = client(&e, &id);
         let admin = soroban_sdk::Address::generate(&e);
         let user = soroban_sdk::Address::generate(&e);
-        let token = soroban_sdk::Address::generate(&e);
-        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        let token_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let token = token_contract.address();
+        let token_client = soroban_sdk::token::Client::new(&e, &token);
+        token_client.mint(&user, &1000i128);
 
-        c.deposit(&user, &1000u64);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.add_token_to_allowlist(&admin, &token);
+
+        c.deposit(&user, &token, &1000u64);
+        assert_eq!(token_client.balance(&user), 0i128);
+        assert_eq!(token_client.balance(&id), 1000i128);
+
         c.withdraw(&admin, &token, &user, &500u64);
+    }
+
+    #[test]
+    fn test_deposit_transfers_tokens_and_updates_balances() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let token = token_contract.address();
+        let token_client = soroban_sdk::token::Client::new(&e, &token);
+        token_client.mint(&user, &5000i128);
+
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.add_token_to_allowlist(&admin, &token);
+
+        assert_eq!(token_client.balance(&user), 5000i128);
+        assert_eq!(token_client.balance(&id), 0i128);
+
+        c.deposit(&user, &token, &2000u64);
+
+        assert_eq!(token_client.balance(&user), 3000i128);
+        assert_eq!(token_client.balance(&id), 2000i128);
+
+        assert!(
+            e.events().all().iter().any(|event| event.0 == (id.clone(), "deposit".into())),
+            "deposit event should be emitted"
+        );
+    }
+
+    #[test]
+    fn test_deposit_rejects_non_allowlisted_token() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let allowed_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let allowed_token = allowed_contract.address();
+        let disallowed_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let disallowed_token = disallowed_contract.address();
+
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.add_token_to_allowlist(&admin, &allowed_token);
+
+        let err = c.try_deposit(&user, &disallowed_token, &1000u64);
+        assert_eq!(err, Err(Ok(TreasuryError::TokenNotAllowed)));
+    }
+
+    #[test]
+    fn test_deposit_rejects_when_contract_paused() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let token = token_contract.address();
+
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.add_token_to_allowlist(&admin, &token);
+        c.pause(&admin);
+
+        let err = c.try_deposit(&user, &token, &1000u64);
+        assert_eq!(err, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_deposit_disallowed_token_rejected_before_paused_check() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let allowed_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let allowed_token = allowed_contract.address();
+        let disallowed_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let disallowed_token = disallowed_contract.address();
+
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.add_token_to_allowlist(&admin, &allowed_token);
+        c.pause(&admin);
+
+        // When paused AND disallowed, TokenNotAllowed must be returned first.
+        let err = c.try_deposit(&user, &disallowed_token, &1000u64);
+        assert_eq!(err, Err(Ok(TreasuryError::TokenNotAllowed)));
     }
 
     #[test]
