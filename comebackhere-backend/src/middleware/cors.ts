@@ -2,13 +2,20 @@ import cors from "cors"
 import type { RequestHandler } from "express"
 import { AppError } from "../lib/errors.js"
 
-/** Request headers the frontend sends and preflight must allow. */
+/**
+ * Request headers the frontend sends and preflight must allow.
+ *
+ * `X-API-Key` is the bucket selector read by the rate limiter — see
+ * `rateLimitMiddleware` and docs/rate-limits.md. It selects the larger
+ * per-key budget; it is not an authentication credential.
+ */
 export const CORS_ALLOWED_HEADERS = [
   "Content-Type",
   "Authorization",
   "Idempotency-Key",
   "X-Request-Id",
   "X-Admin-Key",
+  "X-API-Key",
 ]
 
 /** Response headers browsers may read from cross-origin responses. */
