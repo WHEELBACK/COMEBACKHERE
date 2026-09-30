@@ -17,7 +17,7 @@ const FULL_ENV: Record<string, string> = {
   TREASURY_CONTRACT_ID: CONTRACT_A,
   INVOICE_CONTRACT_ID: CONTRACT_B,
   ADMIN_KEY: "secret-admin",
-  WEBHOOK_SECRET: "secret-webhook",
+  WEBHOOK_SIGNING_SECRET: "secret-webhook",
 }
 
 describe("validateEnv", () => {
@@ -35,7 +35,7 @@ describe("validateEnv", () => {
   it("lists every missing var in one error, not just the first one found", () => {
     const env = { ...FULL_ENV }
     delete env.REDIS_URL
-    delete env.WEBHOOK_SECRET
+    delete env.WEBHOOK_SIGNING_SECRET
 
     let err: Error | null = null
     try {
@@ -46,7 +46,7 @@ describe("validateEnv", () => {
 
     expect(err).not.toBeNull()
     expect(err!.message).toMatch(/REDIS_URL/)
-    expect(err!.message).toMatch(/WEBHOOK_SECRET/)
+    expect(err!.message).toMatch(/WEBHOOK_SIGNING_SECRET/)
   })
 
   it("includes all seven required vars in the error when none are set", () => {
@@ -65,7 +65,7 @@ describe("validateEnv", () => {
     expect(message).toMatch(/TREASURY_CONTRACT_ID/)
     expect(message).toMatch(/INVOICE_CONTRACT_ID/)
     expect(message).toMatch(/ADMIN_KEY/)
-    expect(message).toMatch(/WEBHOOK_SECRET/)
+    expect(message).toMatch(/WEBHOOK_SIGNING_SECRET/)
   })
 
   it("throws with a human-readable hint to set the missing variables", () => {

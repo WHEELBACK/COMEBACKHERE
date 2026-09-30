@@ -58,6 +58,14 @@ jobs:
     name: ci / backend tests
     uses: ./.github/workflows/backend-tests.yml
 
+  ci-stack-smoke:
+    name: ci / stack smoke test
+    uses: ./.github/workflows/ci-stack-smoke.yml
+
+  ci-webhook-ratelimit-docs:
+    name: ci / webhook and rate-limit docs sync
+    uses: ./.github/workflows/ci-webhook-ratelimit-docs.yml
+
   ci-lint-docs:
     name: ci / lint docs
     uses: ./.github/workflows/lint-docs.yml
@@ -87,6 +95,8 @@ jobs:
       - ci-coverage
       - ci-error-docs
       - ci-backend-tests
+      - ci-stack-smoke
+      - ci-webhook-ratelimit-docs
       - ci-lint-docs
       - ci-npm-audit
       - ci-playwright-e2e

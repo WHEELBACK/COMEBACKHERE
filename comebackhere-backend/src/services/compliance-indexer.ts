@@ -1,6 +1,8 @@
 import { SorobanRpc, xdr } from "stellar-sdk"
 import { buildSorobanClient, type SorobanClient } from "../lib/soroban.js"
 import { connectMongo, getCursorsCollection, getComplianceAuditCollection, type ComplianceAuditRecord, type ComplianceAuditStatus } from "../db/mongo.js"
+import { indexerLedgerLag } from "../lib/metrics.js"
+import { logger } from "../lib/logger.js"
 
 const CURSOR_ID = "compliance_audit_events"
 const EVENT_LIMIT = 100
@@ -90,6 +92,10 @@ export async function processComplianceIndexerBatch(
     },
     { upsert: true },
   )
+  indexerLedgerLag.set(
+    { indexer: "compliance" },
+    Math.max(0, (response.latestLedger ?? cursor.last_ledger) - (response.events?.at(-1)?.ledger ?? response.latestLedger ?? cursor.last_ledger)),
+  )
   return processed
 }
 
@@ -102,7 +108,7 @@ export function startComplianceIndexer(): void {
   const client = buildSorobanClient(rpcUrl)
   const tick = async () => {
     try { await processComplianceIndexerBatch(client, contractId, await connectMongo()) }
-    catch (err) { console.error("[compliance-indexer] error:", err instanceof Error ? err.message : err) }
+    catch (err) { logger.error({ errorName: err instanceof Error ? err.name : "UnknownError" }, "Compliance indexer failed") }
   }
   void tick()
   timer = setInterval(() => void tick(), POLL_INTERVAL_MS)

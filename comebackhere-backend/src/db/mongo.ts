@@ -1,4 +1,5 @@
 import { MongoClient, type Db, type Collection, MongoServerSelectionError } from "mongodb"
+import { logger } from "../lib/logger.js"
 
 export type InvoiceStatus = "Pending" | "Paid" | "Expired" | "Cancelled" | "RefundRequested" | "Released"
 
@@ -105,6 +106,47 @@ export const MAX_PAGE_SIZE = 100
 
 let client: MongoClient | null = null
 let db: Db | null = null
+let connecting: Promise<Db> | null = null
+const indexesByDb = new WeakMap<Db, Promise<void>>()
+
+export function ensureIndexes(database: Db): Promise<void> {
+  const existing = indexesByDb.get(database)
+  if (existing) return existing
+
+  const indexes: Array<{ collection: string; keys: Record<string, 1 | -1>; unique?: boolean }> = [
+    { collection: "settlements", keys: { id: 1 }, unique: true },
+    { collection: "settlements", keys: { status: 1 } },
+    { collection: "invoices", keys: { invoice_id: 1 }, unique: true },
+    { collection: "invoices", keys: { status: 1 } },
+    { collection: "invoices", keys: { merchant_address: 1 } },
+    { collection: "invoices", keys: { status: 1, merchant_address: 1 } },
+    { collection: "invoices", keys: { created_at: -1 } },
+    { collection: "invoices", keys: { created_at: -1, invoice_id: -1 } },
+    { collection: "indexer_cursors", keys: { _id: 1 }, unique: true },
+    { collection: "invoice_events", keys: { event_id: 1 }, unique: true },
+    { collection: "invoice_events", keys: { invoice_id: 1, ledger: 1 } },
+    { collection: "webhook_pending_deliveries", keys: { _id: 1 }, unique: true },
+    { collection: "webhook_dead_letters", keys: { _id: 1 }, unique: true },
+    { collection: "webhook_dead_letters", keys: { failed_at: -1 } },
+    { collection: "compliance_audit", keys: { event_id: 1 }, unique: true },
+    { collection: "compliance_audit", keys: { address: 1, ledger: -1 } },
+    { collection: "compliance_audit", keys: { event_type: 1, ledger: -1 } },
+    { collection: "compliance_audit", keys: { ledger: -1 } },
+  ]
+
+  const creating = Promise.all(
+    indexes.map(async ({ collection, keys, unique }) => {
+      const indexName = await database.collection(collection).createIndex(keys, unique ? { unique } : {})
+      logger.info({ collection, indexName }, "MongoDB index ensured")
+    }),
+  ).then(() => undefined)
+  const result = creating.catch((error: unknown) => {
+    indexesByDb.delete(database)
+    throw error
+  })
+  indexesByDb.set(database, result)
+  return result
+}
 
 // ---------------------------------------------------------------------------
 // #210 — Connection options: explicit pool size and timeouts so a slow or
@@ -134,8 +176,17 @@ const MONGO_OPTIONS = {
   socketTimeoutMS: 45_000,
 }
 
-export async function connectMongo(): Promise<Db> {
-  if (db) return db
+export function connectMongo(): Promise<Db> {
+  if (db) return ensureIndexes(db).then(() => db!)
+  if (connecting) return connecting
+
+  connecting = connectMongoOnce().finally(() => {
+    connecting = null
+  })
+  return connecting
+}
+
+async function connectMongoOnce(): Promise<Db> {
 
   const uri = process.env.MONGODB_URI ?? "mongodb://localhost:27017"
   const dbName = process.env.MONGODB_DB ?? "comebackhere"
@@ -145,6 +196,7 @@ export async function connectMongo(): Promise<Db> {
   try {
     await client.connect()
   } catch (err) {
+    client = null
     // Provide a clear, actionable error message rather than letting the raw
     // driver error bubble up silently.
     const message =
@@ -153,7 +205,7 @@ export async function connectMongo(): Promise<Db> {
           `Original error: ${err.message}`
         : `Failed to connect to MongoDB: ${err instanceof Error ? err.message : String(err)}`
 
-    console.error(`[mongo] ${message}`)
+    logger.error({ errorName: err instanceof Error ? err.name : "UnknownError" }, "MongoDB connection failed")
     // Re-throw so callers (routes, startup health-checks) can respond with 5xx.
     throw Object.assign(new Error(message), { status: 503 })
   }
@@ -163,43 +215,18 @@ export async function connectMongo(): Promise<Db> {
   // Attach a top-level error handler so an unexpected mid-run topology
   // failure is logged clearly rather than crashing the process silently.
   client.on("error", (err: Error) => {
-    console.error("[mongo] client error", err.message)
+    logger.error({ errorName: err.name }, "MongoDB client error")
   })
 
   client.on("close", () => {
-    console.warn("[mongo] connection closed — subsequent requests will reconnect")
+    logger.warn("MongoDB connection closed; subsequent requests will reconnect")
     // Reset cached references so the next call to connectMongo() re-establishes
     // the connection instead of returning a stale db handle.
     db = null
     client = null
   })
 
-  const settlements = db.collection<SettlementRecord>("settlements")
-  await settlements.createIndex({ id: 1 }, { unique: true })
-  await settlements.createIndex({ status: 1 })
-
-  const invoices = db.collection<InvoiceRecord>("invoices")
-  await invoices.createIndex({ invoice_id: 1 }, { unique: true })
-  await invoices.createIndex({ status: 1 })
-  await invoices.createIndex({ merchant_address: 1 })
-  await invoices.createIndex({ status: 1, merchant_address: 1 })
-  await invoices.createIndex({ created_at: -1 })
-  await invoices.createIndex({ created_at: -1, invoice_id: -1 })
-
-  const cursors = db.collection<IndexerCursor>("indexer_cursors")
-  await cursors.createIndex({ _id: 1 }, { unique: true })
-
-  const invoiceEvents = db.collection<InvoiceEventRecord>("invoice_events")
-  await invoiceEvents.createIndex({ event_id: 1 }, { unique: true })
-  await invoiceEvents.createIndex({ invoice_id: 1, ledger: 1 })
-
-  await db.collection("webhook_dead_letters").createIndex({ failed_at: -1 })
-
-  const complianceAudit = db.collection<ComplianceAuditRecord>("compliance_audit")
-  await complianceAudit.createIndex({ event_id: 1 }, { unique: true })
-  await complianceAudit.createIndex({ address: 1, ledger: -1 })
-  await complianceAudit.createIndex({ event_type: 1, ledger: -1 })
-  await complianceAudit.createIndex({ ledger: -1 })
+  await ensureIndexes(db)
 
   return db
 }
@@ -240,4 +267,5 @@ export async function closeMongo(): Promise<void> {
 export function _resetMongoSingleton(): void {
   client = null
   db = null
+  connecting = null
 }

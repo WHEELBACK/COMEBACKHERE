@@ -11,6 +11,8 @@ import {
 } from "../db/mongo.js"
 import { dispatchWebhook } from "./webhooks.js"
 import { invalidateBalanceCache } from "../lib/cache.js"
+import { indexerLedgerLag } from "../lib/metrics.js"
+import { logger } from "../lib/logger.js"
 
 const CURSOR_ID = "treasury_settlement_events"
 const POLL_INTERVAL_MS = 5_000
@@ -229,7 +231,7 @@ export async function processIndexerBatch(
 
     // De-duplicate: skip events we have already applied (reorg / replay protection)
     if (processedIds.has(eventId)) {
-      console.log(`[treasury-indexer] skipping duplicate event id=${eventId}`)
+      logger.debug({ eventId }, "Skipping duplicate treasury event")
       continue
     }
 
@@ -250,10 +252,7 @@ export async function processIndexerBatch(
           token,
           tx_hash: txHash,
         }).catch((err: unknown) => {
-          console.error(
-            "[treasury-indexer] webhook dispatch failed (settlement_proposed):",
-            err instanceof Error ? err.message : err,
-          )
+          logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_proposed" }, "Treasury webhook dispatch failed")
         })
       }
     } else if (eventType === "settlement_approved") {
@@ -271,10 +270,7 @@ export async function processIndexerBatch(
           approval_weight: newWeight.toString(),
           tx_hash: txHash,
         }).catch((err: unknown) => {
-          console.error(
-            "[treasury-indexer] webhook dispatch failed (settlement_approved):",
-            err instanceof Error ? err.message : err,
-          )
+          logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_approved" }, "Treasury webhook dispatch failed")
         })
       }
     } else if (eventType === "settlement_executed") {
@@ -292,10 +288,7 @@ export async function processIndexerBatch(
           settlement_id: settlementId,
           tx_hash: txHash,
         }).catch((err: unknown) => {
-          console.error(
-            "[treasury-indexer] webhook dispatch failed (settlement_executed):",
-            err instanceof Error ? err.message : err,
-          )
+          logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_executed" }, "Treasury webhook dispatch failed")
         })
       }
     }
@@ -307,11 +300,13 @@ export async function processIndexerBatch(
 
   const lastLedger = response.latestLedger ?? cursor.last_ledger
   await saveCursor(database, lastPagingToken, lastLedger, newEventIds)
+  indexerLedgerLag.set(
+    { indexer: "treasury" },
+    Math.max(0, (response.latestLedger ?? lastLedger) - lastLedger),
+  )
 
   if (processed > 0) {
-    console.log(
-      `[treasury-indexer] processed ${processed} event(s); cursor ledger=${lastLedger}`,
-    )
+    logger.info({ processed, cursorLedger: lastLedger }, "Treasury indexer batch processed")
   }
 
   return processed
@@ -326,9 +321,7 @@ export function startTreasuryIndexer(): void {
   const treasuryContractId = process.env.TREASURY_CONTRACT_ID
 
   if (!rpcUrl || !treasuryContractId) {
-    console.warn(
-      "[treasury-indexer] skipped: SOROBAN_RPC_URL and TREASURY_CONTRACT_ID required",
-    )
+    logger.warn("Treasury indexer skipped; RPC URL and contract ID are required")
     return
   }
 
@@ -339,13 +332,13 @@ export function startTreasuryIndexer(): void {
       const database = await connectMongo()
       await processIndexerBatch(client, treasuryContractId, database)
     } catch (err) {
-      console.error("[treasury-indexer] error:", err instanceof Error ? err.message : err)
+      logger.error({ errorName: err instanceof Error ? err.name : "UnknownError" }, "Treasury indexer failed")
     }
   }
 
   void tick()
   indexerTimer = setInterval(() => void tick(), POLL_INTERVAL_MS)
-  console.log("[treasury-indexer] started")
+  logger.info("Treasury indexer started")
 }
 
 export function stopTreasuryIndexer(): void {

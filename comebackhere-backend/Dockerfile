@@ -5,6 +5,12 @@
 #   docker build -t comebackhere-backend comebackhere-backend/
 #   docker run --rm -p 3000:3000 --env-file comebackhere-backend/.env comebackhere-backend
 #
+# Targets:
+#   runtime (default) — compiled dist/ with production dependencies only.
+#   dev               — full dependencies and sources, run via `tsx watch`.
+#                      Selected by docker-compose.override.yml, which bind-mounts
+#                      the working tree over /app and so cannot use a baked dist/.
+#
 # package-lock.json is gitignored in this repo, so installs use `npm ci` when a
 # lockfile is present in the build context and fall back to `npm install`.
 
@@ -25,6 +31,30 @@ RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build
+
+# ── dev: full dependencies + source, run from source via tsx ──────────────────
+# Used by docker-compose.override.yml, which bind-mounts the working tree over
+# /app. That mount hides anything built into the image, so the dev stage cannot
+# rely on a precompiled dist/ — it runs the sources directly instead.
+FROM node:${NODE_VERSION}-alpine AS dev
+ENV NODE_ENV=development \
+    PORT=3000
+WORKDIR /app
+
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+COPY --chown=node:node . .
+
+USER node
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=25s --retries=12 \
+  CMD wget -qO- "http://127.0.0.1:${PORT}/health" > /dev/null || exit 1
+
+# `npm run dev` is `tsx watch src/index.ts`, so edits in the bind mount restart
+# the server. Run node via npm here (unlike the runtime stage) because the
+# watcher process manager, not node, owns the PID.
+CMD ["npm", "run", "dev"]
 
 # ── runtime: dist/ + production node_modules, non-root ────────────────────────
 FROM node:${NODE_VERSION}-alpine AS runtime

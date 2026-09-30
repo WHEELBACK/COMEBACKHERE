@@ -54,9 +54,16 @@ pub fn dispute_raised(env: &Env, invoice_id: &u64, settlement_id: &u64, claimant
     );
 }
 
-pub fn grace_window_updated(env: &Env, old_window: &u64, new_window: &u64) {
+pub fn admin_transfer_initiated(env: &Env, current_admin: &Address, new_admin: &Address) {
     env.events().publish(
-        (Symbol::new(env, "grace_window_updated"),),
-        (*old_window, *new_window),
+        (Symbol::new(env, "admin_transfer_initiated"),),
+        (current_admin, new_admin),
+    );
+}
+
+pub fn admin_transfer_accepted(env: &Env, new_admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "admin_transfer_accepted"),),
+        new_admin,
     );
 }

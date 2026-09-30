@@ -16,6 +16,8 @@
 
 import { connectMongo } from "../db/mongo.js"
 import { getWebhookRetryConfig, type WebhookRetryConfig } from "../lib/env.js"
+import { webhookDeliveryOutcomes } from "../lib/metrics.js"
+import { logger } from "../lib/logger.js"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -196,6 +198,7 @@ export async function deliverWebhook(
 
       if (statusCode >= 200 && statusCode < 300) {
         record.status = "delivered"
+        webhookDeliveryOutcomes.inc({ status: "delivered" })
         return record
       }
 
@@ -215,10 +218,10 @@ export async function deliverWebhook(
   }
 
   record.status = "failed"
-  console.error(
-    `[webhook] delivery failed after ${record.attempts} attempt(s) ` +
-    `key=${record.idempotency_key} requestId=${record.request_id ?? "-"} ` +
-    `endpoint=${endpoint} last_error=${record.last_error}`,
+  webhookDeliveryOutcomes.inc({ status: "failed" })
+  logger.error(
+    { attempts: record.attempts, requestId: record.request_id, lastStatusCode: record.last_status_code },
+    "webhook delivery failed",
   )
   return record
 }
@@ -444,9 +447,7 @@ export class WebhookDeliveryQueue {
     const job: WebhookDeliveryJob = { endpoint, payload, attempts, attempt_history: attemptHistory }
 
     if (!this.accepting) {
-      console.warn(
-        `[webhook] queue closed — deferring key=${payload.idempotency_key} for retry after restart`,
-      )
+      logger.warn("Webhook queue closed; delivery deferred for retry after restart")
       if (this.abort.signal.aborted) {
         // Drain already finished; persist straight away.
         this.persist([job])
@@ -483,7 +484,7 @@ export class WebhookDeliveryQueue {
         try {
           await this.deadLetterStore.save(record)
         } catch (err: unknown) {
-          console.error("[webhook] failed to save dead letter:", err instanceof Error ? err.message : err)
+          logger.error({ errorName: err instanceof Error ? err.name : "UnknownError" }, "Failed to save webhook dead letter")
         }
       }
       if (record.status !== "pending") this.active.delete(entry)
@@ -498,7 +499,7 @@ export class WebhookDeliveryQueue {
   stopAccepting(): void {
     if (this.accepting) {
       this.accepting = false
-      console.log("[webhook] queue stopped accepting new deliveries")
+      logger.info("Webhook queue stopped accepting deliveries")
     }
   }
 
@@ -509,9 +510,7 @@ export class WebhookDeliveryQueue {
   async drain(timeoutMs: number): Promise<DrainResult> {
     this.stopAccepting()
     const startedWith = this.active.size
-    console.log(
-      `[webhook] draining ${startedWith} in-flight deliver${startedWith === 1 ? "y" : "ies"} (timeout ${timeoutMs}ms)`,
-    )
+    logger.info({ inFlight: startedWith, timeoutMs }, "Draining webhook deliveries")
 
     let timer: ReturnType<typeof setTimeout> | undefined
     const timedOut = await Promise.race([
@@ -531,9 +530,9 @@ export class WebhookDeliveryQueue {
 
     if (unfinished.length > 0) await this.persist(unfinished)
 
-    console.log(
-      `[webhook] drain ${timedOut ? "timed out" : "complete"}: ` +
-        `${completed} finished, ${unfinished.length} persisted for retry`,
+    logger.info(
+      { timedOut, completed, persisted: unfinished.length },
+      "Webhook delivery drain finished",
     )
     return { completed, persisted: unfinished.length, timedOut }
   }
@@ -543,7 +542,7 @@ export class WebhookDeliveryQueue {
     const jobs = await this.store.takeAll()
     for (const job of jobs) this.enqueue(job.endpoint, job.payload, job.attempts, job.attempt_history)
     if (jobs.length > 0) {
-      console.log(`[webhook] resumed ${jobs.length} persisted deliver${jobs.length === 1 ? "y" : "ies"}`)
+      logger.info({ resumed: jobs.length }, "Persisted webhook deliveries resumed")
     }
     return jobs.length
   }
@@ -567,9 +566,9 @@ export class WebhookDeliveryQueue {
     try {
       await this.store.save(jobs)
     } catch (err) {
-      console.error(
-        `[webhook] failed to persist ${jobs.length} unfinished deliver${jobs.length === 1 ? "y" : "ies"}:`,
-        err instanceof Error ? err.message : err,
+      logger.error(
+        { count: jobs.length, errorName: err instanceof Error ? err.name : "UnknownError" },
+        "Failed to persist unfinished webhook deliveries",
       )
     }
   }

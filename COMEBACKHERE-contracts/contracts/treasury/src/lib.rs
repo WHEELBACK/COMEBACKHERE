@@ -102,6 +102,8 @@ const INSTANCE_TTL_EXTEND_TO: u32 = 6_200_000;
 pub enum DataKey {
     /// Admin address key.
     Admin,
+    /// Nominated-but-not-yet-accepted admin address (two-step transfer).
+    PendingAdmin,
     /// Paused status key.
     Paused,
     /// Mapping of signer address to voting weight key.
@@ -183,6 +185,80 @@ impl TreasuryContract {
         e.events().publish(
             (Symbol::new(&e, "upgraded"),),
             new_wasm_hash,
+        );
+        Ok(())
+    }
+
+    /// Initiates a two-step admin transfer by recording `new_admin` as the
+    /// pending admin. The change does **not** take effect until `accept_admin`
+    /// is called by `new_admin`. Overwriting a previous (unaccepted) nomination
+    /// is allowed — only the most recent nominee can accept.
+    ///
+    /// The contract must not be paused. Only the current admin may call this.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Current admin address (must authenticate).
+    /// * `new_admin` - Address nominated as the next admin.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if the contract is paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if `admin` is not the stored admin.
+    ///
+    /// # Events
+    /// Emits `admin_transfer_initiated(admin, new_admin)` on success.
+    pub fn transfer_admin(
+        e: Env,
+        admin: Address,
+        new_admin: Address,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+        e.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        e.events().publish(
+            (Symbol::new(&e, "admin_transfer_initiated"),),
+            (admin, new_admin),
+        );
+        Ok(())
+    }
+
+    /// Completes a two-step admin transfer initiated by [`Self::transfer_admin`].
+    ///
+    /// The caller must be the address previously nominated. On success the
+    /// caller becomes the new admin, the old admin loses all privileges
+    /// immediately, and the `PendingAdmin` key is cleared.
+    ///
+    /// The contract must not be paused.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `new_admin` - Must be the pending admin set by `transfer_admin`.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if the contract is paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if `new_admin` does not match
+    ///   the stored `PendingAdmin`, or if no transfer was ever initiated.
+    ///
+    /// # Events
+    /// Emits `admin_transfer_accepted(new_admin)` on success.
+    pub fn accept_admin(e: Env, new_admin: Address) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        new_admin.require_auth();
+        let pending: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(TreasuryError::Unauthorized)?;
+        if new_admin != pending {
+            return Err(TreasuryError::Unauthorized);
+        }
+        e.storage().instance().set(&DataKey::Admin, &new_admin);
+        e.storage().instance().remove(&DataKey::PendingAdmin);
+        e.events().publish(
+            (Symbol::new(&e, "admin_transfer_accepted"),),
+            new_admin,
         );
         Ok(())
     }
@@ -1966,5 +2042,256 @@ mod tests {
         c.initialize(&soroban_sdk::vec![&e], &1, &admin);
 
         c.withdraw(&admin, &token, &user, &1_000_000_000u64);
+    }
+
+    // ── two-step admin transfer tests ────────────────────────────────────────
+
+    fn setup_treasury(e: &Env, id: &soroban_sdk::Address) -> soroban_sdk::Address {
+        let admin = soroban_sdk::Address::generate(e);
+        let signer = soroban_sdk::Address::generate(e);
+        TreasuryContractClient::new(e, id)
+            .initialize(&soroban_sdk::vec![e, (signer, 1u64)], &1, &admin);
+        admin
+    }
+
+    /// Happy path: current admin nominates new_admin, new_admin accepts.
+    /// After acceptance new_admin can exercise admin privileges and old admin cannot.
+    #[test]
+    fn test_transfer_and_accept_admin_full_flow() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.accept_admin(&new_admin);
+
+        // new_admin can pause
+        c.pause(&new_admin);
+
+        // old admin is rejected
+        let res = c.try_unpause(&admin);
+        assert_eq!(
+            res,
+            Err(Ok(TreasuryError::Unauthorized)),
+            "old admin must lose privileges immediately after accept_admin"
+        );
+    }
+
+    /// transfer_admin must reject a non-admin caller.
+    #[test]
+    fn test_transfer_admin_unauthorized_fails() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let impostor = soroban_sdk::Address::generate(&e);
+        let new_admin = soroban_sdk::Address::generate(&e);
+        let _ = admin;
+
+        let res = c.try_transfer_admin(&impostor, &new_admin);
+        assert_eq!(res, Err(Ok(TreasuryError::Unauthorized)));
+    }
+
+    /// accept_admin must reject any address other than the nominated pending admin.
+    #[test]
+    fn test_accept_admin_wrong_caller_fails() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+        let impostor = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+
+        let res = c.try_accept_admin(&impostor);
+        assert_eq!(
+            res,
+            Err(Ok(TreasuryError::Unauthorized)),
+            "impostor must not be able to accept a pending transfer"
+        );
+    }
+
+    /// accept_admin with no prior transfer_admin must return Unauthorized.
+    #[test]
+    fn test_accept_admin_with_no_pending_transfer_fails() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let _ = setup_treasury(&e, &id);
+        let random = soroban_sdk::Address::generate(&e);
+
+        let res = c.try_accept_admin(&random);
+        assert_eq!(res, Err(Ok(TreasuryError::Unauthorized)));
+    }
+
+    /// transfer_admin must fail when the contract is paused.
+    #[test]
+    fn test_transfer_admin_when_paused_fails() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.pause(&admin);
+
+        let res = c.try_transfer_admin(&admin, &new_admin);
+        assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    /// accept_admin must fail when the contract is paused.
+    #[test]
+    fn test_accept_admin_when_paused_fails() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.pause(&admin);
+
+        let res = c.try_accept_admin(&new_admin);
+        assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    /// transfer_admin emits admin_transfer_initiated event.
+    #[test]
+    fn test_transfer_admin_emits_event() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+
+        assert!(
+            e.events()
+                .all()
+                .iter()
+                .any(|ev| ev.0 == (id.clone(), "admin_transfer_initiated".into())),
+            "admin_transfer_initiated event must be emitted"
+        );
+    }
+
+    /// accept_admin emits admin_transfer_accepted event.
+    #[test]
+    fn test_accept_admin_emits_event() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.accept_admin(&new_admin);
+
+        assert!(
+            e.events()
+                .all()
+                .iter()
+                .any(|ev| ev.0 == (id.clone(), "admin_transfer_accepted".into())),
+            "admin_transfer_accepted event must be emitted"
+        );
+    }
+
+    /// PendingAdmin is cleared after acceptance — a second accept_admin fails.
+    #[test]
+    fn test_accept_admin_clears_pending_after_acceptance() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.accept_admin(&new_admin);
+
+        let res = c.try_accept_admin(&new_admin);
+        assert_eq!(
+            res,
+            Err(Ok(TreasuryError::Unauthorized)),
+            "PendingAdmin must be cleared; second accept must fail"
+        );
+    }
+
+    /// Overwriting a pending nomination is allowed — only the last nominee can accept.
+    #[test]
+    fn test_transfer_admin_overwrites_previous_nomination() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let first_nominee = soroban_sdk::Address::generate(&e);
+        let second_nominee = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &first_nominee);
+        // Overwrite with a new nominee
+        c.transfer_admin(&admin, &second_nominee);
+
+        // First nominee can no longer accept
+        let res = c.try_accept_admin(&first_nominee);
+        assert_eq!(res, Err(Ok(TreasuryError::Unauthorized)));
+
+        // Second nominee can accept
+        c.accept_admin(&second_nominee);
+        c.pause(&second_nominee); // confirm they now hold admin
+    }
+
+    /// After acceptance, all admin-gated operations use the new admin.
+    /// Tests pause, unpause, update_threshold, set_daily_withdraw_limit, and
+    /// add_token_to_allowlist.
+    #[test]
+    fn test_old_admin_loses_all_privileges_after_acceptance() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.accept_admin(&new_admin);
+
+        assert_eq!(c.try_pause(&admin), Err(Ok(TreasuryError::Unauthorized)));
+        assert_eq!(c.try_unpause(&admin), Err(Ok(TreasuryError::Unauthorized)));
+        assert_eq!(
+            c.try_update_threshold(&admin, &1u32),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
+        assert_eq!(
+            c.try_set_daily_withdraw_limit(&admin, &token, &500u64),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
+        assert_eq!(
+            c.try_add_token_to_allowlist(&admin, &token),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
+        assert_eq!(
+            c.try_remove_token_from_allowlist(&admin, &token),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
+    }
+
+    /// New admin can pause after transfer, and old admin cannot unpause.
+    #[test]
+    fn test_new_admin_pause_blocks_old_admin_unpause() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.accept_admin(&new_admin);
+
+        // New admin pauses
+        c.pause(&new_admin);
+
+        // Signer cannot propose while paused
+        let res = c.try_propose_settlement(&signer, &token, &100u64, &merchant);
+        assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
+
+        // Only new admin can unpause
+        assert_eq!(c.try_unpause(&admin), Err(Ok(TreasuryError::Unauthorized)));
+        c.unpause(&new_admin);
+
+        // Now signer can propose again
+        c.propose_settlement(&signer, &token, &100u64, &merchant);
     }
 }
