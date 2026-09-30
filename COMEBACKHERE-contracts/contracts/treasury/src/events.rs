@@ -31,3 +31,17 @@ pub fn dispute_resolved(
         (settlement_id, resolve_in_favor, resolution_weight),
     );
 }
+
+pub fn admin_transfer_initiated(env: &Env, current_admin: &Address, new_admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "admin_transfer_initiated"),),
+        (current_admin, new_admin),
+    );
+}
+
+pub fn admin_transfer_accepted(env: &Env, new_admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "admin_transfer_accepted"),),
+        new_admin,
+    );
+}
