@@ -2,6 +2,23 @@
 
 This guide covers the most common problems developers encounter during local setup and how to resolve them.
 
+## Health and Metrics
+
+`GET /health` is a liveness check: it reports whether the backend process can
+serve requests and does not contact dependencies. `GET /health/ready` is a
+readiness check: it returns `200` only when MongoDB, Redis, and Soroban RPC
+respond within 1.5 seconds; otherwise it returns `503` with each dependency
+marked `ok` or `unavailable`.
+
+`GET /metrics` exposes Prometheus text metrics and is enabled by default. Set
+`METRICS_ENABLED=false` to disable the endpoint. Request latency is recorded in
+`http_request_duration_seconds` (route templates, method, and status code),
+indexer lag in `indexer_ledger_lag` (ledger count, labelled by indexer), and
+webhook outcomes in `webhook_delivery_total` (labelled by `delivered` or
+`failed`). Standard Node.js process metrics are also included. Logs are
+structured JSON; `LOG_LEVEL` controls verbosity, and `pino-pretty` is enabled
+only when `NODE_ENV=development`.
+
 ## Soroban RPC Connection Errors
 
 ### "Soroban RPC not reachable" or connection refused on port 8000

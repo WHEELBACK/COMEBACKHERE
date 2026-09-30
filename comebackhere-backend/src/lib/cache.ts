@@ -1,4 +1,5 @@
 import Redis from "ioredis"
+import { logger } from "./logger.js"
 
 let _redis: Redis | null = null
 
@@ -93,7 +94,7 @@ export function memoryCacheSet(key: string, value: unknown, ttlMs: number): void
  */
 export function invalidateCacheKey(key: string, reason = "manual"): boolean {
   const existed = _memoryCache.delete(key)
-  console.log(`[cache] invalidated key=${key} reason=${reason} evicted=${existed}`)
+  logger.info({ key, reason, evicted: existed }, "Cache key invalidated")
   return existed
 }
 
