@@ -54,6 +54,9 @@ Defined in `COMEBACKHERE-contracts/contracts/invoice/src/lib.rs`. Shares some va
 | 17 | `AddressBlocked` | `mark_paids` was called for a customer that the configured compliance contract reports as not allowed. | Confirm the customer's compliance status with `ComplianceContract.is_allowed` before retrying. |
 | 18 | `InvalidStateTransition` | `mark_paids` was called on an invoice in `RefundRequested`, `Released`, `Cancelled`, or `Expired` status — see [ARCHITECTURE.md § Invoice state machine](../ARCHITECTURE.md#invoice-state-machine) for the full legal-transition diagram. | Fetch the current status with `get_invoice_status` first. A refund already in progress must not be overridden by a stale payment confirmation. |
 | 19 | `BatchTooLarge` | `mark_paids` or `batch_expire` was called with more than 50 invoice IDs. | Split the input into batches of 50 or fewer and submit multiple calls. |
+| 20 | `GraceWindowTooLarge` | `set_grace_window` was called with a duration exceeding `MAX_GRACE_WINDOW` (90 days / 7 776 000 seconds). | Pass a grace window less than or equal to 7 776 000 seconds. A bound is enforced to prevent locking funds indefinitely. |
+| 21 | `ReferenceTooLong` | An invoice `reference` exceeded `MAX_REFERENCE_LEN` (64 bytes). | Shorten the reference string to 64 bytes or fewer. |
+| 22 | `AmountPrecision` | An invoice `amount` is below the minimum allowed (`MIN_AMOUNT_USDC`, 10 000 000 stroops). | Specify an invoice amount of at least 1 USDC (10 000 000 stroops). |
 
 ---
 

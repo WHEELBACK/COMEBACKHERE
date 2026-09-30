@@ -53,3 +53,10 @@ pub fn dispute_raised(env: &Env, invoice_id: &u64, settlement_id: &u64, claimant
         (*invoice_id, *settlement_id, claimant),
     );
 }
+
+pub fn grace_window_updated(env: &Env, old_window: &u64, new_window: &u64) {
+    env.events().publish(
+        (Symbol::new(env, "grace_window_updated"),),
+        (*old_window, *new_window),
+    );
+}

@@ -160,6 +160,36 @@ Before getting started, ensure you have:
 
 ---
 
+## Required Environment Variables Checklist
+
+Before starting the stack, ensure your local `.env` (or service-specific `.env` files) defines these required values:
+
+### Backend (`comebackhere-backend` or Docker `backend`)
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `SOROBAN_RPC_URL` | Yes | `http://localhost:8000/soroban/rpc` | Soroban RPC endpoint |
+| `INVOICE_CONTRACT_ID` | Yes* | — | Deployed invoice contract address (required when calling invoice routes) |
+| `TREASURY_CONTRACT_ID` | Yes* | — | Deployed treasury contract address (required when calling treasury routes) |
+| `USDC_CONTRACT_ID` | Yes* | — | USDC token contract address |
+| `SIGNER_SECRET_KEY` | Yes | — | Stellar secret key used for signing transactions |
+| `MONGODB_URI` | No | `mongodb://localhost:27017` | MongoDB connection URI for indexer state |
+| `REDIS_URL` | No | `redis://localhost:6379` | Redis connection URL for rate limiting & event channels |
+| `PORT` | No | `3000` (host) / `3001` (Docker) | HTTP server listen port |
+
+\* Required at runtime when invoking the respective contract-backed endpoints.
+
+### Frontend (`comebackhere-frontend` or Docker `frontend`)
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `VITE_API_URL` | Yes | `http://localhost:3000` | Backend API base URL |
+| `VITE_SOROBAN_RPC` | Yes | `http://localhost:8000/soroban/rpc` | Soroban RPC endpoint for wallet interactions |
+| `VITE_HORIZON_URL` | No | `http://localhost:8000` | Horizon API URL |
+| `VITE_NETWORK_PASSPHRASE` | No | `Standalone Network ; February 2025` | Stellar network passphrase |
+
+---
+
 ## Start the Development Environment
 
 Launch all required services:
@@ -170,25 +200,88 @@ docker-compose up -d
 
 This starts the following services:
 
-| Service      | Description                                           | Default Port |
-| ------------ | ----------------------------------------------------- | ------------ |
-| Soroban Node | Stellar Quickstart environment (includes Horizon API) | `8000`       |
-| Redis        | Event consumer backing service                        | `6379`       |
+| Service | Description | Default Port | Health Check |
+| --- | --- | --- | --- |
+| `soroban` | Stellar Quickstart standalone node + RPC + Horizon | `8000`, `11625`, `11626` | `curl -f http://localhost:8000/health` |
+| `redis` | Redis 7 cache and event queue | `6379` | `redis-cli ping` |
+| `mongodb` | MongoDB 7 persistence for indexer state | `27017` | `mongosh --eval "db.adminCommand('ping')"` |
+| `backend` | Protocol backend API | `3001` | `curl -f http://localhost:3001/health/rpc` |
+| `frontend` | Protocol web dashboard / UI | `5173` | `curl -f http://localhost:5173/` |
 
 ---
 
 ## Verify the Services
 
-Check that the containers are running:
+### 1. Check Container Health with `docker-compose ps`
+
+Check that all containers are running and in a `(healthy)` status:
 
 ```bash
 docker-compose ps
 ```
 
-Verify the Soroban node is healthy:
+Expected output:
+
+```text
+NAME                      IMAGE                       COMMAND                  SERVICE    CREATED          STATUS                    PORTS
+comebackhere-backend-1    comebackhere-backend        "docker-entrypoint.s…"   backend    15 seconds ago   Up 14 seconds (healthy)   0.0.0.0:3001->3001/tcp
+comebackhere-frontend-1   comebackhere-frontend       "/bin/sh -c 'npm run…"   frontend   15 seconds ago   Up 14 seconds (healthy)   0.0.0.0:5173->5173/tcp
+comebackhere-mongodb-1    mongo:7                     "docker-entrypoint.s…"   mongodb    15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:27017->27017/tcp
+comebackhere-redis-1      redis:7-alpine              "docker-entrypoint.s…"   redis      15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:6379->6379/tcp
+comebackhere-soroban-1    stellar/quickstart:latest   "/start standalone"      soroban    15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:8000->8000/tcp, 0.0.0.0:11625-11626->11625-11626/tcp
+```
+
+### 2. Service Startup Health Checks
+
+Verify each service responds as expected:
+
+- **Soroban node:**
+
+  ```bash
+  curl -s http://localhost:8000/health
+  # Expected: {"status":"healthy"}
+  ```
+
+- **Redis:**
+
+  ```bash
+  docker-compose exec -T redis redis-cli ping
+  # Expected: PONG
+  ```
+
+- **MongoDB:**
+
+  ```bash
+  docker-compose exec -T mongodb mongosh --eval "db.adminCommand('ping')" --quiet
+  # Expected: { ok: 1 }
+  ```
+
+- **Backend API:**
+
+  ```bash
+  curl -s http://localhost:3001/health/rpc
+  # Expected: {"status":"ok"}
+  ```
+
+- **Frontend UI:**
+
+  ```bash
+  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:5173/
+  # Expected: 200
+  ```
+
+### 3. Copy-Paste Verification Section
+
+Run this single snippet before executing app-specific commands to confirm the entire stack is operational:
 
 ```bash
-curl http://localhost:8000/health
+echo "Verifying local stack readiness..."
+curl -sf http://localhost:8000/health > /dev/null && echo "✔ Soroban node healthy (port 8000)"
+docker-compose exec -T redis redis-cli ping 2>/dev/null | grep -q "PONG" && echo "✔ Redis healthy (port 6379)"
+docker-compose exec -T mongodb mongosh --eval "db.adminCommand('ping')" --quiet 2>/dev/null | grep -q "1" && echo "✔ MongoDB healthy (port 27017)"
+curl -sf http://localhost:3001/health/rpc > /dev/null && echo "✔ Backend API healthy (port 3001)"
+curl -sf -o /dev/null http://localhost:5173/ && echo "✔ Frontend UI healthy (port 5173)"
+echo "Stack is ready for development."
 ```
 
 ---

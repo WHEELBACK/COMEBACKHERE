@@ -16,6 +16,10 @@ const MAX_BATCH_SIZE: u32 = 50;
 /// Minimum invoice amount, in stroops (10,000,000 stroops == 1 USDC given 7 decimals).
 const MIN_AMOUNT_USDC: i128 = 10_000_000;
 
+/// Maximum grace window allowed: 90 days (7,776,000 seconds).
+/// Bounds the delay before escrow can be released so funds cannot be locked indefinitely.
+const MAX_GRACE_WINDOW: u64 = 90 * 24 * 60 * 60;
+
 // At five seconds per ledger, these keep state alive for roughly 335 days before
 // renewal and extend it to roughly 359 days after an access or mutation.
 const INSTANCE_TTL_THRESHOLD: u32 = 5_800_000;
@@ -50,6 +54,12 @@ pub enum ContractError {
     InvalidStateTransition = 18,
     /// A batch operation was called with more than `MAX_BATCH_SIZE` invoice IDs.
     BatchTooLarge = 19,
+    /// A grace window update exceeded the maximum permitted duration (`MAX_GRACE_WINDOW`).
+    GraceWindowTooLarge = 20,
+    /// The reference field exceeded `MAX_REFERENCE_LEN` bytes.
+    ReferenceTooLong = 21,
+    /// The invoice amount is below `MIN_AMOUNT_USDC`.
+    AmountPrecision = 22,
 }
 
 #[contracttype]
@@ -89,6 +99,7 @@ pub enum DataKey {
     Nonce(Address, u64),
     TreasuryContract,
     ComplianceContract,
+    CustomerInvoices(Address),
 }
 
 fn admin(env: &Env) -> Address {
@@ -120,6 +131,14 @@ fn extend_instance_ttl(env: &Env) {
 fn extend_invoice_ttl(env: &Env, invoice_id: u64) {
     env.storage().persistent().extend_ttl(
         &DataKey::Invoice(invoice_id),
+        INVOICE_TTL_THRESHOLD,
+        INVOICE_TTL_EXTEND_TO,
+    );
+}
+
+fn extend_customer_invoices_ttl(env: &Env, customer: &Address) {
+    env.storage().persistent().extend_ttl(
+        &DataKey::CustomerInvoices(customer.clone()),
         INVOICE_TTL_THRESHOLD,
         INVOICE_TTL_EXTEND_TO,
     );
@@ -260,7 +279,7 @@ impl InvoiceContract {
         let invoice = Invoice {
             id: count,
             merchant: merchant.clone(),
-            customer,
+            customer: customer.clone(),
             amount,
             token,
             status: InvoiceStatus::Pending,
@@ -269,6 +288,17 @@ impl InvoiceContract {
             reference,
         };
         store_invoice(&env, count, &invoice);
+
+        let mut customer_invoices: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CustomerInvoices(customer.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        customer_invoices.push_back(count);
+        env.storage()
+            .persistent()
+            .set(&DataKey::CustomerInvoices(customer.clone()), &customer_invoices);
+        extend_customer_invoices_ttl(&env, &customer);
 
         events::invoice_created(&env, &merchant, &count);
         Ok(count)
@@ -376,6 +406,66 @@ impl InvoiceContract {
                     }
                     matched += 1;
                 }
+            }
+        }
+        result
+    }
+
+    /// Returns a paginated list of invoice IDs addressed to a given customer,
+    /// enabling payers to inspect their invoice history without scanning all IDs.
+    ///
+    /// Follows the same pagination shape and caps as [`Self::get_invoices_by_merchant`].
+    /// Note: Invoices created before this index was introduced will not appear here.
+    ///
+    /// # Parameters
+    /// - `customer`: The customer address to filter invoices by.
+    /// - `start_after`: Number of matching invoices to skip before collecting the page
+    ///   (defaults to 0 when `None`).
+    /// - `limit`: Maximum number of invoice IDs to return. Capped at 100 regardless of the
+    ///   value passed in.
+    ///
+    /// # Returns
+    /// A `Vec<u64>` of invoice IDs addressed to `customer`, oldest first.
+    pub fn get_invoices_by_customer(
+        env: Env,
+        customer: Address,
+        start_after: Option<u32>,
+        limit: u32,
+    ) -> Vec<u64> {
+        const MAX_PAGE_SIZE: u32 = 100;
+        let cap: u32 = if limit > MAX_PAGE_SIZE {
+            MAX_PAGE_SIZE
+        } else {
+            limit
+        };
+        let skip: u32 = start_after.unwrap_or(0);
+
+        let list: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CustomerInvoices(customer.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if list.is_empty() {
+            return Vec::new(&env);
+        }
+
+        extend_customer_invoices_ttl(&env, &customer);
+
+        let mut result: Vec<u64> = Vec::new(&env);
+        let len = list.len();
+        if skip >= len {
+            return result;
+        }
+
+        let end = if skip.saturating_add(cap) < len {
+            skip.saturating_add(cap)
+        } else {
+            len
+        };
+        for i in skip..end {
+            if let Some(id) = list.get(i) {
+                result.push_back(id);
             }
         }
         result
@@ -781,17 +871,30 @@ impl InvoiceContract {
     /// # Parameters
     /// - `caller`: Must be the contract admin.
     /// - `window`: Grace window in seconds measured from `invoice.created_at`.
-    ///   Defaults to 86 400 (24 h) on initialisation.
+    ///   Defaults to 86 400 (24 h) on initialisation. Capped at [`MAX_GRACE_WINDOW`].
     ///
     /// # Errors
     /// - [`ContractError::ContractPaused`] if the contract is currently paused.
     /// - [`ContractError::Unauthorized`] if `caller` is not the admin.
+    /// - [`ContractError::GraceWindowTooLarge`] if `window` exceeds [`MAX_GRACE_WINDOW`].
+    ///
+    /// # Events
+    /// Emits `grace_window_updated(old_window, new_window)` on success.
     pub fn set_grace_window(env: Env, caller: Address, window: u64) -> Result<(), ContractError> {
         check_not_paused(&env)?;
         check_admin(&env, &caller)?;
+        if window > MAX_GRACE_WINDOW {
+            return Err(ContractError::GraceWindowTooLarge);
+        }
+        let old_window = env
+            .storage()
+            .persistent()
+            .get(&DataKey::GraceWindow)
+            .unwrap_or(86400);
         env.storage()
             .persistent()
             .set(&DataKey::GraceWindow, &window);
+        events::grace_window_updated(&env, &old_window, &window);
         Ok(())
     }
 
@@ -1363,5 +1466,70 @@ mod tests {
 
         let res = client.try_mark_paids(&soroban_sdk::vec![&env, id]);
         assert_eq!(res, Err(Ok(ContractError::InvoiceAlreadyPaid)));
+    }
+
+    // ── get_invoices_by_customer ─────────────────────────────────────────────
+
+    #[test]
+    fn test_get_invoices_by_customer_pagination_and_isolation() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+        let customer_a = Address::generate(&env);
+        let customer_b = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        let id1 = client.create_invoice(&merchant, &customer_a, &10_000_000i128, &token, &5000, &1, &None);
+        let id2 = client.create_invoice(&merchant, &customer_b, &10_000_000i128, &token, &5000, &2, &None);
+        let id3 = client.create_invoice(&merchant, &customer_a, &10_000_000i128, &token, &5000, &3, &None);
+        let id4 = client.create_invoice(&merchant, &customer_a, &10_000_000i128, &token, &5000, &4, &None);
+
+        // Customer A has id1, id3, id4
+        let all_a = client.get_invoices_by_customer(&customer_a, &None, &10u32);
+        assert_eq!(all_a, soroban_sdk::vec![&env, id1, id3, id4]);
+
+        // Pagination on customer A: skip 1, limit 1 -> should return id3
+        let page = client.get_invoices_by_customer(&customer_a, &Some(1), &1u32);
+        assert_eq!(page, soroban_sdk::vec![&env, id3]);
+
+        // Customer B has only id2
+        let all_b = client.get_invoices_by_customer(&customer_b, &None, &10u32);
+        assert_eq!(all_b, soroban_sdk::vec![&env, id2]);
+
+        // Non-existent customer has none
+        let customer_c = Address::generate(&env);
+        let empty = client.get_invoices_by_customer(&customer_c, &None, &10u32);
+        assert_eq!(empty.len(), 0);
+    }
+
+    // ── set_grace_window ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_grace_window_emits_event_and_updates() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+
+        assert_eq!(client.get_grace_window(), 86400);
+        client.set_grace_window(&admin, &100_000u64);
+        assert_eq!(client.get_grace_window(), 100_000);
+
+        let all_events = env.events().all();
+        assert!(!all_events.is_empty(), "grace_window_updated event should be emitted");
+    }
+
+    #[test]
+    fn test_set_grace_window_enforces_upper_bound() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+
+        // MAX_GRACE_WINDOW is 90 days = 7_776_000
+        let at_max = 7_776_000u64;
+        assert_eq!(client.try_set_grace_window(&admin, &at_max), Ok(Ok(())));
+
+        let over_max = 7_776_001u64;
+        assert_eq!(
+            client.try_set_grace_window(&admin, &over_max),
+            Err(Ok(ContractError::GraceWindowTooLarge))
+        );
     }
 }
