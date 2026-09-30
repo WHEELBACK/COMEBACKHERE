@@ -46,6 +46,83 @@ soroban-cli start --standalone
 
 This runs Soroban RPC on `http://localhost:8000` and Horizon on `http://localhost:8001`.
 
+Alternatively, start the complete stack via Docker Compose:
+
+```sh
+docker-compose up -d
+```
+
+### Expected `docker-compose ps` Output
+
+When all services initialize successfully, `docker-compose ps` reports healthy states:
+
+```text
+NAME                      IMAGE                       COMMAND                  SERVICE    CREATED          STATUS                    PORTS
+comebackhere-backend-1    comebackhere-backend        "docker-entrypoint.s…"   backend    15 seconds ago   Up 14 seconds (healthy)   0.0.0.0:3001->3001/tcp
+comebackhere-frontend-1   comebackhere-frontend       "/bin/sh -c 'npm run…"   frontend   15 seconds ago   Up 14 seconds (healthy)   0.0.0.0:5173->5173/tcp
+comebackhere-mongodb-1    mongo:7                     "docker-entrypoint.s…"   mongodb    15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:27017->27017/tcp
+comebackhere-redis-1      redis:7-alpine              "docker-entrypoint.s…"   redis      15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:6379->6379/tcp
+comebackhere-soroban-1    stellar/quickstart:latest   "/start standalone"      soroban    15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:8000->8000/tcp, 0.0.0.0:11625-11626->11625-11626/tcp
+```
+
+### Service Health Checks & Expected Output
+
+Validate individual service health:
+
+1. **Soroban Node / RPC (`http://localhost:8000`)**:
+
+   ```sh
+   curl -s http://localhost:8000/health
+   # Expected output:
+   # {"status":"healthy"}
+   ```
+
+2. **Redis (`localhost:6379`)**:
+
+   ```sh
+   docker-compose exec -T redis redis-cli ping
+   # Expected output:
+   # PONG
+   ```
+
+3. **MongoDB (`localhost:27017`)**:
+
+   ```sh
+   docker-compose exec -T mongodb mongosh --eval "db.adminCommand('ping')" --quiet
+   # Expected output:
+   # { ok: 1 }
+   ```
+
+4. **Backend API (`http://localhost:3001`)**:
+
+   ```sh
+   curl -s http://localhost:3001/health/rpc
+   # Expected output:
+   # {"status":"ok"}
+   ```
+
+5. **Frontend UI (`http://localhost:5173`)**:
+
+   ```sh
+   curl -s -o /dev/null -w "%{http_code}\n" http://localhost:5173/
+   # Expected output:
+   # 200
+   ```
+
+### Pre-Flight Verification Script
+
+Run this verification block before running app-specific commands or tests:
+
+```sh
+echo "Testing local development stack health..."
+curl -sf http://localhost:8000/health > /dev/null && echo "✔ Soroban RPC is healthy"
+docker-compose exec -T redis redis-cli ping 2>/dev/null | grep -q "PONG" && echo "✔ Redis is healthy"
+docker-compose exec -T mongodb mongosh --eval "db.adminCommand('ping')" --quiet 2>/dev/null | grep -q "1" && echo "✔ MongoDB is healthy"
+curl -sf http://localhost:3001/health/rpc > /dev/null && echo "✔ Backend service is healthy"
+curl -sf -o /dev/null http://localhost:5173/ && echo "✔ Frontend UI is responsive"
+echo "All services verified."
+```
+
 ## Environment Setup
 
 ### Contracts
