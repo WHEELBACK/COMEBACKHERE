@@ -10,7 +10,11 @@ from pathlib import Path
 # This script lives in COMEBACKHERE/scripts/.
 # Contract sources live in the sibling COMEBACKHERE-contracts/ directory.
 ROOT = Path(__file__).resolve().parents[1]
-CONTRACTS_ROOT = ROOT.parent / "COMEBACKHERE-contracts"
+CONTRACTS_ROOT = (
+    ROOT / "COMEBACKHERE-contracts"
+    if (ROOT / "COMEBACKHERE-contracts").exists()
+    else ROOT.parent / "COMEBACKHERE-contracts"
+)
 
 
 def package_version(crate_dir: str) -> str:

@@ -31,3 +31,10 @@ pub fn dispute_resolved(
         (settlement_id, resolve_in_favor, resolution_weight),
     );
 }
+
+pub fn deposit(env: &Env, token: &Address, from: &Address, amount: &u64) {
+    env.events().publish(
+        (Symbol::new(env, "deposit"),),
+        (token, from, amount),
+    );
+}
