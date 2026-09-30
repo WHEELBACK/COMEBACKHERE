@@ -1,8 +1,10 @@
 {
   "contract": "treasury",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "functions": [
     "upgrade",
+    "transfer_admin",
+    "accept_admin",
     "initialize",
     "set_signer",
     "rotate_signer",
@@ -32,6 +34,6 @@
     "remove_token_from_allowlist",
     "get_allowlisted_tokens"
   ],
-  "events": ["upgraded", "signer_rotated", "settlement_cancelled", "balance", "contract_paused", "contract_unpaused", "threshold_updated", "merchant_updated", "deposit", "daily_withdraw_limit_set"],
+  "events": ["upgraded", "signer_rotated", "balance", "contract_paused", "contract_unpaused", "threshold_updated", "merchant_updated", "daily_withdraw_limit_set", "admin_transfer_initiated", "admin_transfer_accepted"],
   "threshold": "2-of-3"
 }

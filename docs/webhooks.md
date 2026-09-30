@@ -1,15 +1,41 @@
 # Webhook Payload Reference
 
-COMEBACKHERE sends signed HTTP POST requests to your configured endpoint whenever
-key protocol events occur. This page documents every event type, its payload
-shape, how to verify the HMAC-SHA256 signature, and the delivery retry schedule.
+COMEBACKHERE can send signed HTTP POST requests to your configured endpoint when
+settlement events occur on-chain. This page documents the events, their exact
+payload shapes, and how to verify the HMAC-SHA256 signature.
 
 > **Security note:** Treat your `WEBHOOK_SIGNING_SECRET` with the same care as a
 > private key. Anyone who holds it can forge valid webhook signatures. Rotate it
 > immediately if it is ever exposed.
 
+> **There is no `WEBHOOK_SECRET`.** The backend reads `WEBHOOK_SIGNING_SECRET`
+> and nothing else — see [Configuration](#configuration).
+
 See also: [`## Webhooks` in the API Reference](./api-reference.md#webhooks) for
 the configuration environment variables.
+
+---
+
+## The two delivery paths
+
+Everything below depends on which code path sends the request, and the two paths
+are **not** equivalent. Read this section before writing a receiver.
+
+| | Live dispatch (current) | Retry queue (dormant) |
+| --- | --- | --- |
+| Implementation | `dispatchWebhook` in `src/services/webhooks.ts` | `postWebhook` in `src/services/webhook-delivery.ts` |
+| Signed | **Yes** — `X-COMEBACKHERE-Signature` | **No** |
+| `X-Idempotency-Key` | Not sent | Sent |
+| `X-Request-Id` | Not sent | Sent when a correlation id is supplied |
+| Retries / dead letters | None — single attempt, failures are logged | Yes, with backoff and dead-letter persistence |
+| Used by | `treasury-indexer` for `settlement_proposed`, `settlement_approved`, `settlement_executed` | Nothing in production code; the queue is never enqueued to |
+
+**Only the live dispatch path is exercised today.** The retry queue is
+implemented and unit-tested but not wired to an event source, so in a running
+deployment every outbound webhook is a single, signed attempt.
+
+Because the live path does not send an idempotency key, **your receiver is
+responsible for deduplication** — see [Deduplicating deliveries](#deduplicating-deliveries).
 
 ---
 
@@ -17,24 +43,44 @@ the configuration environment variables.
 
 | Variable                 | Description                                                            |
 | ------------------------ | ---------------------------------------------------------------------- |
-| `WEBHOOK_URL`            | Your endpoint that receives `POST` requests from the backend           |
-| `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 signing secret (minimum 32 characters recommended)         |
-| `WEBHOOK_MAX_ATTEMPTS`   | Maximum delivery attempts (default `5`)                                 |
-| `WEBHOOK_BASE_DELAY_MS`  | Initial retry delay in milliseconds (default `1000`)                    |
-| `WEBHOOK_MAX_DELAY_MS`   | Maximum exponential backoff delay in milliseconds (default `60000`)     |
-| `WEBHOOK_JITTER_RATIO`   | Randomized delay variation from `0` to `1` (default `0.2`)              |
+| `WEBHOOK_URL`            | Your endpoint that receives `POST` requests from the backend. If unset, no webhooks are sent. |
+| `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 signing secret (minimum 32 characters recommended). **Required at startup** — the backend refuses to boot without it. |
+| `WEBHOOK_MAX_ATTEMPTS`   | Maximum delivery attempts (default `5`) — retry queue only            |
+| `WEBHOOK_BASE_DELAY_MS`  | Initial retry delay in milliseconds (default `1000`) — retry queue only |
+| `WEBHOOK_MAX_DELAY_MS`   | Maximum exponential backoff delay in milliseconds (default `60000`) — retry queue only |
+| `WEBHOOK_JITTER_RATIO`   | Randomized delay variation from `0` to `1` (default `0.2`) — retry queue only |
 
 If `WEBHOOK_URL` is not set, webhook delivery is skipped silently — no error is
-logged and no retries are attempted.
+logged and no request is made.
+
+If `WEBHOOK_SIGNING_SECRET` is missing, `validateEnv()` in `src/lib/env.ts`
+fails the process at startup with a message naming the variable. It is never a
+runtime warning.
 
 ---
 
 ## Signature verification
 
-Every outbound webhook `POST` includes an `X-COMEBACKHERE-Signature` header
-containing a lowercase hex-encoded HMAC-SHA256 digest of the **raw request
-body** (the exact bytes sent over the wire), keyed by your
-`WEBHOOK_SIGNING_SECRET`.
+Every webhook sent by the live dispatch path includes an
+`X-COMEBACKHERE-Signature` header containing a lowercase hex-encoded
+HMAC-SHA256 digest of the **raw request body** (the exact bytes sent over the
+wire), keyed by your `WEBHOOK_SIGNING_SECRET`.
+
+### Signature format
+
+| Property | Value |
+| --- | --- |
+| Header name | `X-COMEBACKHERE-Signature` |
+| Algorithm | HMAC-SHA256 |
+| Encoding | lowercase hex, 64 characters |
+| Signed input | the exact request body bytes, UTF-8 |
+| Envelope | **none** — a bare digest, not a `t=…,v1=…` string |
+
+There is no `t=` timestamp prefix and no version field. Consequently **there is
+no signature timestamp and no replay window**: a captured request body and its
+signature stay valid forever. Replay defence has to come from your own
+deduplication (see
+[Deduplicating deliveries](#deduplicating-deliveries)), not from the signature.
 
 ### Algorithm summary
 
@@ -42,15 +88,28 @@ body** (the exact bytes sent over the wire), keyed by your
 2. Compute `HMAC-SHA256(secret, rawBody)` and hex-encode it.
 3. Compare the result to the `X-COMEBACKHERE-Signature` header using a
    **constant-time comparison** to prevent timing side-channel attacks.
+4. Compare lengths first — `timingSafeEqual` throws on a length mismatch, so a
+   short or malformed header must be rejected before the comparison.
 
 ### Header reference
 
-| Header                      | Value                                        |
-| --------------------------- | -------------------------------------------- |
-| `X-COMEBACKHERE-Signature`  | Lowercase hex-encoded HMAC-SHA256 digest     |
-| `Content-Type`              | `application/json`                           |
-| `X-Idempotency-Key`         | Stable per-event key (see [Idempotency](#idempotency)) |
-| `X-Request-Id`              | Correlation ID forwarded from the originating request (when available) |
+Headers sent on a **live dispatch** request:
+
+| Header                     | Value                                    |
+| -------------------------- | ---------------------------------------- |
+| `X-COMEBACKHERE-Signature` | Lowercase hex-encoded HMAC-SHA256 digest |
+| `Content-Type`             | `application/json`                       |
+
+Additional headers sent by the **retry queue** path (not used today):
+
+| Header                 | Value                                                        |
+| ---------------------- | ------------------------------------------------------------ |
+| `X-Idempotency-Key`    | Stable per-event key (see [Deduplicating deliveries](#deduplicating-deliveries)) |
+| `X-Request-Id`         | Correlation ID forwarded from the originating request, when available |
+
+If you need a `X-COMEBACKHERE-Signature` on every delivery, verify it
+unconditionally and treat a missing signature as a rejection.
+
 
 ### Verification — Node.js / TypeScript
 
@@ -164,82 +223,64 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 ---
 
-## Idempotency
+## Deduplicating deliveries
 
-Every webhook `POST` includes an `X-Idempotency-Key` header (and the same value
-in the payload body as `idempotency_key`). The key is derived deterministically
-from the event type and the resource ID:
+The live dispatch path sends **no** `X-Idempotency-Key` header and includes no
+`idempotency_key` field in the body. There is no stable per-event key to dedupe
+on out of the box.
+
+Deduplicate on a tuple you build yourself from the body. For settlement events
+`(event, settlement_id, tx_hash)` is stable across redeliveries of the same
+chain event, and `settlement_approved` can legitimately repeat with different
+signers, so include the signer when you need to distinguish approvals:
 
 ```
-idempotency_key = "<event_type>:<resource_id>"
+dedupe_key = "<event>:<settlement_id>:<tx_hash>"
+            # settlement_approved: "<event>:<settlement_id>:<signer>:<tx_hash>"
 
 Examples:
-  invoice_paid:42
-  settlement_executed:7
-  settlement_proposed:15
+  settlement_proposed:15:9f2c...
+  settlement_executed:15:41ab...
+  settlement_approved:15:GDR7...:41ab...
 ```
 
-Because the key is stable, retries of the same delivery attempt carry the
-**same idempotency key**. Your endpoint should use this key to detect and safely
-ignore duplicate deliveries.
+Store the key and reject duplicates before applying side effects. This is the
+only replay protection available, because the signature carries no timestamp.
+
+The retry queue path, when it is wired up, additionally sends an
+`X-Idempotency-Key` header and an `idempotency_key` body field derived as
+`<event_type>:<resource_id>`. Do not build a receiver that depends on that
+header today.
 
 ---
 
 ## Event payload shapes
 
-All events share a common envelope. Event-specific fields are listed in each
-section below.
+Every event is a **flat JSON object** with an `event` discriminator and
+event-specific fields at the top level. There is no `event_type` /
+`timestamp` / `data` envelope — fields are not nested under `data`, and
+`event_type` is spelled `event`.
 
-### Common envelope
+`settlement_id` is a JSON **number**. Token amounts (`amount`,
+`approval_weight`) are converted with `String(...)` before sending, so they
+arrive as **strings** and never lose precision. Account addresses and
+`tx_hash` are strings.
 
-```json
-{
-  "event_type": "string",
-  "idempotency_key": "string",
-  "timestamp": "ISO-8601 string",
-  "invoice_id": "string | undefined",
-  "settlement_id": "string | undefined",
-  "data": { }
-}
-```
+| Field           | Type   | Present on                    | Description                          |
+| --------------- | ------ | ----------------------------- | ------------------------------------ |
+| `event`         | string | all                           | One of the event names below         |
+| `settlement_id` | number | all                           | Numeric settlement ID               |
+| `tx_hash`       | string | all                           | Stellar transaction hash             |
+| `merchant_address` | string | `settlement_proposed`      | Stellar public key of the merchant   |
+| `amount`        | string | `settlement_proposed`         | Settlement amount in stroops         |
+| `token`         | string | `settlement_proposed`         | Token identifier, e.g. `"USDC"`      |
+| `signer`        | string | `settlement_approved`         | Public key of the approving signer   |
+| `approval_weight` | string | `settlement_approved`       | Accumulated weight after this approval |
 
-| Field             | Type              | Description                                                       |
-| ----------------- | ----------------- | ----------------------------------------------------------------- |
-| `event_type`      | string            | One of the event type names listed below                          |
-| `idempotency_key` | string            | Stable per-event key in the format `<event_type>:<id>`           |
-| `timestamp`       | ISO-8601 string   | When the event was emitted by the backend                         |
-| `invoice_id`      | string (optional) | Numeric invoice ID as a string; set for invoice events            |
-| `settlement_id`   | string (optional) | Numeric settlement ID as a string; set for settlement events      |
-| `data`            | object            | Event-specific payload fields (see each event type below)         |
+`approval_weight` is a string, not a number.
 
----
-
-### `invoice_paid`
-
-Emitted when a payer successfully pays an invoice on-chain.
-
-```json
-{
-  "event_type": "invoice_paid",
-  "idempotency_key": "invoice_paid:42",
-  "timestamp": "2026-08-29T14:23:00.000Z",
-  "invoice_id": "42",
-  "settlement_id": null,
-  "data": {
-    "invoice_id": "42",
-    "payer_address": "G...",
-    "amount_usdc": "1000000",
-    "tx_hash": "abc123..."
-  }
-}
-```
-
-| `data` field      | Type   | Description                                     |
-| ----------------- | ------ | ----------------------------------------------- |
-| `invoice_id`      | string | Numeric invoice ID                              |
-| `payer_address`   | string | Stellar public key of the payer                 |
-| `amount_usdc`     | string | Amount paid in stroops (1 USDC = 10 000 000)    |
-| `tx_hash`         | string | Stellar transaction hash                        |
+There is no `invoice_paid` event: the backend does not emit one today. Paying an
+invoice on-chain does not produce an outbound webhook.
 
 ---
 
@@ -249,57 +290,47 @@ Emitted when a new settlement is created in the treasury contract.
 
 ```json
 {
-  "event_type": "settlement_proposed",
-  "idempotency_key": "settlement_proposed:15",
-  "timestamp": "2026-08-29T14:30:00.000Z",
-  "invoice_id": null,
-  "settlement_id": "15",
-  "data": {
-    "settlement_id": "15",
-    "merchant_address": "G...",
-    "amount": "5000000",
-    "token": "USDC",
-    "tx_hash": "def456..."
-  }
+  "event": "settlement_proposed",
+  "settlement_id": 15,
+  "merchant_address": "G...",
+  "amount": "5000000",
+  "token": "USDC",
+  "tx_hash": "def456..."
 }
 ```
 
-| `data` field        | Type   | Description                                   |
-| ------------------- | ------ | --------------------------------------------- |
-| `settlement_id`     | string | Numeric settlement ID                         |
-| `merchant_address`  | string | Stellar public key of the merchant            |
-| `amount`            | string | Settlement amount in stroops                  |
-| `token`             | string | Token identifier (e.g. `"USDC"`)              |
-| `tx_hash`           | string | Stellar transaction hash                      |
+| Field              | Type   | Description                                   |
+| ------------------ | ------ | --------------------------------------------- |
+| `settlement_id`    | number | Numeric settlement ID                        |
+| `merchant_address` | string | Stellar public key of the merchant            |
+| `amount`           | string | Settlement amount in stroops                  |
+| `token`            | string | Token identifier (e.g. `"USDC"`)              |
+| `tx_hash`          | string | Stellar transaction hash                      |
 
 ---
 
 ### `settlement_approved`
 
-Emitted each time a registered signer approves a pending settlement.
+Emitted each time a registered signer approves a pending settlement. This event
+fires **once per approval**, so a settlement reaching quorum produces several
+`settlement_approved` deliveries before `settlement_executed`.
 
 ```json
 {
-  "event_type": "settlement_approved",
-  "idempotency_key": "settlement_approved:15",
-  "timestamp": "2026-08-29T14:35:00.000Z",
-  "invoice_id": null,
-  "settlement_id": "15",
-  "data": {
-    "settlement_id": "15",
-    "signer": "G...",
-    "approval_weight": 2,
-    "tx_hash": "ghi789..."
-  }
+  "event": "settlement_approved",
+  "settlement_id": 15,
+  "signer": "G...",
+  "approval_weight": "2",
+  "tx_hash": "ghi789..."
 }
 ```
 
-| `data` field       | Type   | Description                                           |
-| ------------------ | ------ | ----------------------------------------------------- |
-| `settlement_id`    | string | Numeric settlement ID                                 |
-| `signer`           | string | Stellar public key of the approving signer            |
-| `approval_weight`  | number | Total accumulated approval weight after this approval |
-| `tx_hash`          | string | Stellar transaction hash                              |
+| Field             | Type   | Description                                    |
+| ----------------- | ------ | ---------------------------------------------- |
+| `settlement_id`   | number | Numeric settlement ID                         |
+| `signer`          | string | Stellar public key of the approving signer     |
+| `approval_weight` | string | Total accumulated approval weight after approval |
+| `tx_hash`         | string | Stellar transaction hash                       |
 
 ---
 
@@ -310,32 +341,32 @@ funds to the merchant.
 
 ```json
 {
-  "event_type": "settlement_executed",
-  "idempotency_key": "settlement_executed:15",
-  "timestamp": "2026-08-29T14:40:00.000Z",
-  "invoice_id": null,
-  "settlement_id": "15",
-  "data": {
-    "settlement_id": "15",
-    "tx_hash": "jkl012..."
-  }
+  "event": "settlement_executed",
+  "settlement_id": 15,
+  "tx_hash": "jkl012..."
 }
 ```
 
-| `data` field    | Type   | Description               |
+| Field           | Type   | Description               |
 | --------------- | ------ | ------------------------- |
-| `settlement_id` | string | Numeric settlement ID     |
+| `settlement_id` | number | Numeric settlement ID    |
 | `tx_hash`       | string | Stellar transaction hash  |
 
 ---
 
 ## Delivery guarantees and retry schedule
 
-The backend retries failed deliveries with **exponential backoff**. A delivery
-is considered failed when the merchant endpoint returns a non-`2xx` status code
-or a network error occurs (connection refused, timeout, etc.).
+The live dispatch path makes **one attempt** per event. There is no retry, no
+backoff, and no dead-letter record. A failure is logged and dropped:
 
-### Retry parameters
+```
+[treasury-indexer] webhook dispatch failed (settlement_proposed): <message>
+```
+
+Treat every delivery as at-most-once, and expect to miss some. If the retry queue
+is wired up in a future release, the policy below applies to it.
+
+### Retry parameters (retry queue, dormant)
 
 | Parameter          | Value                                              |
 | ------------------ | -------------------------------------------------- |
@@ -363,6 +394,9 @@ Administrators can inspect dead letters with `GET /webhooks/dead-letters` and
 replay one with `POST /webhooks/dead-letters/:id/replay`; both require the
 `x-admin-key` header. A letter is removed only after replay succeeds.
 
+> These two routes are live today, but nothing populates the collection while the
+> retry queue is dormant.
+
 ### Delivery record fields
 
 The backend maintains an internal delivery record for every webhook event:
@@ -385,16 +419,14 @@ The backend maintains an internal delivery record for every webhook event:
 
 Your endpoint should:
 
-1. Immediately respond with a `2xx` status code once the signature is verified
-   and the payload is accepted. The backend considers any `2xx` response a
-   successful delivery and will not retry.
-2. Perform all heavy work (database writes, downstream calls) asynchronously
+1. Verify `X-COMEBACKHERE-Signature` against the raw body before parsing JSON,
+   and reject the request with `401` if it does not match.
+2. Immediately respond with a `2xx` status code once the signature is verified
+   and the payload is accepted.
+3. Perform all heavy work (database writes, downstream calls) asynchronously
    after returning `200 OK` to avoid triggering a delivery timeout.
-3. Store the `idempotency_key` and check it before processing to safely handle
-   retried deliveries without duplicating side effects.
-4. Return `4xx` or `5xx` to signal a transient failure and trigger a retry.
-   Note that a `4xx` is treated the same as `5xx` — the backend will retry up
-   to the maximum attempt cap regardless.
+4. Deduplicate on your own key before applying side effects — see
+   [Deduplicating deliveries](#deduplicating-deliveries).
 
 ---
 
@@ -403,7 +435,25 @@ Your endpoint should:
 | Symptom                                | Likely cause                                                                 |
 | -------------------------------------- | ---------------------------------------------------------------------------- |
 | Signature verification fails           | Body was parsed before reading the raw bytes, or wrong `WEBHOOK_SIGNING_SECRET` |
-| Duplicate events processed             | Idempotency key not checked; same event delivered on retry                   |
+| `timingSafeEqual` throws               | The signature header was not 64 hex characters; compare lengths first          |
+| Duplicate events processed             | Dedupe key not checked; no idempotency key is sent on the live path           |
 | Deliveries time out                    | Endpoint performs synchronous work before responding; move work off the request path |
 | No webhooks received                   | `WEBHOOK_URL` not set, or set to an unreachable address                      |
-| All 5 attempts fail silently           | Check backend logs for `[webhook] delivery failed` entries                   |
+| Occasional missing events             | Expected: the live path is single-attempt with no retry                        |
+| A replayed body still verifies         | Expected: the signature has no timestamp; dedupe on your own key              |
+| Backend refuses to start               | `WEBHOOK_SIGNING_SECRET` is unset — `validateEnv()` fails fast                 |
+
+---
+
+## Verifying these claims
+
+`scripts/check_webhook_docs_sync.sh` parses the signing implementation and fails
+if this page, `docs/api-reference.md` or the `.env.*.example` files drift from
+it — including the header name, the algorithm, the required
+`WEBHOOK_SIGNING_SECRET` variable, and any claim that the live path sends
+`X-Idempotency-Key`.
+
+The behavioural half — the digest itself, the constant-time comparison, and the
+absence of an envelope — is covered by
+`comebackhere-backend/src/tests/webhooks.test.ts`, run in CI by
+`.github/workflows/backend-tests.yml`.

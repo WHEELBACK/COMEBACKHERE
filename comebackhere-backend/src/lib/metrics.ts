@@ -1,80 +1,71 @@
-/**
- * Minimal in-process metrics registry rendered in the Prometheus text
- * exposition format at GET /metrics. Only counters and gauges are needed
- * today; swap for prom-client if histograms become necessary.
- */
+import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client"
 
 type Labels = Record<string, string>
 
-interface Metric {
-  name: string
-  help: string
-  type: "counter" | "gauge"
-  values: Map<string, { labels: Labels; value: number }>
-}
+export const metricsRegistry = new Registry()
+collectDefaultMetrics({ register: metricsRegistry })
 
-const registry = new Map<string, Metric>()
+export const httpRequestDuration = new Histogram({
+  name: "http_request_duration_seconds",
+  help: "HTTP request duration in seconds",
+  labelNames: ["method", "route", "status_code"],
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [metricsRegistry],
+})
 
-function labelKey(labels: Labels): string {
-  return Object.keys(labels)
-    .sort()
-    .map((k) => `${k}=${labels[k]}`)
-    .join(",")
-}
+export const indexerLedgerLag = new Gauge({
+  name: "indexer_ledger_lag",
+  help: "Number of ledgers the indexer is behind the latest Soroban ledger",
+  labelNames: ["indexer"],
+  registers: [metricsRegistry],
+})
 
-function register(name: string, help: string, type: Metric["type"]): Metric {
-  let metric = registry.get(name)
-  if (!metric) {
-    metric = { name, help, type, values: new Map() }
-    registry.set(name, metric)
-  }
-  return metric
-}
+export const webhookDeliveryOutcomes = new Counter({
+  name: "webhook_delivery_total",
+  help: "Webhook delivery outcomes",
+  labelNames: ["status"],
+  registers: [metricsRegistry],
+})
 
-function makeMetric(name: string, help: string, type: Metric["type"]) {
-  const metric = register(name, help, type)
-  return {
-    get(labels: Labels = {}): number {
-      return metric.values.get(labelKey(labels))?.value ?? 0
-    },
-    set(value: number, labels: Labels = {}): void {
-      metric.values.set(labelKey(labels), { labels, value })
-    },
-    inc(labels: Labels = {}, by = 1): void {
-      const key = labelKey(labels)
-      const current = metric.values.get(key)?.value ?? 0
-      metric.values.set(key, { labels, value: current + by })
-    },
-  }
-}
+const retentionLabels = ["indexer"] as const
 
 export function counter(name: string, help: string) {
-  const { get, inc } = makeMetric(name, help, "counter")
-  return { get, inc }
+  const metric = new Counter({
+    name,
+    help,
+    labelNames: name.startsWith("indexer_retention_") ? [...retentionLabels] : [],
+    registers: [metricsRegistry],
+  })
+  return {
+    inc(labels: Labels = {}, by = 1): void {
+      metric.inc(labels, by)
+    },
+  }
 }
 
 export function gauge(name: string, help: string) {
-  return makeMetric(name, help, "gauge")
-}
-
-function escapeLabel(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")
-}
-
-export function renderMetrics(): string {
-  const lines: string[] = []
-  for (const metric of registry.values()) {
-    lines.push(`# HELP ${metric.name} ${metric.help}`)
-    lines.push(`# TYPE ${metric.name} ${metric.type}`)
-    for (const { labels, value } of metric.values.values()) {
-      const pairs = Object.entries(labels).map(([k, v]) => `${k}="${escapeLabel(v)}"`)
-      lines.push(`${metric.name}${pairs.length ? `{${pairs.join(",")}}` : ""} ${value}`)
-    }
+  const metric = new Gauge({
+    name,
+    help,
+    labelNames: name.startsWith("indexer_retention_") ? [...retentionLabels] : [],
+    registers: [metricsRegistry],
+  })
+  return {
+    set(value: number, labels: Labels = {}): void {
+      metric.set(labels, value)
+    },
   }
-  return lines.join("\n") + "\n"
 }
 
-/** Exported for tests. */
+export function metricsEnabled(): boolean {
+  return process.env.METRICS_ENABLED?.toLowerCase() !== "false"
+}
+
+export function renderMetrics(): Promise<string> {
+  return metricsRegistry.metrics()
+}
+
+/** Exported for tests and process-local instrumentation resets. */
 export function _resetMetrics(): void {
-  for (const metric of registry.values()) metric.values.clear()
+  metricsRegistry.resetMetrics()
 }

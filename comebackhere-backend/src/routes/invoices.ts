@@ -342,7 +342,10 @@ router.get("/export.csv", async (req: Request, res: Response) => {
     } else {
       // Mid-stream failure: abort so the client sees a truncated download
       // rather than a file that silently looks complete.
-      console.error("[invoices] CSV export failed mid-stream:", message)
+      res.locals.logger.error(
+        { errorName: err instanceof Error ? err.name : "UnknownError" },
+        "Invoice CSV export failed mid-stream",
+      )
       res.destroy(err instanceof Error ? err : new Error(message))
     }
   } finally {

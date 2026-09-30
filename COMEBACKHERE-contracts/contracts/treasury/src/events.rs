@@ -32,9 +32,16 @@ pub fn dispute_resolved(
     );
 }
 
-pub fn deposit(env: &Env, token: &Address, from: &Address, amount: &u64) {
+pub fn admin_transfer_initiated(env: &Env, current_admin: &Address, new_admin: &Address) {
     env.events().publish(
-        (Symbol::new(env, "deposit"),),
-        (token, from, amount),
+        (Symbol::new(env, "admin_transfer_initiated"),),
+        (current_admin, new_admin),
+    );
+}
+
+pub fn admin_transfer_accepted(env: &Env, new_admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "admin_transfer_accepted"),),
+        new_admin,
     );
 }

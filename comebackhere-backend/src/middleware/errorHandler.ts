@@ -6,6 +6,7 @@ import {
   PayloadTooLargeError,
   parseContractErrorCode,
 } from "../lib/errors.js"
+import { logger } from "../lib/logger.js"
 
 /**
  * Standard error envelope returned by every route:
@@ -93,7 +94,8 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
   const correlationId = typeof res.locals.requestId === "string" ? res.locals.requestId : null
 
   if (appError.status >= 500) {
-    console.error(`[requestId=${correlationId}] ${appError.code}: ${appError.message}`)
+    const requestLogger = res.locals.logger ?? logger.child({ correlationId })
+    requestLogger.error({ code: appError.code }, "Request failed")
   }
 
   res.status(appError.status).json(buildErrorEnvelope(appError, correlationId))
