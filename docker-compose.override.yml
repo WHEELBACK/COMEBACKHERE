@@ -7,13 +7,18 @@
 # These overrides replace the legacy Rust `backend/` with the TypeScript
 # `comebackhere-backend/` (the live service, per docs/adr-0001-dual-source-trees.md)
 # and publish both ports so tests/smoke_stack.sh can reach them from the host.
+#
+# Paths are relative to the project directory (the repo root), so they must be
+# written as ./comebackhere-*. A `../` prefix points outside the repository,
+# where those directories do not exist — Compose then fails with
+# "unable to prepare context: path ... not found".
 
 version: '3.8'
 
 services:
   backend:
     build:
-      context: ../comebackhere-backend
+      context: ./comebackhere-backend
       dockerfile: Dockerfile
       # The dev target runs from source, which the bind mount below requires.
       target: dev
@@ -40,10 +45,10 @@ services:
     # instead of the environment. `required: false` keeps `docker compose up`
     # working when the file is absent.
     env_file:
-      - path: ../comebackhere-backend/.env
+      - path: ./comebackhere-backend/.env
         required: false
     volumes:
-      - ../comebackhere-backend:/app
+      - ./comebackhere-backend:/app
       - /app/node_modules
     # The base file's healthcheck targets the legacy Rust backend on 3001.
     # This one matches the Node service: /health on 3000, via busybox wget
@@ -65,7 +70,7 @@ services:
 
   frontend:
     build:
-      context: ../comebackhere-frontend
+      context: ./comebackhere-frontend
       dockerfile: Dockerfile
       target: dev
     ports:
@@ -77,10 +82,10 @@ services:
       - VITE_HORIZON_URL=http://localhost:8000
       - VITE_NETWORK_PASSPHRASE=Standalone Network ; February 2025
     env_file:
-      - path: ../comebackhere-frontend/.env
+      - path: ./comebackhere-frontend/.env
         required: false
     volumes:
-      - ../comebackhere-frontend:/app
+      - ./comebackhere-frontend:/app
       - /app/node_modules
     # wget comes from busybox in node:alpine; curl is not installed, and the
     # base file's `curl -f` probe would fail in every container.
