@@ -46,6 +46,83 @@ soroban-cli start --standalone
 
 This runs Soroban RPC on `http://localhost:8000` and Horizon on `http://localhost:8001`.
 
+Alternatively, start the complete stack via Docker Compose:
+
+```sh
+docker-compose up -d
+```
+
+### Expected `docker-compose ps` Output
+
+When all services initialize successfully, `docker-compose ps` reports healthy states:
+
+```text
+NAME                      IMAGE                       COMMAND                  SERVICE    CREATED          STATUS                    PORTS
+comebackhere-backend-1    comebackhere-backend        "docker-entrypoint.s…"   backend    15 seconds ago   Up 14 seconds (healthy)   0.0.0.0:3001->3001/tcp
+comebackhere-frontend-1   comebackhere-frontend       "/bin/sh -c 'npm run…"   frontend   15 seconds ago   Up 14 seconds (healthy)   0.0.0.0:5173->5173/tcp
+comebackhere-mongodb-1    mongo:7                     "docker-entrypoint.s…"   mongodb    15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:27017->27017/tcp
+comebackhere-redis-1      redis:7-alpine              "docker-entrypoint.s…"   redis      15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:6379->6379/tcp
+comebackhere-soroban-1    stellar/quickstart:latest   "/start standalone"      soroban    15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:8000->8000/tcp, 0.0.0.0:11625-11626->11625-11626/tcp
+```
+
+### Service Health Checks & Expected Output
+
+Validate individual service health:
+
+1. **Soroban Node / RPC (`http://localhost:8000`)**:
+
+   ```sh
+   curl -s http://localhost:8000/health
+   # Expected output:
+   # {"status":"healthy"}
+   ```
+
+2. **Redis (`localhost:6379`)**:
+
+   ```sh
+   docker-compose exec -T redis redis-cli ping
+   # Expected output:
+   # PONG
+   ```
+
+3. **MongoDB (`localhost:27017`)**:
+
+   ```sh
+   docker-compose exec -T mongodb mongosh --eval "db.adminCommand('ping')" --quiet
+   # Expected output:
+   # { ok: 1 }
+   ```
+
+4. **Backend API (`http://localhost:3001`)**:
+
+   ```sh
+   curl -s http://localhost:3001/health/rpc
+   # Expected output:
+   # {"status":"ok"}
+   ```
+
+5. **Frontend UI (`http://localhost:5173`)**:
+
+   ```sh
+   curl -s -o /dev/null -w "%{http_code}\n" http://localhost:5173/
+   # Expected output:
+   # 200
+   ```
+
+### Pre-Flight Verification Script
+
+Run this verification block before running app-specific commands or tests:
+
+```sh
+echo "Testing local development stack health..."
+curl -sf http://localhost:8000/health > /dev/null && echo "✔ Soroban RPC is healthy"
+docker-compose exec -T redis redis-cli ping 2>/dev/null | grep -q "PONG" && echo "✔ Redis is healthy"
+docker-compose exec -T mongodb mongosh --eval "db.adminCommand('ping')" --quiet 2>/dev/null | grep -q "1" && echo "✔ MongoDB is healthy"
+curl -sf http://localhost:3001/health/rpc > /dev/null && echo "✔ Backend service is healthy"
+curl -sf -o /dev/null http://localhost:5173/ && echo "✔ Frontend UI is responsive"
+echo "All services verified."
+```
+
 ## Environment Setup
 
 ### Contracts
@@ -106,9 +183,9 @@ INVOICE_CONTRACT_ID=$INVOICE_CONTRACT_ID
 TREASURY_CONTRACT_ID=$TREASURY_CONTRACT_ID
 COMPLIANCE_CONTRACT_ID=$COMPLIANCE_CONTRACT_ID
 USDC_CONTRACT_ID=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
-MONGO_URI=mongodb://localhost:27017/comebackhere
+MONGODB_URI=mongodb://localhost:27017/comebackhere
 REDIS_URL=redis://localhost:6379
-WEBHOOK_SECRET=<generate-a-32-char-or-longer-secret>
+WEBHOOK_SIGNING_SECRET=<generate-a-32-char-or-longer-secret>
 EOF
 ```
 
@@ -130,26 +207,43 @@ Then start the backend:
 
 ```sh
 cd ../comebackhere-backend
-cargo build && cargo run
+npm install
+npm run dev
 ```
 
 Backend listens on `http://localhost:3000`.
 
 #### Required backend variables
 
-| Variable         | Description                                                        |
-|------------------|--------------------------------------------------------------------|
-| `MONGO_URI`      | MongoDB connection string (`mongodb://` or `mongodb+srv://`)       |
-| `REDIS_URL`      | Redis connection string (`redis://`)                               |
-| `WEBHOOK_SECRET` | HMAC secret for signing outgoing webhook payloads (≥ 32 chars)     |
+These seven are checked by `validateEnv()` in `comebackhere-backend/src/lib/env.ts`
+before the server binds its port. If any is missing — or any Stellar identifier
+is malformed — the process exits immediately with a message naming every
+problem at once. `scripts/validate_backend_env.sh` enforces the same list.
+
+| Variable | Description |
+|----------|-------------|
+| `MONGODB_URI` | MongoDB connection string (`mongodb://` or `mongodb+srv://`) |
+| `REDIS_URL` | Redis connection string (`redis://`) |
+| `SOROBAN_RPC_URL` | Soroban RPC endpoint |
+| `TREASURY_CONTRACT_ID` | Deployed treasury contract address (`C...`) |
+| `INVOICE_CONTRACT_ID` | Deployed invoice contract address (`C...`) |
+| `ADMIN_KEY` | Admin key sent as the `X-Admin-Key` header on `/webhooks/dead-letters*` |
+| `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 secret for signing outgoing webhook payloads (≥ 32 chars) |
+
+> **There is no `WEBHOOK_SECRET`.** The backend reads `WEBHOOK_SIGNING_SECRET`
+> and nothing else. Setting `WEBHOOK_SECRET` has no effect.
 
 #### Optional contract integration variables
 
-| Variable                | Description                             |
-|-------------------------|-----------------------------------------|
-| `INVOICE_CONTRACT_ID`   | Deployed invoice contract address       |
-| `TREASURY_CONTRACT_ID`  | Deployed treasury contract address      |
-| `COMPLIANCE_CONTRACT_ID`| Deployed compliance contract address    |
+Validated for strkey format when set, but not required at startup.
+
+| Variable | Description |
+|----------|-------------|
+| `USDC_CONTRACT_ID` | USDC token contract address (`C...`) |
+| `COMPLIANCE_CONTRACT_ID` | Deployed compliance contract address (`C...`) |
+| `SETTLEMENT_CONTRACT_ID` | Settlement contract address (`C...`) |
+| `ADMIN_PUBLIC_KEY` | Admin account public key (`G...`) |
+| `SIGNER_SECRET_KEY` | Stellar secret seed (`S...`) for signing transactions |
 
 ### Frontend
 
@@ -160,7 +254,7 @@ cat > .env <<EOF
 VITE_API_URL=http://localhost:3000
 VITE_SOROBAN_RPC=http://localhost:8000
 VITE_HORIZON_URL=http://localhost:8001
-VITE_NETWORK_PASSPHRASE=Standalone Network ; February 2025
+VITE_NETWORK_PASSPHRASE="Standalone Network ; February 2025"
 EOF
 
 npm install && npm run dev
@@ -180,27 +274,37 @@ specific features.
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `SOROBAN_RPC_URL` | Yes | — | Soroban RPC endpoint (e.g. `http://localhost:8000/soroban/rpc`) |
-| `INVOICE_CONTRACT_ID` | Yes* | — | Deployed invoice contract address |
-| `TREASURY_CONTRACT_ID` | Yes* | — | Deployed treasury contract address |
-| `USDC_CONTRACT_ID` | Yes* | — | USDC token contract address |
-| `SETTLEMENT_CONTRACT_ID` | Yes* | — | Settlement contract address (disputes) |
-| `SIGNER_SECRET_KEY` | Yes | — | Stellar secret key for signing transactions |
+| `MONGODB_URI` | Yes | — | MongoDB connection string |
+| `REDIS_URL` | Yes | — | Redis connection string backing the rate limiter |
+| `INVOICE_CONTRACT_ID` | Yes | — | Deployed invoice contract address (`C...`) |
+| `TREASURY_CONTRACT_ID` | Yes | — | Deployed treasury contract address (`C...`) |
+| `ADMIN_KEY` | Yes | — | Admin key for the `/webhooks/dead-letters*` routes (sent as `X-Admin-Key`) |
+| `WEBHOOK_SIGNING_SECRET` | Yes | — | HMAC-SHA256 signing secret for outbound webhooks |
+| `USDC_CONTRACT_ID` | No | — | USDC token contract address (`C...`) |
+| `SETTLEMENT_CONTRACT_ID` | No | — | Settlement contract address (`C...`, used by disputes) |
+| `COMPLIANCE_CONTRACT_ID` | No | — | Compliance contract address (`C...`) |
+| `ADMIN_PUBLIC_KEY` | No | — | Admin account public key (`G...`) |
+| `SIGNER_SECRET_KEY` | No | — | Stellar secret seed (`S...`) for signing transactions |
 | `NETWORK_PASSPHRASE` | No | `Standalone Network ; February 2025` | Stellar network passphrase |
-| `MONGODB_URI` | No | `mongodb://localhost:27017` | MongoDB connection string |
 | `MONGODB_DB` | No | `comebackhere` | MongoDB database name |
-| `REDIS_URL` | No | `redis://localhost:6379` | Redis connection string for rate limiting and caching |
-| `WEBHOOK_URL` | No | — | Merchant endpoint that receives webhook POSTs |
-| `WEBHOOK_SIGNING_SECRET` | No | — | HMAC-SHA256 signing secret for outbound webhooks |
+| `WEBHOOK_URL` | No | — | Merchant endpoint that receives webhook POSTs; unset disables outbound webhooks |
+| `WEBHOOK_MAX_ATTEMPTS` | No | `5` | Maximum delivery attempts |
+| `WEBHOOK_BASE_DELAY_MS` | No | `1000` | Initial retry delay in milliseconds |
+| `WEBHOOK_MAX_DELAY_MS` | No | `60000` | Maximum exponential backoff delay in milliseconds |
+| `WEBHOOK_JITTER_RATIO` | No | `0.2` | Retry delay jitter, between `0` and `1` |
 | `PORT` | No | `3000` | HTTP server port |
 | `SHUTDOWN_TIMEOUT_MS` | No | `10000` | Graceful shutdown timeout in milliseconds |
-| `RATE_LIMIT_POINTS` | No | `60` | Max requests per IP per window |
+| `WEBHOOK_DRAIN_TIMEOUT_MS` | No | `5000` | Max time to drain in-flight webhook deliveries on shutdown |
+| `CORS_ORIGINS` | No | — (none) | Comma-separated allowlist of browser origins |
+| `RATE_LIMIT_POINTS` | No | `60` | Max requests per window for the per-IP bucket |
+| `RATE_LIMIT_API_KEY_POINTS` | No | `600` | Max requests per window for the per-`X-API-Key` bucket |
 | `RATE_LIMIT_DURATION` | No | `60` | Rate limit window in seconds |
 | `DISPUTE_VOTE_THRESHOLD` | No | `2` | Minimum votes to resolve a dispute |
 | `INDEXER_START_CURSOR` | No | `0` | Starting cursor for the event indexer |
-| `ADMIN_KEY` | No | — | Admin public key for compliance and escrow operations |
 
-* Required when the corresponding contract route is called; the backend
-  returns 503 if the variable is missing at request time.
+A malformed value in `RATE_LIMIT_POINTS`, `RATE_LIMIT_API_KEY_POINTS` or
+`RATE_LIMIT_DURATION` falls back to its default rather than disabling the
+limiter. See [rate-limits.md](./rate-limits.md).
 
 ### Backend — `backend` (Rust/Axum, legacy)
 
@@ -210,7 +314,7 @@ specific features.
 | `STELLAR_NETWORK` | No | `standalone` | Stellar network name (`standalone`, `testnet`, `mainnet`) |
 | `HORIZON_URL` | No | — | Horizon server URL |
 | `REDIS_URL` | No | `redis://localhost:6379` | Redis connection string |
-| `ADMIN_PUBLIC_KEY` | Yes* | — | Admin public key |
+| `ADMIN_PUBLIC_KEY` | Yes* | — | Admin account public key (`G...`) |
 | `INVOICE_CONTRACT_ID` | Yes* | — | Invoice contract address |
 | `TREASURY_CONTRACT_ID` | Yes* | — | Treasury contract address |
 | `COMPLIANCE_CONTRACT_ID` | Yes* | — | Compliance contract address |
@@ -219,6 +323,10 @@ specific features.
 | `PORT` | No | `3000` | Server port |
 | `RATE_LIMIT_POINTS` | No | `60` | Max requests per IP per window |
 | `RATE_LIMIT_DURATION` | No | `60` | Rate limit window in seconds |
+
+\* This legacy tree is per-IP only — it has no `X-API-Key` tier and returns a
+different 429 body shape from the TypeScript backend. See
+[rate-limits.md](./rate-limits.md#differences-between-the-two-backends).
 
 ### Frontend — `comebackhere-frontend` (React/Vite)
 

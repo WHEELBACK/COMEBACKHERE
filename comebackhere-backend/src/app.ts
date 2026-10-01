@@ -2,6 +2,7 @@ import express from "express"
 import helmet from "helmet"
 import swaggerUi from "swagger-ui-express"
 import invoicesRouter from "./routes/invoices.js"
+import invoiceActionsRouter from "./routes/invoice-actions.js"
 import complianceRouter from "./routes/compliance.js"
 import releaseEscrowRouter from "./routes/release-escrow.js"
 import treasuryRouter from "./routes/treasury.js"
@@ -9,14 +10,24 @@ import invoiceSettingsRouter from "./routes/invoice-settings.js"
 import thresholdRouter from "./routes/threshold.js"
 import disputesRouter from "./routes/disputes.js"
 import analyticsRouter from "./routes/analytics.js"
+import webhookDeadLettersRouter from "./routes/webhook-dead-letters.js"
 import { startComplianceIndexer } from "./services/compliance-indexer.js"
 import { rateLimitMiddleware } from "./middleware/rateLimiter.js"
+import { idempotencyMiddleware } from "./middleware/idempotency.js"
 import { correlationIdMiddleware } from "./middleware/correlationId.js"
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js"
 import { createCorsMiddleware } from "./middleware/cors.js"
 import { parseCorsOrigins } from "./lib/env.js"
 import { openapiSpec } from "./openapi.js"
-import { renderMetrics } from "./lib/metrics.js"
+import { connectMongo } from "./db/mongo.js"
+import { pingIndexerRedis } from "./indexer.js"
+import { buildSorobanClient } from "./lib/soroban.js"
+import {
+  httpRequestDuration,
+  metricsEnabled,
+  metricsRegistry,
+  renderMetrics,
+} from "./lib/metrics.js"
 
 /** Maximum accepted JSON body size; larger requests get a 413 envelope. */
 export const JSON_BODY_LIMIT = "100kb"
@@ -66,6 +77,20 @@ export function createApp(options: CreateAppOptions = {}) {
   // line, downstream call and error envelope can reference the same
   // correlation ID — including body-parsing errors.
   app.use(correlationIdMiddleware)
+  app.use((req, res, next) => {
+    if (req.path !== "/metrics") {
+      const startedAt = process.hrtime.bigint()
+      res.on("finish", () => {
+        const routePath = req.route ? String(req.route.path) : "unmatched"
+        const route = `${req.baseUrl}${routePath}` || "/"
+        httpRequestDuration.observe(
+          { method: req.method, route, status_code: String(res.statusCode) },
+          Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
+        )
+      })
+    }
+    next()
+  })
   app.use((req, res, next) =>
     req.path === "/api-docs" || req.path.startsWith("/api-docs/")
       ? swaggerHelmet(req, res, next)
@@ -76,14 +101,55 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use(createCorsMiddleware(corsOrigins))
   app.use(express.json({ limit: JSON_BODY_LIMIT }))
   app.use(rateLimitMiddleware)
+  app.use("/invoices", idempotencyMiddleware)
 
   // ── Health ──────────────────────────────────────────────────────────────────
   app.get("/health", (_req, res) => res.json({ status: "ok" }))
+  app.get("/health/ready", async (_req, res) => {
+    const check = async (probe: () => Promise<unknown>): Promise<boolean> => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          probe().then(() => true, () => false),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), 1_500)
+            timer.unref?.()
+          }),
+        ])
+      } finally {
+        if (timer) clearTimeout(timer)
+      }
+    }
+
+    const rpcUrl = process.env.SOROBAN_RPC_URL
+    const [mongo, redis, sorobanRpc] = await Promise.all([
+      check(async () => (await connectMongo()).command({ ping: 1 })),
+      check(async () => {
+        if ((await pingIndexerRedis()) !== "PONG") throw new Error("Redis ping failed")
+      }),
+      check(async () => {
+        if (!rpcUrl) throw new Error("Soroban RPC is not configured")
+        const getHealth = buildSorobanClient(rpcUrl).getHealth
+        if (!getHealth) throw new Error("Soroban RPC health is unsupported")
+        await getHealth()
+      }),
+    ])
+    const dependencies = { mongo, redis, sorobanRpc }
+    const ready = Object.values(dependencies).every(Boolean)
+    res.status(ready ? 200 : 503).json({
+      status: ready ? "ok" : "error",
+      dependencies: Object.fromEntries(
+        Object.entries(dependencies).map(([name, healthy]) => [name, healthy ? "ok" : "unavailable"]),
+      ),
+    })
+  })
 
   // ── Prometheus metrics ──────────────────────────────────────────────────────
-  app.get("/metrics", (_req, res) => {
-    res.type("text/plain; version=0.0.4").send(renderMetrics())
-  })
+  if (metricsEnabled()) {
+    app.get("/metrics", async (_req, res) => {
+      res.type(metricsRegistry.contentType).send(await renderMetrics())
+    })
+  }
 
   // ── OpenAPI spec (Issue #218) ───────────────────────────────────────────────
   // Raw JSON spec at a stable, machine-readable URL
@@ -96,6 +162,7 @@ export function createApp(options: CreateAppOptions = {}) {
 
   // ── Application routes ──────────────────────────────────────────────────────
   app.use("/invoices", invoicesRouter)
+  app.use("/invoices", invoiceActionsRouter)
   app.use("/invoices", releaseEscrowRouter)
   app.use("/compliance", complianceRouter)
   app.use("/api/treasury", treasuryRouter)
@@ -103,6 +170,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use("/api/treasury", thresholdRouter)
   app.use("/disputes", disputesRouter)
   app.use("/api/analytics", analyticsRouter)
+  app.use("/webhooks/dead-letters", webhookDeadLettersRouter)
 
   // ── Errors ──────────────────────────────────────────────────────────────────
   // Everything below produces { error: { code, message, details, correlationId } }

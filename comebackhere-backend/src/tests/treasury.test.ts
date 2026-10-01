@@ -6,6 +6,8 @@ import { setGraceWindow } from "../routes/invoice-settings.js"
 import type { SorobanClient } from "../lib/soroban.js"
 import { SorobanRpc, SorobanDataBuilder, xdr } from "stellar-sdk"
 import * as mongoModule from "../db/mongo.js"
+import { expectResponseShape } from "./helpers/response-schema.js"
+import { treasurySettlementResponseSchema } from "../schemas/index.js"
 
 const PARSED_SIM_SUCCESS = {
   _parsed: true,
@@ -541,6 +543,7 @@ describe("GET /api/treasury/on-hold-settlements", () => {
 
     const res = await request(app).get("/api/treasury/on-hold-settlements")
     expect(res.status).toBe(200)
+    expectResponseShape(res.body[0], treasurySettlementResponseSchema)
     expect(res.body).toHaveLength(1)
     expect(res.body[0]).toMatchObject({
       id: 100,

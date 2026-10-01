@@ -9,7 +9,8 @@ import {
 } from "stellar-sdk"
 import { validateBody, validateQuery } from "../middleware/validate.js"
 import { requireEnv } from "../lib/env.js"
-import { asyncHandler, UnauthorizedError } from "../lib/errors.js"
+import { asyncHandler } from "../lib/errors.js"
+import { requireAdmin } from "../middleware/adminAuth.js"
 import { allowBodySchema, blockBodySchema, complianceAuditQuerySchema } from "../schemas/index.js"
 import { connectMongo, getComplianceAuditCollection } from "../db/mongo.js"
 
@@ -108,7 +109,7 @@ export async function callComplianceOp(
   const contract = new Contract(contractId)
 
   const account = await client.getAccount(keypair.publicKey())
-  const tx = new TransactionBuilder(account as any, {
+  const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
   })
@@ -119,18 +120,23 @@ export async function callComplianceOp(
   const simulated = await client.simulateTransaction(tx)
   if (SorobanRpc.Api.isSimulationError(simulated)) {
     throw Object.assign(
-      new Error(`Soroban simulation failed: ${(simulated as any).error}`),
+      new Error(`Soroban simulation failed: ${(simulated as { error?: string }).error}`),
       { status: 422 }
     )
   }
 
-  const prepared = SorobanRpc.assembleTransaction(tx, simulated as any).build()
+  const prepared = SorobanRpc.assembleTransaction(
+    tx,
+    simulated as SorobanRpc.Api.SimulateTransactionSuccessResponse,
+  ).build()
   prepared.sign(keypair)
 
   const sendResult = await client.sendTransaction(prepared)
   if (sendResult.status === "ERROR") {
     throw Object.assign(
-      new Error(`Soroban submission failed: ${(sendResult as any).errorResult?.toXDR("base64")}`),
+      new Error(
+        `Soroban submission failed: ${(sendResult as { errorResult?: { toXDR: (format: string) => string } }).errorResult?.toXDR("base64")}`,
+      ),
       { status: 422 }
     )
   }
@@ -157,7 +163,7 @@ export async function callComplianceOp(
   }
 
   return {
-    address: (args[0] as any).address?.toString() ?? "",
+    address: args[0]?.address()?.toString() ?? "",
     status: statusMap[operation],
     hash,
   }
@@ -178,12 +184,7 @@ export interface AllowBody {
  * Body: { address: string, until?: number }
  * Returns: { address, status, hash }
  */
-router.post("/allow", validateBody(allowBodySchema), asyncHandler(async (req: Request, res: Response) => {
-  const adminKey = req.headers["x-admin-key"]
-  if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
-    throw new UnauthorizedError()
-  }
-
+router.post("/allow", requireAdmin, validateBody(allowBodySchema), asyncHandler(async (req: Request, res: Response) => {
   const { address, until } = req.body as { address: string; until?: number }
 
   const env = requireEnv({
@@ -222,12 +223,7 @@ export interface BlockBody {
  * Body: { address: string }
  * Returns: { address, status, hash }
  */
-router.post("/block", validateBody(blockBodySchema), asyncHandler(async (req: Request, res: Response) => {
-  const adminKey = req.headers["x-admin-key"]
-  if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
-    throw new UnauthorizedError()
-  }
-
+router.post("/block", requireAdmin, validateBody(blockBodySchema), asyncHandler(async (req: Request, res: Response) => {
   const { address } = req.body as { address: string }
 
   const env = requireEnv({
@@ -235,8 +231,8 @@ router.post("/block", validateBody(blockBodySchema), asyncHandler(async (req: Re
     signerSecret: "SIGNER_SECRET_KEY",
   })
 
-  // Audit log — admin identity + timestamp
-  console.log(`[compliance] block_address admin="${adminKey}" address="${address}" ts="${new Date().toISOString()}"`)
+  // The admin key is a credential and must never be included in logs.
+  res.locals.logger.info({ address }, "Compliance address block requested")
 
   const client = buildSorobanClient(env.rpcUrl)
   const result = await callComplianceOp(

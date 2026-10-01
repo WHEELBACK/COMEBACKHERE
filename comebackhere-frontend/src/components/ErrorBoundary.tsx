@@ -3,6 +3,11 @@ import { Component, type ErrorInfo, type ReactNode } from "react"
 interface Props {
   children: ReactNode
   fallbackTitle?: string
+  /**
+   * Optional label used in console.error output so errors can be attributed
+   * to the tab that threw. Example: "payment", "refund", "compliance", etc.
+   */
+  tabName?: string
 }
 
 interface State {
@@ -18,7 +23,8 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("ErrorBoundary caught:", error, info.componentStack)
+    const context = this.props.tabName ? `[tab: ${this.props.tabName}]` : ""
+    console.error(`ErrorBoundary caught${context ? " " + context : ""}:`, error, info.componentStack)
   }
 
   handleRetry = () => {

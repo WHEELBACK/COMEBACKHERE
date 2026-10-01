@@ -197,9 +197,13 @@ describe("Graceful shutdown — webhook drain", () => {
     queue.enqueue("https://merchant.test/hook", p)
     await shutdown("SIGTERM")
 
-    expect(store.saved).toEqual([
-      { endpoint: "https://merchant.test/hook", payload: p, attempts: 1 },
-    ])
+    expect(store.saved).toHaveLength(1)
+    expect(store.saved[0]).toMatchObject({
+      endpoint: "https://merchant.test/hook",
+      payload: p,
+      attempts: 1,
+      attempt_history: [{ attempt: 1 }],
+    })
     expect(exit).toHaveBeenCalledWith(0)
   })
 

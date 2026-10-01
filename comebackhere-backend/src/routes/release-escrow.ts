@@ -6,8 +6,9 @@ import {
   type SorobanClient,
 } from "../lib/soroban.js"
 import { requireEnv } from "../lib/env.js"
-import { asyncHandler, ContractError, parseContractErrorCode, UnauthorizedError } from "../lib/errors.js"
+import { asyncHandler, ContractError, parseContractErrorCode } from "../lib/errors.js"
 import { validateBody, validateParams } from "../middleware/validate.js"
+import { requireAdmin } from "../middleware/adminAuth.js"
 import { releaseEscrowIdParamSchema } from "../schemas/index.js"
 
 const router = Router({ mergeParams: true })
@@ -71,13 +72,7 @@ export async function releaseEscrow(
  *   503  required environment variables missing
  *   5xx  unexpected Soroban / network error
  */
-router.post("/:id/release-escrow", validateParams(releaseEscrowIdParamSchema), asyncHandler(async (req: Request, res: Response) => {
-  // Admin-only authorization
-  const adminKey = req.headers["x-admin-key"]
-  if (!adminKey || adminKey !== process.env.ADMIN_KEY) {
-    throw new UnauthorizedError()
-  }
-
+router.post("/:id/release-escrow", requireAdmin, validateParams(releaseEscrowIdParamSchema), asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params
 
   const invoiceId = parseInt(id, 10)

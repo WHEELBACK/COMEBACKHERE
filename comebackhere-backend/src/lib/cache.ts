@@ -1,4 +1,5 @@
 import Redis from "ioredis"
+import { logger } from "./logger.js"
 
 let _redis: Redis | null = null
 
@@ -13,6 +14,30 @@ function getRedis(): Redis | null {
 
 export function resetRedis(): void {
   _redis = null
+}
+
+export async function cacheDelete(key: string): Promise<void> {
+  const redis = getRedis()
+  if (!redis) return
+  try {
+    await redis.del(key)
+  } catch {
+    // Cache failures must not affect API availability.
+  }
+}
+
+export async function cacheTryLock(key: string, ttlMs: number): Promise<boolean> {
+  const redis = getRedis()
+  if (!redis) return true
+  try {
+    return (await redis.set(key, "1", "PX", ttlMs, "NX")) === "OK"
+  } catch {
+    return true
+  }
+}
+
+export async function cacheReleaseLock(key: string): Promise<void> {
+  await cacheDelete(key)
 }
 
 export async function cacheGet<T>(key: string): Promise<T | null> {
@@ -69,7 +94,7 @@ export function memoryCacheSet(key: string, value: unknown, ttlMs: number): void
  */
 export function invalidateCacheKey(key: string, reason = "manual"): boolean {
   const existed = _memoryCache.delete(key)
-  console.log(`[cache] invalidated key=${key} reason=${reason} evicted=${existed}`)
+  logger.info({ key, reason, evicted: existed }, "Cache key invalidated")
   return existed
 }
 

@@ -25,13 +25,36 @@ gets a relaxed CSP that allows its same-origin scripts, inline styles and
 > [`GET /api-docs/swagger.json`](http://localhost:3000/api-docs/swagger.json) (raw JSON)
 > and [`GET /api-docs`](http://localhost:3000/api-docs) (interactive Swagger UI).
 >
-> **Rate limits:** All endpoints are subject to per-IP rate limiting. See
-> [docs/rate-limits.md](./rate-limits.md) for default limits, configuration,
-> and the 429 response shape.
+> **Rate limits:** All endpoints — including `/health` and `/metrics` — are
+> subject to rate limiting. Requests are bucketed per IP (default 60 per 60s),
+> or per `X-API-Key` when that header is present (default 600 per 60s). Every
+> response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and
+> `X-RateLimit-Reset`; 429 responses add `Retry-After`. See
+> [docs/rate-limits.md](./rate-limits.md) for defaults, configuration, and the
+> 429 response shape.
 >
 > **Errors:** Every error uses one envelope,
 > `{ "error": { "code", "message", "details", "correlationId" } }`. See
 > [Error response shape](#error-response-shape).
+
+## Deprecation Policy
+
+Some endpoints are marked as **deprecated** and will be removed in a future version. Deprecated endpoints receive standard HTTP deprecation headers:
+
+- `Deprecation: true` — indicates the endpoint is deprecated
+- `Sunset: <HTTP-date>` — the date when the endpoint will be permanently removed
+- `Link: <new-url>; rel="successor-version"` — the replacement endpoint to migrate to
+
+**Legacy routes** in `backend/src/legacy_routes.rs` and `backend/src/routes_auth_legacy.rs` carry these headers. Plan to migrate to the canonical routes before the sunset date.
+
+Current legacy routes (to be removed):
+- Old merchant endpoints under `/api/v1/merchant/*` — migrate to `/api/v2/merchant/*`
+- Old settlement endpoints under `/api/v1/settlement/*` — migrate to `/api/v2/settlement/*`
+- Old dispute endpoints under `/api/v1/dispute/*` — migrate to `/api/v2/dispute/*`
+- Old signer endpoints under `/api/v1/signer/*` — migrate to `/api/v2/signer/*`
+- Old admin endpoints under `/api/v1/admin/*` — migrate to `/api/v2/admin/*`
+
+Usage of deprecated endpoints is logged server-side; if you hit one, update your client to use the replacement endpoint.
 
 ---
 
@@ -73,6 +96,32 @@ Checks Soroban RPC reachability and current ledger.
 ---
 
 
+## Merchant authentication
+
+Invoice creation and webhook replay require a merchant API key. An admin
+creates or rotates a key with `POST /api/merchant-keys`, sending `x-admin-key`
+and a JSON body containing the merchant's Stellar address. The returned
+`api_key` is shown only once; MongoDB stores only its SHA-256 hash. Creating a
+new key revokes the merchant's prior active keys. Revoke a key with
+`DELETE /api/merchant-keys/{keyId}` and the admin header.
+
+```http
+POST /api/merchant-keys
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{"merchant_address":"G..."}
+```
+
+The `201` response contains `key_id`, `merchant_address`, `api_key`, and
+`created_at`. The key is returned only at creation time; store it securely.
+Revocation returns `204 No Content`.
+
+Use `Authorization: Bearer <api_key>` on merchant requests. Missing, invalid,
+or revoked keys return `401 UNAUTHORIZED` in the standard error envelope.
+
+---
+
 ## Invoices
 
 ### `GET /invoices/:id`
@@ -105,6 +154,79 @@ Fetch the on-chain status of an invoice by its numeric ID.
 
 ---
 
+### `POST /invoices/:id/cancel`
+
+Cancel an invoice using the configured Soroban signer. Cancelling a `Pending`
+invoice changes it to `Cancelled`; cancelling a `Paid` invoice starts the
+refund flow and changes it to `RefundRequested`.
+
+**Response `200`**
+
+```json
+{ "invoice_id": "42", "status": "RefundRequested", "tx_hash": "..." }
+```
+
+| Status | Description                                      |
+| ------ | ------------------------------------------------ |
+| `400`  | Invalid invoice ID                               |
+| `403`  | Caller is not authorized to cancel the invoice   |
+| `404`  | Invoice not found                                |
+| `409`  | Invoice state does not allow cancellation        |
+| `503`  | Missing required environment variables           |
+
+### `POST /invoices/:id/refund`
+
+Request a refund for a `Paid` invoice using the configured Soroban signer.
+The response reports the updated `RefundRequested` status.
+
+**Response `200`**
+
+```json
+{ "invoice_id": "42", "status": "RefundRequested", "tx_hash": "..." }
+```
+
+| Status | Description                                          |
+| ------ | ---------------------------------------------------- |
+| `400`  | Invalid invoice ID                                   |
+| `403`  | Caller is not the invoice customer                  |
+| `404`  | Invoice not found                                    |
+| `409`  | Invoice is not `Paid` or a refund is already pending |
+| `503`  | Missing required environment variables               |
+
+---
+
+### `GET /invoices`
+
+Lists invoices, newest first. Cursor pagination is the default. Pass the
+returned `next_cursor` to fetch the next page; it is `null` when no more
+invoices are available.
+
+| Parameter | Type    | Description                                  |
+| --------- | ------- | -------------------------------------------- |
+| `cursor`  | string  | Opaque cursor from the previous response     |
+| `limit`   | integer | Page size, 1–100 (default 20)                |
+| `status`  | string  | Optional invoice status filter               |
+| `merchant` | string | Optional merchant address filter              |
+| `page`    | integer | Deprecated; use `cursor`, supported one release |
+| `offset`  | integer | Deprecated; use `cursor`, supported one release |
+
+**Cursor response `200`**
+
+```json
+{
+  "data": [],
+  "limit": 20,
+  "next_cursor": "eyJjcmVhdGVkQXQiOjE3MDAwMDAwMDAwMDAsImludm9pY2VJZCI6IjQyIn0"
+}
+```
+
+When `page` or `offset` is supplied without a cursor, the legacy response
+metadata (`total`, `page`, `limit`, `totalPages`, and `offset`) remains
+available during the deprecation period. Legacy parameters cannot be combined
+with a cursor.
+
+---
+
 ### `POST /invoices`
 
 Create a new invoice by submitting `create_invoice` to the Soroban RPC.
@@ -113,7 +235,6 @@ Create a new invoice by submitting `create_invoice` to the Soroban RPC.
 
 ```json
 {
-  "merchant_address": "G...",
   "token": "USDC",
   "amount": 1000000,
   "due_date": 1720000000
@@ -122,11 +243,13 @@ Create a new invoice by submitting `create_invoice` to the Soroban RPC.
 
 | Field              | Type   | Description                                       |
 | ------------------ | ------ | ------------------------------------------------- |
-| `merchant_address` | string | Valid Stellar public key (G…)                    |
 | `token`            | string | Token identifier                                  |
 | `amount`           | number | Positive number (in stroops / smallest unit)      |
 | `due_date`         | number | Future Unix timestamp (seconds) for the due date  |
 | `reference`        | string | Optional invoice reference, limited to 64 UTF-8 bytes |
+
+The merchant identity is taken from the API key, never from the request body.
+Include `Authorization: Bearer <api_key>`.
 
 **Response `201`**
 
@@ -142,6 +265,7 @@ Create a new invoice by submitting `create_invoice` to the Soroban RPC.
 | Status | Description                                                    |
 | ------ | -------------------------------------------------------------- |
 | `400`  | Validation error — see `error.details` for field-level detail  |
+| `401`  | Missing, invalid, or revoked merchant API key                   |
 | `422`  | Soroban simulation or transaction failure                      |
 | `503`  | Missing required environment variables                         |
 | `504`  | Transaction confirmation timeout                               |
@@ -812,10 +936,17 @@ can verify payload authenticity before processing it.
 
 | Header                      | Value                                    |
 | --------------------------- | ---------------------------------------- |
-| `X-COMEBACKHERE-Signature`  | Lowercase hex-encoded HMAC-SHA256 digest |
+| `X-COMEBACKHERE-Signature`  | HMAC-SHA256 of `timestamp.rawBody`, lowercase hex |
+| `X-COMEBACKHERE-Timestamp`  | Unix timestamp in seconds                |
+| `X-COMEBACKHERE-Legacy-Signature` | Temporary body-only HMAC for one release |
 
 The digest is computed over the **raw JSON request body** (exactly as sent over
-the wire) using the `WEBHOOK_SIGNING_SECRET` environment variable as the key.
+the wire) using the `WEBHOOK_SIGNING_SECRET` environment variable as the key. It
+is a bare 64-character lowercase hex digest — there is no `t=…,v1=…` envelope
+and no timestamp, so the signature alone provides no replay window. Deduplicate
+on your own key.
+
+> There is no `WEBHOOK_SECRET`: the backend reads `WEBHOOK_SIGNING_SECRET` only.
 
 ### Verification (Node.js example)
 
@@ -825,9 +956,12 @@ import { createHmac, timingSafeEqual } from "crypto"
 function verifyWebhook(
   rawBody: string,     // The unparsed request body string
   signature: string,   // Value of X-COMEBACKHERE-Signature header
+  timestamp: string,   // Value of X-COMEBACKHERE-Timestamp header
   secret: string,      // Your WEBHOOK_SIGNING_SECRET
 ): boolean {
-  const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex")
+  const seconds = Number(timestamp)
+  if (!Number.isSafeInteger(seconds) || Math.abs(Date.now() / 1000 - seconds) > 300) return false
+  const expected = createHmac("sha256", secret).update(`${timestamp}.${rawBody}`, "utf8").digest("hex")
   const expectedBuf = Buffer.from(expected, "hex")
   const actualBuf   = Buffer.from(signature, "hex")
   if (expectedBuf.length !== actualBuf.length) return false
@@ -838,9 +972,25 @@ function verifyWebhook(
 Always use a **constant-time comparison** (e.g. `crypto.timingSafeEqual`) when
 comparing signatures to prevent timing side-channel attacks.
 
+### Dead-letter operations
+
+Failed webhook deliveries are retained in MongoDB's `webhook_dead_letters`
+collection with the target URL, original payload, final error, and attempt
+history. These operator endpoints require `x-admin-key`:
+
+| Method and path | Description |
+| --------------- | ----------- |
+| `GET /webhooks/dead-letters` | List the latest 100 permanently failed deliveries |
+| `POST /webhooks/dead-letters/:id/replay` | Retry one delivery by its idempotency key; remove the dead letter only on success |
+
+> These routes are live, but nothing populates the collection today: the live
+> dispatch path makes a single attempt and never enqueues a retry. See
+> [The two delivery paths](./webhooks.md#the-two-delivery-paths).
+
 ### Webhook event payload shape
 
-All events share a common `event` field plus event-specific fields:
+Events are flat objects with an `event` field plus event-specific fields at the
+top level — there is no `data` envelope and no `event_type` key:
 
 ```json
 {
@@ -850,21 +1000,171 @@ All events share a common `event` field plus event-specific fields:
 }
 ```
 
-| Event                   | Extra fields                                               |
-| ----------------------- | ---------------------------------------------------------- |
-| `settlement_proposed`   | `settlement_id`, `merchant_address`, `amount`, `token`, `tx_hash` |
-| `settlement_approved`   | `settlement_id`, `signer`, `approval_weight`, `tx_hash`    |
-| `settlement_executed`   | `settlement_id`, `tx_hash`                                 |
+| Event                   | Extra fields                                               | Types |
+| ----------------------- | ---------------------------------------------------------- | ----- |
+| `settlement_proposed`   | `settlement_id`, `merchant_address`, `amount`, `token`, `tx_hash` | number, string, string, string, string |
+| `settlement_approved`   | `settlement_id`, `signer`, `approval_weight`, `tx_hash`    | number, string, string, string |
+| `settlement_executed`   | `settlement_id`, `tx_hash`                                 | number, string |
+
+`settlement_id` is a number; `amount` and `approval_weight` are strings.
 
 ### Configuration
 
 | Variable                | Description                                                        |
 | ----------------------- | ------------------------------------------------------------------ |
 | `WEBHOOK_URL`           | Merchant endpoint that receives webhook POSTs                      |
-| `WEBHOOK_SIGNING_SECRET`| HMAC-SHA256 signing secret (minimum 32 characters recommended)     |
+| `WEBHOOK_SIGNING_SECRET`| HMAC-SHA256 signing secret (minimum 32 characters recommended). **Required at startup.** |
 
 Set both variables in your deployment environment. If `WEBHOOK_URL` is not set,
-webhook delivery is skipped silently (no error).
+webhook delivery is skipped silently (no error). If `WEBHOOK_SIGNING_SECRET` is
+unset the backend exits at startup rather than sending unsigned webhooks.
+
+---
+
+## Analytics
+
+### `GET /api/analytics/metrics`
+
+Fetch aggregated protocol metrics and performance data.
+
+**Query parameters** (all optional)
+
+| Parameter    | Type    | Description                                              |
+| ------------ | ------- | -------------------------------------------------------- |
+| `start_date` | string  | ISO-8601 date (e.g. `2025-03-01`) — default: 30 days ago |
+| `end_date`   | string  | ISO-8601 date (e.g. `2025-03-31`) — default: today       |
+| `resolution` | string  | Aggregation granularity: `daily`, `weekly`, `monthly` (default: `daily`) |
+
+**Response `200`**
+
+```json
+{
+  "period": {
+    "start": "2025-03-01T00:00:00Z",
+    "end": "2025-03-31T23:59:59Z"
+  },
+  "summary": {
+    "total_invoices": 156,
+    "total_revenue_usdc": "150000000000",
+    "avg_invoice_amount_usdc": "961538462",
+    "settlement_success_rate": 0.98
+  },
+  "by_date": [
+    {
+      "date": "2025-03-01",
+      "invoices_created": 5,
+      "invoices_paid": 4,
+      "revenue_usdc": "4800000000",
+      "disputes_raised": 0
+    }
+  ]
+}
+```
+
+| Field                      | Type   | Description                                      |
+| -------------------------- | ------ | ------------------------------------------------ |
+| `period`                   | object | Query date range (ISO-8601)                      |
+| `summary`                  | object | Aggregate metrics across the entire period       |
+| `by_date`                  | array  | Per-day breakdown (if resolution is `daily`)     |
+| `total_invoices`           | number | Count of all invoices in the period              |
+| `total_revenue_usdc`       | string | Sum of all paid invoice amounts (stroops)        |
+| `avg_invoice_amount_usdc`  | string | Mean invoice amount (stroops)                    |
+| `settlement_success_rate`  | number | Fraction of settlements executed successfully (0–1) |
+
+#### Errors
+
+| Status | Description                            |
+| ------ | -------------------------------------- |
+| `400`  | Invalid date format or date range      |
+| `503`  | Database connection error              |
+| `500`  | Unexpected server error                |
+
+---
+
+## Disputes
+
+### `GET /api/disputes/:settlementId`
+
+Fetch dispute status for a settlement.
+
+#### Path parameters
+
+| Parameter      | Type   | Description                   |
+| -------------- | ------ | ----------------------------- |
+| `settlementId` | string | Settlement numeric ID as string |
+
+**Response `200`**
+
+```json
+{
+  "settlement_id": 15,
+  "dispute_status": "Raised",
+  "claimant": "G...",
+  "reason": "Payment never received",
+  "created_at": "2025-03-15T10:30:00Z",
+  "resolution_weight": 0,
+  "threshold": 100
+}
+```
+
+| Field               | Type   | Description                                              |
+| ------------------- | ------ | -------------------------------------------------------- |
+| `settlement_id`     | number | Settlement ID                                            |
+| `dispute_status`    | string | One of: `Raised`, `ResolvedClaimant`, `ResolvedCounterparty`, `None` |
+| `claimant`          | string | Stellar address that raised the dispute                  |
+| `reason`            | string | Text reason provided by the claimant                     |
+| `created_at`        | string | ISO-8601 timestamp when dispute was raised               |
+| `resolution_weight` | number | Cumulative signer weight voting on the dispute           |
+| `threshold`         | number | Signer weight threshold required to resolve              |
+
+#### Errors
+
+| Status | Description                            |
+| ------ | -------------------------------------- |
+| `400`  | `settlementId` is not a positive integer |
+| `404`  | No dispute found for this settlement    |
+| `503`  | Missing required environment variables  |
+| `500`  | Unexpected server error                |
+
+### `POST /api/disputes/:settlementId/vote`
+
+Vote on a dispute resolution (admin/signer only).
+
+**Request body**
+
+```json
+{
+  "vote": "ClaimantWins",
+  "admin_key": "secret_key_123"
+}
+```
+
+| Field       | Type   | Description                                          |
+| ----------- | ------ | ---------------------------------------------------- |
+| `vote`      | string | Vote direction: `ClaimantWins` or `CounterpartyWins` |
+| `admin_key` | string | Admin secret key (if using key-based authorization) |
+
+**Response `200`**
+
+```json
+{
+  "settlement_id": 15,
+  "resolution_weight": 65,
+  "threshold": 100,
+  "outcome": "pending"
+}
+```
+
+#### Errors
+
+| Status | Description                                      |
+| ------ | ------------------------------------------------ |
+| `400`  | Invalid vote direction or settlement ID          |
+| `401`  | Missing or invalid `admin_key`                   |
+| `404`  | No dispute found                                 |
+| `409`  | Dispute already resolved or settlement not held  |
+| `503`  | Missing required environment variables or contract unavailable |
+| `500`  | Unexpected server error                          |
 
 ---
 
@@ -907,7 +1207,7 @@ header and `correlationId`. Otherwise the server generates a UUID v4.
 | 413  | `PAYLOAD_TOO_LARGE`     | JSON body exceeds 100 kB                                         | `{ limitBytes }`                       |
 | 4xx/5xx | `CONTRACT_ERROR`     | A Soroban contract returned `Error(Contract, #N)`                | `{ contractCode: N }` — see [error-codes.md](./error-codes.md) |
 | 422  | `UNPROCESSABLE_ENTITY`  | Soroban simulation / submission failed without a contract code   | `null`                                 |
-| 429  | `RATE_LIMITED`          | Per-IP rate limit exceeded                                       | `{ retryAfter }` (seconds)             |
+| 429  | `RATE_LIMITED`          | Rate limit exceeded for this request's bucket (IP, or `X-API-Key`)  | `error.details.retryAfter` (seconds)    |
 | 500  | `INTERNAL_ERROR`        | Unexpected server error                                          | `null`                                 |
 | 503  | `SERVICE_MISCONFIGURED` | Required environment variables are missing                       | `null`                                 |
 | 503  | `SERVICE_UNAVAILABLE`   | A dependency (e.g. MongoDB) is unreachable                       | `null`                                 |
@@ -925,14 +1225,30 @@ handlers are wrapped in `asyncHandler` so rejected promises reach it.
 
 | Variable               | Description                                               |
 | ---------------------- | --------------------------------------------------------- |
+| `MONGODB_URI`          | MongoDB connection string (required at startup)            |
+| `REDIS_URL`            | Redis connection string for the rate limiter (required at startup) |
 | `SOROBAN_RPC_URL`      | Soroban RPC endpoint (e.g. `http://localhost:8000/soroban/rpc`) |
-| `INVOICE_CONTRACT_ID`  | Deployed invoice contract address                         |
-| `TREASURY_CONTRACT_ID` | Deployed treasury contract address                        |
+| `INVOICE_CONTRACT_ID`  | Deployed invoice contract address (required at startup)   |
+| `TREASURY_CONTRACT_ID` | Deployed treasury contract address (required at startup)  |
+| `ADMIN_KEY`            | Admin key sent as `x-admin-key` on the `/webhooks/dead-letters*` routes (required at startup) |
+| `WEBHOOK_URL`          | Merchant webhook endpoint URL. Unset disables webhooks.   |
+| `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 signing secret for outbound webhooks. Required at startup; there is no `WEBHOOK_SECRET`. |
 | `USDC_CONTRACT_ID`     | USDC token contract address                               |
 | `SETTLEMENT_CONTRACT_ID` | Settlement contract address (disputes)                  |
 | `SIGNER_SECRET_KEY`    | Stellar secret key for signing transactions               |
 | `NETWORK_PASSPHRASE`   | Stellar network passphrase                                |
-| `WEBHOOK_URL`          | Merchant webhook endpoint URL                             |
-| `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 signing secret for outbound webhooks        |
+| `WEBHOOK_MAX_ATTEMPTS` | Maximum webhook attempts (default `5`)                     |
+| `WEBHOOK_BASE_DELAY_MS` | Initial retry delay in ms (default `1000`)                 |
+| `WEBHOOK_MAX_DELAY_MS` | Maximum backoff delay in ms (default `60000`)               |
+| `WEBHOOK_JITTER_RATIO` | Retry jitter from `0` to `1` (default `0.2`)                |
+| `RATE_LIMIT_POINTS`    | Requests per window for the per-IP bucket (default `60`)   |
+| `RATE_LIMIT_API_KEY_POINTS` | Requests per window for the per-`X-API-Key` bucket (default `600`) |
+| `RATE_LIMIT_DURATION`  | Rate limit window in seconds (default `60`)                |
 | `PORT`                 | HTTP server port (default `3000`)                         |
 | `CORS_ORIGINS`         | Comma-separated allowlist of browser origins, e.g. `http://localhost:5173,https://app.example.com`. Bare origins only (no path, trailing slash or `*`); invalid entries fail startup. Unset = no cross-origin access. |
+
+The "required at startup" variables are enforced by `validateEnv()` in
+`comebackhere-backend/src/lib/env.ts` before the server binds its port, and by
+`scripts/validate_backend_env.sh` for local setup. See
+[docs/dev-environment.md](./dev-environment.md#full-environment-variable-reference)
+for the complete list and defaults.

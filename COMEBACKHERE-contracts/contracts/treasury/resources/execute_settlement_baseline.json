@@ -1,0 +1,9 @@
+{
+  "test": "bench_execute_settlement",
+  "baseline_status": "provisional_budget_not_measured",
+  "cpu_instructions": 100000,
+  "memory_bytes": 50000,
+  "tolerance_percent": 20,
+  "timestamp": "2026-09-26",
+  "soroban_sdk": "28.0.0"
+}

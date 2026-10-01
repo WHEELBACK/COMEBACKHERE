@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useInvoice } from "../hooks/useInvoice"
 import { useWallet } from "../hooks/useWallet"
 import { usePolling } from "../hooks/usePolling"
@@ -6,6 +6,7 @@ import { fetchBalances } from "../utils/treasury"
 import { formatAmount, compareRawAmounts, USDC_DECIMALS } from "../utils/format"
 import { StatusBadge } from "./StatusBadge"
 import { InvoiceStatus } from "../types"
+import { config } from "../config"
 
 const TREASURY_BALANCE_POLL_MS = 10_000
 
@@ -31,6 +32,64 @@ export function EscrowRelease() {
   const [treasuryBalance, setTreasuryBalance] = useState<string | null>(null)
   const [balanceError, setBalanceError] = useState<string | null>(null)
 
+  // Grace-window countdown state
+  const [graceWindowSeconds, setGraceWindowSeconds] = useState<number>(DEFAULT_GRACE_WINDOW_S)
+  const [secondsUntilRelease, setSecondsUntilRelease] = useState<number | null>(null)
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // ---------------------------------------------------------------------------
+  // Fetch the configured grace window from the backend once per invoice load.
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    let cancelled = false
+    async function fetchGraceWindow() {
+      try {
+        const res = await fetch(`${config.apiUrl}/invoice-settings`)
+        if (!res.ok) return
+        const data: GraceWindowConfig = await res.json()
+        if (!cancelled && typeof data.grace_window_seconds === "number") {
+          setGraceWindowSeconds(data.grace_window_seconds)
+        }
+      } catch {
+        // Silently fall back to the default; the countdown still works.
+      }
+    }
+    fetchGraceWindow()
+    return () => { cancelled = true }
+  }, [])
+
+  // ---------------------------------------------------------------------------
+  // Start / update the countdown whenever the invoice or grace window changes.
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (countdownRef.current) {
+      clearInterval(countdownRef.current)
+      countdownRef.current = null
+    }
+
+    if (!invoice || invoice.status !== InvoiceStatus.Paid || invoice.paid_at === null) {
+      setSecondsUntilRelease(null)
+      return
+    }
+
+    const releaseAt = invoice.paid_at + graceWindowSeconds + CLOCK_SKEW_MARGIN_S
+
+    const tick = () => {
+      const remaining = releaseAt - Date.now() / 1000
+      setSecondsUntilRelease(remaining)
+    }
+
+    tick() // immediate first render
+    countdownRef.current = setInterval(tick, 1000)
+
+    return () => {
+      if (countdownRef.current) clearInterval(countdownRef.current)
+    }
+  }, [invoice, graceWindowSeconds])
+
+  // ---------------------------------------------------------------------------
+  // Invoice / wallet helpers
+  // ---------------------------------------------------------------------------
   const handleLoadInvoice = async () => {
     setResult(null)
     await loadInvoice(Number(invoiceId))
@@ -49,11 +108,23 @@ export function EscrowRelease() {
     })
   }
 
-  const isMerchantWallet = address && invoice?.merchant && address.toLowerCase() === invoice.merchant.toLowerCase()
-  const canRelease = connected && invoice?.status === InvoiceStatus.Paid && isMerchantWallet
+  const isMerchantWallet =
+    address &&
+    invoice?.merchant &&
+    address.toLowerCase() === invoice.merchant.toLowerCase()
 
-  // Polled (not one-shot) so a balance that was sufficient when the invoice
-  // was first loaded doesn't go stale while the merchant reviews the release.
+  /** True only when the grace window has fully elapsed (plus skew margin). */
+  const graceWindowElapsed = secondsUntilRelease !== null && secondsUntilRelease <= 0
+
+  const canRelease =
+    connected &&
+    invoice?.status === InvoiceStatus.Paid &&
+    isMerchantWallet &&
+    graceWindowElapsed
+
+  // ---------------------------------------------------------------------------
+  // Treasury balance polling
+  // ---------------------------------------------------------------------------
   const loadTreasuryBalance = useCallback(async () => {
     if (!invoice || invoice.status !== InvoiceStatus.Paid) return
     try {
@@ -77,6 +148,9 @@ export function EscrowRelease() {
     treasuryBalance !== null &&
     isBelow(treasuryBalance, invoice.amount_usdc)
 
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
   return (
     <div className="escrow-release">
       <h1>Escrow Release</h1>
@@ -140,6 +214,28 @@ export function EscrowRelease() {
               <span className="detail-label">Status</span>
               <StatusBadge status={invoice.status} />
             </div>
+
+            {/* Grace-window countdown — only shown for Paid invoices */}
+            {invoice.status === InvoiceStatus.Paid && secondsUntilRelease !== null && (
+              <div className="detail-row">
+                <span className="detail-label">Release Window</span>
+                <span className="detail-value" aria-live="polite" aria-label="Time until escrow release">
+                  {graceWindowElapsed ? (
+                    <span style={{ color: "var(--color-success, green)", fontWeight: 600 }}>
+                      Ready to release
+                    </span>
+                  ) : (
+                    <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                      Available in{" "}
+                      <strong data-testid="countdown-timer">
+                        {formatCountdown(secondsUntilRelease)}
+                      </strong>
+                    </span>
+                  )}
+                </span>
+              </div>
+            )}
+
             {invoice.status === InvoiceStatus.Paid && (
               <div className="detail-row">
                 <span className="detail-label">Treasury USDC Balance</span>
@@ -165,6 +261,45 @@ export function EscrowRelease() {
               </button>
             )}
 
+            {/* Grace window not yet elapsed */}
+            {connected &&
+              invoice.status === InvoiceStatus.Paid &&
+              isMerchantWallet &&
+              !graceWindowElapsed && (
+                <div
+                  style={{
+                    padding: "12px",
+                    background: "var(--color-warning-bg)",
+                    border: "1px solid var(--color-warning-border)",
+                    borderRadius: "var(--radius)",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                  }}
+                  role="alert"
+                  aria-label="Grace window countdown"
+                >
+                  <span style={{ flex: 1 }}>
+                    The grace window has not elapsed yet. Release will be available
+                    in{" "}
+                    <strong data-testid="countdown-alert-timer">
+                      {secondsUntilRelease !== null
+                        ? formatCountdown(secondsUntilRelease)
+                        : "…"}
+                    </strong>
+                    . The button will enable automatically when the time has passed.
+                  </span>
+                  <button
+                    className="btn btn--primary"
+                    disabled
+                    title="Grace window has not elapsed yet"
+                  >
+                    Release Escrow
+                  </button>
+                </div>
+              )}
+
+            {/* Insufficient treasury funds */}
             {connected && canRelease && insufficientTreasuryFunds && (
               <div
                 style={{
@@ -193,6 +328,7 @@ export function EscrowRelease() {
               </div>
             )}
 
+            {/* Ready to release */}
             {connected && canRelease && !insufficientTreasuryFunds && (
               <button
                 className="btn btn--primary"
@@ -205,36 +341,39 @@ export function EscrowRelease() {
 
             {connected && invoice.status !== InvoiceStatus.Paid && (
               <p className="status-text">
-                Escrow release is available on Paid invoices
-                (current status: {invoice.status}).
+                Escrow release is available on Paid invoices (current status:{" "}
+                {invoice.status}).
               </p>
             )}
 
-            {connected && invoice.status === InvoiceStatus.Paid && !isMerchantWallet && (
-              <div
-                style={{
-                  padding: "12px",
-                  background: "var(--color-warning-bg)",
-                  border: "1px solid var(--color-warning-border)",
-                  borderRadius: "var(--radius)",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                }}
-                role="alert"
-              >
-                <span style={{ flex: 1 }}>
-                  Only the merchant wallet can release the escrow. This invoice's merchant is {invoice.merchant}.
-                </span>
-                <button
-                  className="btn btn--primary"
-                  disabled
-                  title="You must connect with the merchant's wallet to release this escrow"
+            {connected &&
+              invoice.status === InvoiceStatus.Paid &&
+              !isMerchantWallet && (
+                <div
+                  style={{
+                    padding: "12px",
+                    background: "var(--color-warning-bg)",
+                    border: "1px solid var(--color-warning-border)",
+                    borderRadius: "var(--radius)",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                  }}
+                  role="alert"
                 >
-                  Release Escrow
-                </button>
-              </div>
-            )}
+                  <span style={{ flex: 1 }}>
+                    Only the merchant wallet can release the escrow. This
+                    invoice's merchant is {invoice.merchant}.
+                  </span>
+                  <button
+                    className="btn btn--primary"
+                    disabled
+                    title="You must connect with the merchant's wallet to release this escrow"
+                  >
+                    Release Escrow
+                  </button>
+                </div>
+              )}
           </div>
         </div>
       )}

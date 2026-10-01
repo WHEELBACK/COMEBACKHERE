@@ -1,4 +1,5 @@
-.PHONY: update-abi-snapshots check-abi-snapshots dev test lint deploy-testnet abi-snapshot
+.PHONY: update-abi-snapshots check-abi-snapshots dev test lint deploy-testnet abi-snapshot \
+        smoke smoke-up check-docs-sync
 
 # Regenerate committed ABI metadata under abis/ (deterministic; LC_ALL=C).
 # Assumes COMEBACKHERE-contracts/ is a sibling directory.
@@ -12,6 +13,19 @@ check-abi-snapshots:
 
 dev:
 	docker-compose up -d
+
+# Check that the whole stack came up (no deployed contracts needed).
+smoke:
+	@./tests/smoke_stack.sh
+
+# Start the stack, smoke test it, then tear it down.
+smoke-up:
+	@./tests/smoke_stack.sh --up --down
+
+# Verify webhook and rate-limit docs match the backend implementation.
+check-docs-sync:
+	@./scripts/check_webhook_docs_sync.sh
+	@./scripts/check_ratelimit_docs_sync.sh
 
 test:
 	cargo test --manifest-path COMEBACKHERE-contracts/Cargo.toml

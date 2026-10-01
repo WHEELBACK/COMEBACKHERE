@@ -1,12 +1,12 @@
 import { Router, type Request, type Response } from "express"
 import type { FindCursor, WithId } from "mongodb"
 import { Keypair, TransactionBuilder, BASE_FEE, Contract, nativeToScVal, SorobanRpc, xdr } from "stellar-sdk"
-import { connectMongo, getInvoicesCollection, type InvoiceRecord, type InvoiceStatus } from "../db/mongo.js"
+import { connectMongo, getInvoiceEventsCollection, getInvoicesCollection, type InvoiceRecord, type InvoiceStatus } from "../db/mongo.js"
 import { requireEnv } from "../lib/env.js"
 import { asyncHandler, NotFoundError } from "../lib/errors.js"
 import { cacheGet, cacheSet } from "../lib/cache.js"
-import { validateBody, validateParams } from "../middleware/validate.js"
-import { createInvoiceSchema, invoiceIdParamSchema } from "../schemas/index.js"
+import { validateBody, validateParams, validateQuery } from "../middleware/validate.js"
+import { createInvoiceSchema, invoiceIdParamSchema, invoiceListQuerySchema } from "../schemas/index.js"
 
 const router = Router()
 
@@ -62,7 +62,7 @@ export async function createInvoice(
   ]
 
   const account = await client.getAccount(keypair.publicKey())
-  const tx = new TransactionBuilder(account as any, {
+  const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
   })
@@ -72,16 +72,21 @@ export async function createInvoice(
 
   const simulated = await client.simulateTransaction(tx)
   if (SorobanRpc.Api.isSimulationError(simulated)) {
-    throw Object.assign(new Error(`Soroban simulation failed: ${(simulated as any).error}`), { status: 422 })
+    throw Object.assign(new Error(`Soroban simulation failed: ${(simulated as { error?: string }).error}`), { status: 422 })
   }
 
-  const prepared = SorobanRpc.assembleTransaction(tx, simulated as any).build()
+  const prepared = SorobanRpc.assembleTransaction(
+    tx,
+    simulated as SorobanRpc.Api.SimulateTransactionSuccessResponse,
+  ).build()
   prepared.sign(keypair)
 
   const sendResult = await client.sendTransaction(prepared)
   if (sendResult.status === "ERROR") {
     throw Object.assign(
-      new Error(`Soroban submission failed: ${(sendResult as any).errorResult?.toXDR("base64")}`),
+      new Error(
+        `Soroban submission failed: ${(sendResult as { errorResult?: { toXDR: (format: string) => string } }).errorResult?.toXDR("base64")}`,
+      ),
       { status: 422 }
     )
   }
@@ -134,6 +139,36 @@ export function buildListFilter(filters: ListFilters): Record<string, unknown> {
   if (filters.status) filter.status = filters.status
   if (filters.merchant) filter.merchant_address = filters.merchant
   return filter
+}
+
+interface InvoiceCursor {
+  createdAt: number
+  invoiceId: string
+}
+
+export function encodeInvoiceCursor(invoice: Pick<InvoiceRecord, "created_at" | "invoice_id">): string {
+  const createdAt = invoice.created_at instanceof Date
+    ? invoice.created_at.getTime()
+    : Number(invoice.created_at)
+  return Buffer.from(JSON.stringify({ createdAt, invoiceId: invoice.invoice_id })).toString("base64url")
+}
+
+export function decodeInvoiceCursor(cursor: string): InvoiceCursor {
+  try {
+    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Partial<InvoiceCursor>
+    if (
+      !Number.isSafeInteger(decoded.createdAt) ||
+      decoded.createdAt! < 0 ||
+      Number.isNaN(new Date(decoded.createdAt!).getTime()) ||
+      typeof decoded.invoiceId !== "string" ||
+      !decoded.invoiceId
+    ) {
+      throw new Error("invalid cursor payload")
+    }
+    return { createdAt: decoded.createdAt!, invoiceId: decoded.invoiceId }
+  } catch {
+    throw Object.assign(new Error("cursor is invalid"), { status: 400 })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -299,11 +334,18 @@ router.get("/export.csv", async (req: Request, res: Response) => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     if (!res.headersSent) {
-      res.status((err as any)?.status ?? 500).json({ error: message })
+      const status =
+        err && typeof err === "object" && "status" in err && typeof err.status === "number"
+          ? err.status
+          : 500
+      res.status(status).json({ error: message })
     } else {
       // Mid-stream failure: abort so the client sees a truncated download
       // rather than a file that silently looks complete.
-      console.error("[invoices] CSV export failed mid-stream:", message)
+      res.locals.logger.error(
+        { errorName: err instanceof Error ? err.name : "UnknownError" },
+        "Invoice CSV export failed mid-stream",
+      )
       res.destroy(err instanceof Error ? err : new Error(message))
     }
   } finally {
@@ -319,15 +361,31 @@ router.get("/export.csv", async (req: Request, res: Response) => {
  *     summary: List invoices with pagination and filtering
  *     parameters:
  *       - in: query
- *         name: page
+ *         name: cursor
+ *         description: Opaque cursor returned as next_cursor; omit it for the first page.
  *         schema:
- *           type: integer
- *           default: 1
+ *           type: string
  *       - in: query
  *         name: limit
  *         schema:
  *           type: integer
  *           default: 20
+ *           minimum: 1
+ *           maximum: 100
+ *       - in: query
+ *         name: page
+ *         deprecated: true
+ *         description: Deprecated; use cursor instead. Supported for one release.
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: offset
+ *         deprecated: true
+ *         description: Deprecated; use cursor instead. Supported for one release.
+ *         schema:
+ *           type: integer
+ *           minimum: 0
  *       - in: query
  *         name: status
  *         schema:
@@ -351,56 +409,70 @@ router.get("/export.csv", async (req: Request, res: Response) => {
  *                     $ref: '#/components/schemas/Invoice'
  *                 total:
  *                   type: integer
+ *                   description: Deprecated pagination metadata; returned only with page or offset.
  *                 page:
  *                   type: integer
+ *                   description: Deprecated; returned only with page or offset.
  *                 limit:
  *                   type: integer
  *                 totalPages:
  *                   type: integer
+ *                   description: Deprecated; returned only with page or offset.
+ *                 offset:
+ *                   type: integer
+ *                   description: Deprecated; returned only with page or offset.
+ *                 next_cursor:
+ *                   type: string
+ *                   nullable: true
  */
-router.get("/", asyncHandler(async (req: Request, res: Response) => {
-  const page = Math.max(1, parseInt(req.query.page as string, 10) || 1)
-  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20))
+router.get("/", validateQuery(invoiceListQuerySchema), asyncHandler(async (req: Request, res: Response) => {
+  const query = invoiceListQuerySchema.parse(req.query)
+  const page = query.page ? Number(query.page) : 1
+  const limit = Math.min(100, query.limit ? Number(query.limit) : 20)
+  const legacyPagination = !query.cursor && (query.page !== undefined || query.offset !== undefined)
+  const offset = query.offset !== undefined ? Number(query.offset) : (page - 1) * limit
   const { status, merchant: merchantFilter } = parseListFilters(req.query)
+  const merchant = merchantFilter ?? (typeof req.query.merchant_address === "string" ? req.query.merchant_address : undefined)
+  const cursor = query.cursor ? decodeInvoiceCursor(query.cursor) : undefined
 
-  const cacheKey = `invoices:${page}:${limit}:${status ?? "all"}:${merchantFilter ?? "all"}`
+  const pageKey = legacyPagination ? `legacy-${page}-${offset}` : `cursor-${query.cursor ?? "first"}`
+  const cacheKey = `invoices:${pageKey}:${limit}:${status ?? "all"}:${merchant ?? "all"}`
 
-  const cached = await cacheGet<{ data: InvoiceRecord[]; total: number; page: number; limit: number; totalPages: number }>(cacheKey)
+  const cached = await cacheGet<Record<string, unknown>>(cacheKey)
   if (cached) {
     res.json(cached)
     return
   }
 
-  try {
-    const db = await connectMongo()
-    const collection = getInvoicesCollection(db)
+  const db = await connectMongo()
+  const collection = getInvoicesCollection(db)
 
-    const filter = buildListFilter({ status, merchant: merchantFilter })
+  const filter = buildListFilter({ status, merchant })
+  const pageFilter: Record<string, unknown> = cursor
+    ? {
+        $and: [
+          filter,
+          {
+            $or: [
+              { created_at: { $lt: new Date(cursor.createdAt) } },
+              { created_at: new Date(cursor.createdAt), invoice_id: { $lt: cursor.invoiceId } },
+            ],
+          },
+        ],
+      }
+    : filter
 
+  let findCursor = collection.find(pageFilter).sort({ created_at: -1, invoice_id: -1 })
+  if (legacyPagination) findCursor = findCursor.skip(offset)
+  const rows = await findCursor.limit(limit + 1).toArray()
+  const hasMore = rows.length > limit
+  const data = rows.slice(0, limit)
+  const next_cursor = hasMore && data.length > 0 ? encodeInvoiceCursor(data[data.length - 1]) : null
+  const result: Record<string, unknown> = { data, limit, next_cursor }
+
+  if (legacyPagination) {
     const total = await collection.countDocuments(filter)
-    const totalPages = Math.ceil(total / limit)
-    const skip = (page - 1) * limit
-
-    const data = await collection
-      .find(filter)
-      .sort({ created_at: -1 })
-      .skip(skip)
-      .limit(limit)
-      .toArray()
-
-    const result = {
-      data,
-      total,
-      page,
-      limit,
-      totalPages,
-    }
-
-    await cacheSet(cacheKey, result, 30)
-    res.json(result)
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(500).json({ error: message })
+    Object.assign(result, { total, page, totalPages: Math.ceil(total / limit), offset })
   }
 
   await cacheSet(cacheKey, result, 30)
@@ -484,22 +556,97 @@ router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req
 
 /**
  * @openapi
+ * /invoices/{id}/events:
+ *   get:
+ *     tags: [Invoices]
+ *     summary: Fetch the indexed event timeline for an invoice
+ *     description: Returns invoice state changes ordered by ledger. The events array is empty when the invoice exists but has no indexed events.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Positive integer string invoice ID
+ *     responses:
+ *       200:
+ *         description: Invoice event timeline
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [invoice_id, events]
+ *               properties:
+ *                 invoice_id:
+ *                   type: string
+ *                 events:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     required: [event_type, ledger, timestamp, transaction_hash]
+ *                     properties:
+ *                       event_type:
+ *                         type: string
+ *                         example: invoice_created
+ *                       ledger:
+ *                         type: integer
+ *                       timestamp:
+ *                         type: string
+ *                         format: date-time
+ *                       transaction_hash:
+ *                         type: string
+ *       400:
+ *         description: Invalid invoice ID
+ *       404:
+ *         description: Invoice not found
+ */
+router.get("/:id/events", validateParams(invoiceIdParamSchema), asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params
+  const db = await connectMongo()
+  const invoice = await getInvoicesCollection(db).findOne({ invoice_id: id })
+
+  if (!invoice) {
+    throw new NotFoundError("Invoice not found")
+  }
+
+  const events = await getInvoiceEventsCollection(db)
+    .find(
+      { invoice_id: id },
+      { projection: { _id: 0, event_type: 1, ledger: 1, ledger_closed_at: 1, transaction_hash: 1 } },
+    )
+    .sort({ ledger: 1, event_id: 1 })
+    .toArray()
+
+  res.json({
+    invoice_id: id,
+    events: events.map((event) => ({
+      event_type: event.event_type,
+      ledger: event.ledger,
+      timestamp: event.ledger_closed_at,
+      transaction_hash: event.transaction_hash,
+    })),
+  })
+}))
+
+/**
+ * @openapi
  * /invoices:
  *   post:
  *     tags: [Invoices]
  *     summary: Create a new invoice
+ *     parameters:
+ *       - in: header
+ *         name: Authorization
+ *         required: true
+ *         schema: { type: string, example: Bearer merchant-api-key }
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             required: [merchant_address, token, amount, due_date]
+ *             required: [token, amount, due_date]
  *             properties:
- *               merchant_address:
- *                 type: string
- *                 description: Valid Stellar public key (G…)
- *                 example: "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
  *               token:
  *                 type: string
  *                 example: "USDC"
@@ -535,6 +682,12 @@ router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing, invalid, or revoked merchant API key
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       422:
  *         description: Soroban simulation or transaction failure
  *         content:
@@ -554,15 +707,16 @@ router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/", validateBody(createInvoiceSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post("/", requireMerchantApiKey, validateBody(createInvoiceSchema), asyncHandler(async (req: Request, res: Response) => {
   const env = requireEnv({
     invoiceContractId: "INVOICE_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",
   })
 
   const client = buildSorobanClient(env.rpcUrl)
+  const body = { ...req.body, merchant_address: res.locals.merchantAddress } as CreateInvoiceBody
   const result = await createInvoice(
-    req.body as CreateInvoiceBody,
+    body,
     client,
     env.invoiceContractId,
     env.signerSecret,
@@ -571,7 +725,6 @@ router.post("/", validateBody(createInvoiceSchema), asyncHandler(async (req: Req
 
   const db = await connectMongo()
   const collection = getInvoicesCollection(db)
-  const body = req.body as CreateInvoiceBody
   const now = new Date()
   await collection.insertOne({
     invoice_id: result.invoice_id,

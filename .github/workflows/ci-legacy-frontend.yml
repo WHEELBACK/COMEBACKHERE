@@ -1,0 +1,54 @@
+name: CI - Legacy Frontend
+
+# Test the legacy frontend/ workspace (issue #750).
+# This ensures that the in-tree frontend/ copy doesn't break even though
+# development now targets comebackhere-frontend/.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+  workflow_call: # called by ci-summary.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: npm test (legacy frontend)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+
+      - name: Cache node_modules
+        id: cache-node-modules
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: frontend/node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('frontend/package-lock.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests for legacy frontend
+        run: npm test -- --run
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@a8a3f3ad30e987fea8aa2a54bccb630c0d519b66 # v4.7.0
+        with:
+          name: legacy-frontend-coverage
+          path: frontend/coverage
+          retention-days: 7

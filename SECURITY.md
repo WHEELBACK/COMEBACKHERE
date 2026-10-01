@@ -98,6 +98,10 @@ authorized. We will not pursue legal action against researchers who:
 - **Email:** <security@comebackhere.io>
 - **PGP Key:** `https://comebackhere.io/.well-known/pgp-key.txt`
 
+## Threat Model
+
+For detailed analysis of security threats, mitigations, and known gaps in fund-handling and governance paths, see [docs/threat-model.md](docs/threat-model.md). It covers STRIDE threat categories for invoice escrow, treasury settlement & multisig, compliance checks, webhooks, and backend admin routes.
+
 ## Supported Versions
 
 | Version | Supported |

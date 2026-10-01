@@ -12,6 +12,7 @@ import { requireEnv } from "../lib/env.js"
 import { asyncHandler, NotFoundError } from "../lib/errors.js"
 import { connectMongo, getSettlementsCollection } from "../db/mongo.js"
 import { validateBody } from "../middleware/validate.js"
+import { requireAdmin } from "../middleware/adminAuth.js"
 import {
   settlementIdSchema,
   executeSettlementSchema,
@@ -106,7 +107,7 @@ router.get("/pending-settlements", asyncHandler(async (_req: Request, res: Respo
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/approve-settlement", validateBody(settlementIdSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post("/approve-settlement", requireAdmin, validateBody(settlementIdSchema), asyncHandler(async (req: Request, res: Response) => {
   const env = requireEnv({
     treasuryContractId: "TREASURY_CONTRACT_ID",
     usdcContractId: "USDC_CONTRACT_ID",
@@ -210,10 +211,14 @@ export async function executeSettlementWithBalanceCheck(
     env.networkPassphrase,
   )
 
-  console.log(
-    `[execute-settlement] settlement_id=${body.settlement_id} ` +
-      `required=${settlement.amount.toString()} available=${balance.toString()} ` +
-      `token=${tokenContract}`,
+  res.locals.logger.info(
+    {
+      settlementId: body.settlement_id,
+      required: settlement.amount.toString(),
+      available: balance.toString(),
+      token: tokenContract,
+    },
+    "Executing settlement balance check",
   )
 
   if (balance < settlement.amount) {
@@ -313,7 +318,7 @@ export async function executeSettlementWithBalanceCheck(
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/execute-settlement", validateBody(executeSettlementSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post("/execute-settlement", requireAdmin, validateBody(executeSettlementSchema), asyncHandler(async (req: Request, res: Response) => {
   const env = requireEnv({
     treasuryContractId: "TREASURY_CONTRACT_ID",
     usdcContractId: "USDC_CONTRACT_ID",
@@ -562,7 +567,7 @@ router.get("/on-hold-settlements", asyncHandler(async (_req: Request, res: Respo
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/release-hold", validateBody(settlementIdSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post("/release-hold", requireAdmin, validateBody(settlementIdSchema), asyncHandler(async (req: Request, res: Response) => {
   const settlementId = req.body.settlement_id
 
   const database = await connectMongo()
@@ -651,7 +656,7 @@ router.post("/release-hold", validateBody(settlementIdSchema), asyncHandler(asyn
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/escalate-hold", validateBody(escalateHoldSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post("/escalate-hold", requireAdmin, validateBody(escalateHoldSchema), asyncHandler(async (req: Request, res: Response) => {
   const settlementId = req.body.settlement_id
 
   const database = await connectMongo()

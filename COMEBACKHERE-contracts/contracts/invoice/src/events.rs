@@ -1,4 +1,9 @@
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{Address, BytesN, Env, Symbol};
+
+pub fn upgraded(env: &Env, new_wasm_hash: BytesN<32>) {
+    env.events()
+        .publish((Symbol::new(env, "upgraded"),), new_wasm_hash);
+}
 
 pub fn invoice_created(env: &Env, merchant: &Address, invoice_id: &u64) {
     env.events().publish(
@@ -46,5 +51,19 @@ pub fn dispute_raised(env: &Env, invoice_id: &u64, settlement_id: &u64, claimant
     env.events().publish(
         (Symbol::new(env, "dispute_raised"),),
         (*invoice_id, *settlement_id, claimant),
+    );
+}
+
+pub fn admin_transfer_initiated(env: &Env, current_admin: &Address, new_admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "admin_transfer_initiated"),),
+        (current_admin, new_admin),
+    );
+}
+
+pub fn admin_transfer_accepted(env: &Env, new_admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "admin_transfer_accepted"),),
+        new_admin,
     );
 }

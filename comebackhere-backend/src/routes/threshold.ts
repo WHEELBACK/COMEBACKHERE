@@ -9,6 +9,7 @@ import {
 import { requireEnv } from "../lib/env.js"
 import { asyncHandler } from "../lib/errors.js"
 import { validateBody } from "../middleware/validate.js"
+import { requireAdmin } from "../middleware/adminAuth.js"
 import { thresholdSchema } from "../schemas/index.js"
 
 const router = Router()
@@ -70,7 +71,7 @@ export async function setThreshold(
   return { threshold, tx_hash: txHash }
 }
 
-router.post("/threshold", validateBody(thresholdSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post("/threshold", requireAdmin, validateBody(thresholdSchema), asyncHandler(async (req: Request, res: Response) => {
   const env = requireEnv({
     treasuryContractId: "TREASURY_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",

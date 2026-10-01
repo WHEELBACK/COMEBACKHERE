@@ -49,8 +49,6 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    ports:
-      - "3001:3001"
     environment:
       - SOROBAN_RPC_URL=http://soroban:8000/soroban/rpc
       - HORIZON_API_URL=http://soroban:8000
@@ -71,6 +69,25 @@ services:
       start_period: 10s
     volumes:
       - backend_data:/app/data
+
+  ## #755: Frontend service for canonical UI
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      - VITE_API_URL=http://backend:3001
+      - VITE_SOROBAN_RPC=http://soroban:8000/soroban/rpc
+      - VITE_HORIZON_URL=http://soroban:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5173/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
 volumes:
   soroban_data:
