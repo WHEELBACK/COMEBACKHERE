@@ -15,7 +15,7 @@
   "dependencies": {
     "@soroban-react/core": "^9.0.0",
     "@soroban-react/freighter": "^9.0.0",
-    "react": "^18.3.1",
+    "react": "^19.3.0",
     "react-dom": "^19.2.8",
     "soroban-client": "^1.0.0"
   },
@@ -23,16 +23,16 @@
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
-    "@types/react": "^18.3.1",
+    "@types/react": "^19.3.0",
     "@types/react-dom": "^18.3.0",
     "@typescript-eslint/eslint-plugin": "^8.69.0",
     "@typescript-eslint/parser": "^8.70.1",
     "@vitejs/plugin-react": "^4.2.1",
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.0",
-    "eslint-plugin-react-refresh": "^0.4.6",
+    "eslint-plugin-react-refresh": "^0.5.7",
     "jsdom": "^29.1.1",
-    "typescript": "^5.4.0",
+    "typescript": "^7.0.2",
     "vite": "^8.3.0",
     "vitest": "^4.1.9"
   }

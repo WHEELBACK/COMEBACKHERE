@@ -14,11 +14,12 @@
  * The ID is stored on `res.locals.requestId` so route handlers and other
  * middleware can include it in log lines:
  *
- *   console.log(`[requestId=${res.locals.requestId}] processing invoice`)
+ *   res.locals.logger.info({ invoiceId }, "Processing invoice")
  */
 
 import { type Request, type Response, type NextFunction } from "express"
 import { randomUUID } from "node:crypto"
+import { logger } from "../lib/logger.js"
 
 export function correlationIdMiddleware(
   req: Request,
@@ -34,6 +35,7 @@ export function correlationIdMiddleware(
 
   // Make the ID available to downstream handlers and logging
   res.locals.requestId = requestId
+  res.locals.logger = logger.child({ correlationId: requestId })
 
   // Echo the ID on the response so callers can correlate client-side
   res.setHeader("X-Request-Id", requestId)

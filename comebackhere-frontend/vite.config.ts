@@ -7,6 +7,10 @@ export default defineConfig({
     'import.meta.env.VITE_INVOICE_CONTRACT_ID': '"CDUMMYCONTRACT"',
     'import.meta.env.VITE_SOROBAN_RPC': '"https://dummy-rpc.example.com"',
     'import.meta.env.VITE_NETWORK_PASSPHRASE': '"Test SDF Future Network ; September 2025"',
+    'import.meta.env.VITE_TREASURY_CONTRACT_ID': '"CDUMMYTREASURY"',
+    'import.meta.env.VITE_COMPLIANCE_CONTRACT_ID': '"CDUMMYCOMPLIANCE"',
+    'import.meta.env.VITE_ALLOWED_TOKENS': '"USDC,XLM"',
+    'import.meta.env.VITE_API_BASE': '"/api"',
   },
   test: {
     environment: 'jsdom',

@@ -36,7 +36,7 @@ This page tracks feature parity between the two in-tree contract workspaces:
 | Treasury — `integration_update_merchant.rs` | ✅ | ❌ | |
 | **Compliance contract** | ✅ `contracts/compliance/` | ❌ | Not present in legacy tree |
 | **Settlement contract** | ❌ | ✅ `contracts/settlement/` | Legacy-only; superseded by treasury in canonical tree |
-| **API integration tests** | ❌ | ✅ `contracts/api-integration-tests/` | Legacy-only; no equivalent in canonical workspace |
+| **API integration tests** | ✅ `contracts/api-integration-tests/` | ✅ `contracts/api-integration-tests/` | Canonical suite exercises the Soroban RPC and treasury contract APIs |
 
 ---
 
@@ -69,7 +69,7 @@ As features are ported or parity issues resolved, update this table by
 flipping the status column. The goal is full parity — at which point the
 legacy tree can be removed.
 
-- [ ] Port `api-integration-tests` to canonical workspace (or remove)
+- [x] Port `api-integration-tests` to canonical workspace (or remove)
 - [ ] Resolve `settlement` vs `treasury` naming alignment
 - [ ] Add `events.rs` and `test.rs` / `tests.rs` to legacy invoice (or remove legacy tree)
 - [ ] Remove legacy tree once no doc references remain

@@ -53,7 +53,7 @@ export async function simulateContractRead(
 ): Promise<xdr.ScVal> {
   const contract = new Contract(contractId)
   const account = await client.getAccount(sourceAccount)
-  const tx = new TransactionBuilder(account as any, {
+  const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
   })
@@ -213,7 +213,7 @@ export async function submitContractCall(
   const keypair = Keypair.fromSecret(signerSecret)
   const contract = new Contract(contractId)
   const account = await client.getAccount(keypair.publicKey())
-  const tx = new TransactionBuilder(account as any, {
+  const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
   })
@@ -229,7 +229,10 @@ export async function submitContractCall(
     )
   }
 
-  const prepared = SorobanRpc.assembleTransaction(tx, simulated as any).build()
+  const prepared = SorobanRpc.assembleTransaction(
+    tx,
+    simulated as SorobanRpc.Api.SimulateTransactionSuccessResponse,
+  ).build()
   prepared.sign(keypair)
 
   const sendResult = await client.sendTransaction(prepared)

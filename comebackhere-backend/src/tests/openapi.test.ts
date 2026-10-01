@@ -38,6 +38,31 @@ describe("GET /api-docs/swagger.json — OpenAPI spec endpoint", () => {
     expect(spec.paths["/invoices"]).toHaveProperty("post")
   })
 
+  it("spec covers invoice cancel and refund routes", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths["/invoices/{id}/cancel"]).toHaveProperty("post")
+    expect(spec.paths["/invoices/{id}/refund"]).toHaveProperty("post")
+  })
+
+  it("spec documents invoice cursor pagination", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths["/invoices"].get.parameters.map((parameter: { name: string }) => parameter.name)).toContain("cursor")
+    expect(spec.paths["/invoices"].get.responses["200"].content["application/json"].schema.properties)
+      .toHaveProperty("next_cursor")
+  })
+
+  it("spec covers webhook dead-letter inspection and replay", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths["/webhooks/dead-letters"]).toHaveProperty("get")
+    expect(spec.paths["/webhooks/dead-letters/{id}/replay"]).toHaveProperty("post")
+  })
+
   it("spec covers the /invoices/{id} GET endpoint", async () => {
     const res = await request(app).get("/api-docs/swagger.json")
     const spec = res.body
@@ -46,12 +71,38 @@ describe("GET /api-docs/swagger.json — OpenAPI spec endpoint", () => {
     expect(spec.paths["/invoices/{id}"]).toHaveProperty("get")
   })
 
+  it("spec covers the /invoices/{id}/events GET endpoint", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths).toHaveProperty("/invoices/{id}/events")
+    expect(spec.paths["/invoices/{id}/events"]).toHaveProperty("get")
+  })
+
   it("spec covers the /disputes POST endpoint", async () => {
     const res = await request(app).get("/api-docs/swagger.json")
     const spec = res.body
 
     expect(spec.paths).toHaveProperty("/disputes")
     expect(spec.paths["/disputes"]).toHaveProperty("post")
+  })
+
+  it("documents the analytics route and every mounted application route", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const paths = res.body.paths
+    for (const path of [
+      "/invoices",
+      "/invoices/{id}",
+      "/invoices/export.csv",
+      "/disputes",
+      "/disputes/{id}",
+      "/disputes/{id}/vote",
+      "/api/analytics/metrics",
+      "/api/treasury/pending-settlements",
+    ]) {
+      expect(paths).toHaveProperty(path)
+    }
+    expect(paths["/api/analytics/metrics"]).toHaveProperty("get")
   })
 
   it("spec covers the dispute read endpoints", async () => {

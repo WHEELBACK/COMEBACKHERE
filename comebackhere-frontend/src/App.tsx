@@ -277,6 +277,16 @@ export default function App() {
         </button>
         <button
           role="tab"
+          aria-selected={tab === "dispute"}
+          aria-controls="tabpanel-dispute"
+          id="tab-dispute"
+          className={`tab ${tab === "dispute" ? "tab--active" : ""}`}
+          onClick={() => setTab("dispute")}
+        >
+          Raise Dispute
+        </button>
+        <button
+          role="tab"
           aria-selected={tab === "compliance"}
           aria-controls="tabpanel-compliance"
           id="tab-compliance"

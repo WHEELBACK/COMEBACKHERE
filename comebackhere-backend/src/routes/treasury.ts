@@ -211,10 +211,14 @@ export async function executeSettlementWithBalanceCheck(
     env.networkPassphrase,
   )
 
-  console.log(
-    `[execute-settlement] settlement_id=${body.settlement_id} ` +
-      `required=${settlement.amount.toString()} available=${balance.toString()} ` +
-      `token=${tokenContract}`,
+  res.locals.logger.info(
+    {
+      settlementId: body.settlement_id,
+      required: settlement.amount.toString(),
+      available: balance.toString(),
+      token: tokenContract,
+    },
+    "Executing settlement balance check",
   )
 
   if (balance < settlement.amount) {

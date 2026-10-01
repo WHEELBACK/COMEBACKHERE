@@ -715,4 +715,68 @@ mod tests {
         assert_eq!(cfg.max_requests, 60);
         assert_eq!(cfg.window, Duration::from_secs(60));
     }
+
+    // ── Concurrent requests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_concurrent_requests_share_rate_limit_per_ip() {
+        let server = make_server(5, 60);
+        let mut handles = vec![];
+
+        // Spawn 8 concurrent tasks from the same IP, limit is 5.
+        for _ in 0..8 {
+            let server = server.clone();
+            let handle = tokio::spawn(async move { server.get("/ping").await });
+            handles.push(handle);
+        }
+
+        let mut allowed_count = 0;
+        let mut blocked_count = 0;
+
+        for handle in handles {
+            let resp = handle.await.expect("task should complete");
+            if resp.status_code() == StatusCode::TOO_MANY_REQUESTS {
+                blocked_count += 1;
+            } else {
+                allowed_count += 1;
+            }
+        }
+
+        // With limit of 5, exactly 5 should pass and 3 should be blocked.
+        assert_eq!(allowed_count, 5, "exactly 5 concurrent requests should be allowed");
+        assert_eq!(blocked_count, 3, "exactly 3 concurrent requests should be blocked");
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_resets_after_window_expires() {
+        let config = RateLimitConfig {
+            max_requests: 2,
+            window: Duration::from_millis(100),
+        };
+        let store = new_store();
+        let layer = RateLimiterLayer::new(store, config);
+        let app = Router::new()
+            .route("/ping", get(|| async { "pong" }))
+            .layer(layer);
+        let server = TestServer::new(app).expect("test server should start");
+
+        // Consume the limit within the window.
+        server.get("/ping").await;
+        server.get("/ping").await;
+
+        // Third request should be blocked.
+        let resp = server.get("/ping").await;
+        assert_eq!(resp.status_code(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Wait for the window to expire.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // After the window expires, requests should be allowed again.
+        let resp = server.get("/ping").await;
+        assert_ne!(
+            resp.status_code(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "request after window expires should be allowed"
+        );
+    }
 }

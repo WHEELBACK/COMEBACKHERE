@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, vec, Address, Env};
+use soroban_sdk::{testutils::{Address as _, Ledger}, vec, Address, Env};
 
 fn setup_env() -> (Env, Address) {
     let env = Env::default();
@@ -159,6 +159,34 @@ fn test_resolve_dispute_callable_by_signer() {
     client.resolve_dispute(&signer_a, &settlement_id, &true);
 
     client.resolve_dispute(&signer_b, &settlement_id, &true);
+}
+
+#[test]
+fn test_dispute_remains_resolvable_after_many_ledgers() {
+    let (env, contract_id) = setup_env();
+    let client = make_client(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let signer_a = Address::generate(&env);
+    let signer_b = Address::generate(&env);
+    let token = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let signers = vec![&env, (signer_a.clone(), 1u64), (signer_b.clone(), 1u64)];
+    client.initialize(&signers, &2u64, &admin);
+
+    let settlement_id = client.propose_settlement(&signer_a, &token, &5_000_000u64, &merchant);
+    client.raise_dispute(&merchant, &settlement_id, &1u32);
+
+    env.ledger().with_mut(|li| {
+        li.sequence_number = INSTANCE_TTL_EXTEND_TO - INSTANCE_TTL_THRESHOLD + 1;
+    });
+    assert_eq!(
+        client.get_settlement(&settlement_id).unwrap().status,
+        SettlementStatus::OnHold
+    );
+
+    client.resolve_dispute(&signer_a, &settlement_id, &true);
+    assert!(client.get_settlement(&settlement_id).is_some());
 }
 
 #[test]

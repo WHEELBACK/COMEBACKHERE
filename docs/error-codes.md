@@ -53,6 +53,10 @@ Defined in `COMEBACKHERE-contracts/contracts/invoice/src/lib.rs`. Shares some va
 | 16 | `Overflow` | An internal counter (invoice ID, or `created_at + grace_window`) would overflow `u64`. | Practically unreachable outside of adversarial ledger state; not user-actionable. |
 | 17 | `AddressBlocked` | `mark_paids` was called for a customer that the configured compliance contract reports as not allowed. | Confirm the customer's compliance status with `ComplianceContract.is_allowed` before retrying. |
 | 18 | `InvalidStateTransition` | `mark_paids` was called on an invoice in `RefundRequested`, `Released`, `Cancelled`, or `Expired` status — see [ARCHITECTURE.md § Invoice state machine](../ARCHITECTURE.md#invoice-state-machine) for the full legal-transition diagram. | Fetch the current status with `get_invoice_status` first. A refund already in progress must not be overridden by a stale payment confirmation. |
+| 19 | `BatchTooLarge` | `mark_paids` or `batch_expire` was called with more than 50 invoice IDs. | Split the input into batches of 50 or fewer and submit multiple calls. |
+| 20 | `GraceWindowTooLarge` | `set_grace_window` was called with a duration exceeding `MAX_GRACE_WINDOW` (90 days / 7 776 000 seconds). | Pass a grace window less than or equal to 7 776 000 seconds. A bound is enforced to prevent locking funds indefinitely. |
+| 21 | `ReferenceTooLong` | An invoice `reference` exceeded `MAX_REFERENCE_LEN` (64 bytes). | Shorten the reference string to 64 bytes or fewer. |
+| 22 | `AmountPrecision` | An invoice `amount` is below the minimum allowed (`MIN_AMOUNT_USDC`, 10 000 000 stroops). | Specify an invoice amount of at least 1 USDC (10 000 000 stroops). |
 
 ---
 
@@ -81,14 +85,13 @@ Defined in `COMEBACKHERE-contracts/contracts/compliance/src/lib.rs`. Every state
 
 | Event topic | Emitted by | Data payload | Notes |
 | ------------- | ------------ | --------------- | ------- |
-| `address_allowed` | `allow_address` | `Address` | Permanent allow, no expiry. |
-| `address_allowed` | `batch_allow_addresses` | `(Address, u64)` — address and its `until` timestamp | One event per address processed. Same topic as `allow_address`, but the payload additionally carries the `until` value shared by the whole batch. |
-| `address_allowed_until` | `allow_address_until` | `(Address, u64)` — address and its `until` timestamp | Single-address, time-bounded allow. |
-| `address_blocked` | `block_address` | `Address` | |
-| `address_cleared` | `clear_address` | `(Address, AddressStatus)` — address and the status it held immediately before clearing | Never emitted when the address was already `Cleared` (that call fails with `AddressNotFound` instead). |
-| `compliance_batch_processed` | `batch_allow_addresses` | `(Address, u32)` — the calling admin and the number of addresses processed | Emitted once per `batch_allow_addresses` call, after all per-address `address_allowed` events for that call. Lets an indexer confirm a batch operation has fully landed (`processed_count` matches the number of `address_allowed` events it should have seen in that transaction) without treating event counting as the sole source of truth. |
+| `address_allowed` | `allow_address` | `(Address, Symbol, Option<u64>)` — address, `Allowed`, and no expiry | Permanent allow. |
+| `address_allowed_until` | `allow_address_until`, `batch_allow_addresses` | `(Address, Symbol, Option<u64>)` — address, `AllowedUntil`, and expiry | Batch allow emits one event per address. |
+| `address_blocked` | `block_address`, `batch_block_addresses` | `(Address, Symbol, Option<u64>)` — address, `Blocked`, and no expiry | Batch block emits one event per address. |
+| `address_cleared` | `clear_address` | `(Address, Symbol, Option<u64>)` — address, `Cleared`, and no expiry | Never emitted when the address was already `Cleared` (that call fails with `AddressNotFound` instead). |
+| `compliance_batch_processed` | `batch_allow_addresses` | `(Address, u32)` — the calling admin and the number of addresses processed | Emitted once per `batch_allow_addresses` call, after all per-address `address_allowed_until` events for that call. Lets an indexer confirm a batch operation has fully landed (`processed_count` matches the number of address events it should have seen in that transaction) without treating event counting as the sole source of truth. |
 
-`batch_allow_addresses` caps `addresses` at 50 entries per call (`ContractError::BatchTooLarge` above that) and validates `until` the same way `allow_address_until` does (`ContractError::PastExpiry` if `until <= env.ledger().timestamp()`). Both checks run before any storage writes or events, so a rejected call has no partial effects.
+Both batch operations cap `addresses` at 50 entries per call (`ContractError::BatchTooLarge` above that). `batch_allow_addresses` validates `until` the same way `allow_address_until` does (`ContractError::PastExpiry` if `until <= env.ledger().timestamp()`). These checks run before any storage writes or per-address events, so a rejected call has no partial effects.
 
 ---
 
@@ -114,13 +117,14 @@ Defined in `COMEBACKHERE-contracts/contracts/treasury/src/lib.rs`.
 | Code | Name | Trigger condition | Remediation |
 | ------ | ------ | ------------------- | ------------- |
 | 1 | `ContractPaused` | A state-changing call was made while the treasury is in a paused state. | Defer transactions until the admin runs `unpause`. |
-| 2 | `NotPending` | `approve_settlement` or `execute_settlement` was called on a settlement that is not in `Pending` status. | Confirm pending status with `get_pending_settlements` before approving or executing. |
+| 2 | `NotPending` | `approve_settlement`, `execute_settlement`, or `cancel_settlement` was called on a settlement that is not in `Pending` status. | Confirm pending status with `get_pending_settlements` before approving, executing, or cancelling. |
 | 3 | `InsufficientApprovals` | `execute_settlement` was called before accumulated signer weight reached the configured threshold. | Continue gathering approvals until `approval_weight ≥ threshold`, then call `execute_settlement`. |
-| 4 | `TokenNotAllowed` | `propose_settlement` was called with a token not present in the allowlist (when the allowlist is non-empty). | Admin must call `add_token_to_allowlist` for the token before settlements may be proposed against it. |
-| 5 | `Unauthorized` | Caller is not registered as a signer (for `propose_settlement`/`approve_settlement`) or not the admin (for `set_signer`, `pause`, etc). | Use a key registered via `initialize` or `set_signer`; admin-only operations require the admin key. |
+| 4 | `TokenNotAllowed` | `deposit` was called with a token not on the allowlist, or `propose_settlement` was called with a token not present in the allowlist (when the allowlist is non-empty). | Admin must call `add_token_to_allowlist` for the token before deposits or settlements may be processed against it. |
+| 5 | `Unauthorized` | A caller other than the admin or proposer attempted to cancel, or an admin-only operation was called by a non-admin. | Cancel as the settlement proposer or configured admin; use the admin key for admin-only operations. |
 | 6 | `InvalidThreshold` | `update_threshold` was called with a threshold of 0. | Pass a positive `u32` threshold; the multi-sig cannot function with zero required weight. |
 | 7 | `DuplicateSigner` | `initialize` was called with the same signer address appearing more than once in the `signers` list. | Ensure every `(address, weight)` pair in the `signers` vector is unique before calling `initialize`. |
 | 8 | `InvalidWeightSum` | `initialize` was called with a `threshold` greater than the sum of all signer weights. | Lower the threshold or add signers with sufficient weight so that `sum(weights) ≥ threshold`. |
+| 14 | `UpgradeInProgress` | `upgrade` was called while at least one settlement is in `PartiallyExecuted` status. | Allow the settlement to reach a safe terminal state before retrying the upgrade. |
 
 ---
 

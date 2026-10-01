@@ -49,7 +49,8 @@ import {
   type InvoiceStatus,
 } from "./db/mongo.js"
 import { getOldestRetainedLedger, ledgerFromPagingToken, parseRetentionError } from "./lib/soroban.js"
-import { counter, gauge } from "./lib/metrics.js"
+import { counter, gauge, indexerLedgerLag } from "./lib/metrics.js"
+import { logger } from "./lib/logger.js"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -138,15 +139,11 @@ export function createRedisClient(redisUrl?: string): Redis {
       attempt = times
       if (times > 50) {
         // After 50 retries (~30 min with cap) give up so operators notice.
-        console.error(
-          `[indexer] Redis retry limit reached after ${times} attempts — stopping reconnect`
-        )
+        logger.error({ attempts: times }, "Redis retry limit reached; stopping reconnect")
         return null
       }
       const delay = backoffDelayMs(times - 1)
-      console.warn(
-        `[indexer] Redis reconnect attempt ${times} — waiting ${delay} ms`
-      )
+      logger.warn({ attempt: times, delayMs: delay }, "Redis reconnect scheduled")
       return delay
     },
     // Do not flood logs when commands queue during a disconnect.
@@ -156,20 +153,25 @@ export function createRedisClient(redisUrl?: string): Redis {
   })
 
   client.on("connect", () => {
-    console.log("[indexer] Redis connected")
+    logger.info("Indexer Redis connected")
     attempt = 0
   })
 
   client.on("reconnecting", (ms: number) => {
-    console.warn(`[indexer] Redis reconnecting in ${ms} ms (attempt ${attempt})`)
+    logger.warn({ delayMs: ms, attempt }, "Indexer Redis reconnecting")
   })
 
   client.on("error", (err: Error) => {
     // Log but do not crash — the indexer continues polling Soroban.
-    console.error(`[indexer] Redis error: ${err.message}`)
+    logger.error({ errorName: err.name }, "Indexer Redis error")
   })
 
   return client
+}
+
+export function pingIndexerRedis(): Promise<string> {
+  if (!redisClient) redisClient = createRedisClient()
+  return redisClient.ping()
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +188,7 @@ export async function loadCursor(): Promise<string> {
         return stored
       }
     } catch (err) {
-      console.warn("[indexer] could not read cursor from Redis — using in-memory cursor", err)
+      logger.warn({ errorName: err instanceof Error ? err.name : "UnknownError" }, "Could not read Redis cursor; using in-memory cursor")
     }
   }
   return memCursor
@@ -200,7 +202,7 @@ export async function saveCursor(next: string): Promise<void> {
       await redisClient.set(INDEXER_CURSOR_KEY, next)
     } catch (err) {
       // Non-fatal: in-memory cursor is still updated, so polling continues.
-      console.warn("[indexer] could not save cursor to Redis — using in-memory fallback", err)
+      logger.warn({ errorName: err instanceof Error ? err.name : "UnknownError" }, "Could not save Redis cursor; using in-memory fallback")
     }
   }
 }
@@ -262,9 +264,14 @@ export function eventIdOf(event: { id?: string; pagingToken?: string }): string 
  * crashed after the event was stored but before it was marked applied.
  */
 export function persistTransition(transition: InvoiceStateTransition): void {
-  console.log(
-    `[indexer] ${transition.event_type} invoice_id=${transition.invoice_id}` +
-    ` ledger=${transition.ledger} tx=${transition.transaction_hash}`
+  logger.info(
+    {
+      eventType: transition.event_type,
+      invoiceId: transition.invoice_id,
+      ledger: transition.ledger,
+      transactionHash: transition.transaction_hash,
+    },
+    "Invoice state transition indexed",
   )
 }
 
@@ -386,10 +393,9 @@ export async function recordRetentionGap(
   toLedger: number,
 ): Promise<void> {
   const missing = Math.max(0, toLedger - fromLedger + 1)
-  console.error(
-    `[indexer] RETENTION GAP: ledgers ${fromLedger}-${toLedger} (${missing} ledgers) are no longer ` +
-    `retained by the RPC node; events in this range were NOT indexed. Resuming from ledger ` +
-    `${toLedger + 1}. See docs/troubleshooting.md#indexer-retention-gaps to backfill.`
+  logger.error(
+    { fromLedger, toLedger, missingLedgers: missing, resumeLedger: toLedger + 1 },
+    "Indexer retention gap detected; events in the missing range were not indexed",
   )
 
   const labels = { indexer: "invoice" }
@@ -421,7 +427,7 @@ export async function recordRetentionGap(
 
 /** The subset of the Soroban RPC client the indexer needs (mockable in tests). */
 export interface IndexerRpc {
-  getEvents: (params: any) => Promise<any>
+  getEvents: (params: Parameters<SorobanRpc.Server["getEvents"]>[0]) => ReturnType<SorobanRpc.Server["getEvents"]>
   getLatestLedger: () => Promise<{ sequence: number }>
   getHealth?: () => Promise<unknown>
 }
@@ -470,7 +476,7 @@ export async function pollOnce(
       limit: EVENT_LIMIT,
     })
 
-  let response: any
+  let response: Awaited<ReturnType<SorobanRpc.Server["getEvents"]>>
   try {
     response = await fetchEvents()
   } catch (err) {
@@ -495,7 +501,7 @@ export async function pollOnce(
     response = await fetchEvents()
   }
 
-  const events: any[] = response?.events ?? []
+  const events = response.events ?? []
   let applied = 0
 
   for (const event of events) {
@@ -538,6 +544,10 @@ export async function pollOnce(
 
   if (db) await saveMongoCursor(db, nextToken, lastLedger)
   if (nextToken) await saveCursor(nextToken)
+  indexerLedgerLag.set(
+    { indexer: "invoice" },
+    Math.max(0, (response?.latestLedger ?? lastLedger) - lastLedger),
+  )
 
   return applied
 }
@@ -606,16 +616,14 @@ export async function startIndexer(options?: {
   const initialCursor = saved
     ? `ledger=${saved.last_ledger} token=${saved.paging_token ?? "none"}`
     : await loadCursor()
-  console.log(
-    `[indexer] starting — contract=${contractId} cursor=${initialCursor} interval=${pollIntervalMs}ms`
-  )
+  logger.info({ contractId, cursor: initialCursor, pollIntervalMs }, "Invoice indexer starting")
 
   const loop = async () => {
     if (stopped) return
     try {
       await pollOnce(rpc, contractId!, database)
     } catch (err) {
-      const handler = options?.onError ?? ((e) => console.error("[indexer] poll error", e))
+      const handler = options?.onError ?? ((e) => logger.error({ errorName: e instanceof Error ? e.name : "UnknownError" }, "Invoice indexer poll failed"))
       handler(err)
     }
     if (!stopped) {
@@ -631,7 +639,7 @@ export async function startIndexer(options?: {
 // Run as standalone entry point
 if (import.meta.url === new URL(process.argv[1], import.meta.url).href) {
   startIndexer().catch((err) => {
-    console.error("[indexer] fatal", err)
+    logger.fatal({ errorName: err instanceof Error ? err.name : "UnknownError" }, "Invoice indexer failed")
     process.exit(1)
   })
 }
