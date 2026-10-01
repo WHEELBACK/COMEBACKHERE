@@ -35,6 +35,22 @@ pub enum DataKey {
 #[contract]
 pub struct ComplianceContract;
 
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn test_version_returns_package_version() {
+        let env = Env::default();
+        let contract_id = env.register(ComplianceContract, ());
+        let client = ComplianceContractClient::new(&env, &contract_id);
+        assert_eq!(
+            client.version(),
+            String::from_str(&env, env!("CARGO_PKG_VERSION"))
+        );
+    }
+}
+
 fn is_paused(e: &Env) -> bool {
     e.storage()
         .instance()

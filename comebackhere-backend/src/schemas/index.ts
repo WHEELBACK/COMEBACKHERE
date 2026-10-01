@@ -1,6 +1,8 @@
 import { z } from "zod"
 import { Keypair } from "stellar-sdk"
 
+const MAX_REFERENCE_LEN_BYTES = 64
+
 function isValidStellarAddress(addr: string): boolean {
   try {
     Keypair.fromPublicKey(addr)
@@ -35,7 +37,10 @@ export const createInvoiceSchema = z.object({
   due_date: futureTimestamp,
   reference: z
     .string()
-    .refine((val) => Buffer.byteLength(val, "utf8") <= 64, "reference must not exceed 64 bytes")
+    .refine(
+      (val) => Buffer.byteLength(val, "utf8") <= MAX_REFERENCE_LEN_BYTES,
+      `reference must not exceed ${MAX_REFERENCE_LEN_BYTES} bytes`,
+    )
     .optional(),
 })
 

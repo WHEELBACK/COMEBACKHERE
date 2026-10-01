@@ -246,6 +246,7 @@ Create a new invoice by submitting `create_invoice` to the Soroban RPC.
 | `token`            | string | Token identifier                                  |
 | `amount`           | number | Positive number (in stroops / smallest unit)      |
 | `due_date`         | number | Future Unix timestamp (seconds) for the due date  |
+| `reference`        | string | Optional invoice reference, limited to 64 UTF-8 bytes |
 
 The merchant identity is taken from the API key, never from the request body.
 Include `Authorization: Bearer <api_key>`.

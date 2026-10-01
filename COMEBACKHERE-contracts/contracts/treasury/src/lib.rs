@@ -940,19 +940,39 @@ impl TreasuryContract {
     /// # Arguments
     /// * `e` - Soroban environment handle.
     /// * `signer` - Authorized signer address resolving the dispute (must authenticate).
-    /// * `_settlement_id` - ID of the disputed settlement.
-    /// * `_resolve_in_favor` - Resolution outcome decision flag.
+    /// * `settlement_id` - ID of the disputed settlement.
+    /// * `resolve_in_favor` - Whether the outcome favors the merchant.
     ///
     /// # Errors
     /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
+    /// * Returns [`TreasuryError::NotDisputed`] if the settlement is not on hold.
     pub fn resolve_dispute(
         e: Env,
         signer: Address,
-        _settlement_id: u64,
-        _resolve_in_favor: bool,
+        settlement_id: u64,
+        resolve_in_favor: bool,
     ) -> Result<(), TreasuryError> {
         check_not_paused(&e)?;
         signer.require_auth();
+        let mut settlement = Self::get_settlement_internal(&e, settlement_id);
+        if settlement.status != SettlementStatus::OnHold {
+            return Err(TreasuryError::NotDisputed);
+        }
+        let resolution_weight = settlement.approval_weight;
+        settlement.status = if resolve_in_favor {
+            SettlementStatus::Pending
+        } else {
+            SettlementStatus::Cancelled
+        };
+        e.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &settlement);
+        crate::events::dispute_resolved(
+            &e,
+            &settlement_id,
+            &resolve_in_favor,
+            &resolution_weight,
+        );
         Ok(())
     }
 
