@@ -634,18 +634,19 @@ router.get("/:id/events", validateParams(invoiceIdParamSchema), asyncHandler(asy
  *   post:
  *     tags: [Invoices]
  *     summary: Create a new invoice
+ *     parameters:
+ *       - in: header
+ *         name: Authorization
+ *         required: true
+ *         schema: { type: string, example: Bearer merchant-api-key }
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             required: [merchant_address, token, amount, due_date]
+ *             required: [token, amount, due_date]
  *             properties:
- *               merchant_address:
- *                 type: string
- *                 description: Valid Stellar public key (G…)
- *                 example: "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
  *               token:
  *                 type: string
  *                 example: "USDC"
@@ -681,6 +682,12 @@ router.get("/:id/events", validateParams(invoiceIdParamSchema), asyncHandler(asy
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
+ *       401:
+ *         description: Missing, invalid, or revoked merchant API key
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       422:
  *         description: Soroban simulation or transaction failure
  *         content:
@@ -700,15 +707,16 @@ router.get("/:id/events", validateParams(invoiceIdParamSchema), asyncHandler(asy
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.post("/", validateBody(createInvoiceSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post("/", requireMerchantApiKey, validateBody(createInvoiceSchema), asyncHandler(async (req: Request, res: Response) => {
   const env = requireEnv({
     invoiceContractId: "INVOICE_CONTRACT_ID",
     signerSecret: "SIGNER_SECRET_KEY",
   })
 
   const client = buildSorobanClient(env.rpcUrl)
+  const body = { ...req.body, merchant_address: res.locals.merchantAddress } as CreateInvoiceBody
   const result = await createInvoice(
-    req.body as CreateInvoiceBody,
+    body,
     client,
     env.invoiceContractId,
     env.signerSecret,
@@ -717,7 +725,6 @@ router.post("/", validateBody(createInvoiceSchema), asyncHandler(async (req: Req
 
   const db = await connectMongo()
   const collection = getInvoicesCollection(db)
-  const body = req.body as CreateInvoiceBody
   const now = new Date()
   await collection.insertOne({
     invoice_id: result.invoice_id,

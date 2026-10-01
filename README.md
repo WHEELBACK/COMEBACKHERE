@@ -31,8 +31,8 @@ docs rather than duplicating them.
 ```bash
 curl -X POST http://localhost:3000/invoices \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MERCHANT_API_KEY" \
   -d '{
-    "merchant_address": "G...",
     "token": "USDC",
     "amount": 1000000,
     "due_date": 1720000000
@@ -65,6 +65,9 @@ function verifyWebhook(rawBody: string, signature: string, secret: string): bool
   return timingSafeEqual(expectedBuf, actualBuf)
 }
 ```
+
+The body-only digest is temporarily available as `X-COMEBACKHERE-Legacy-Signature`
+for one release while receivers migrate.
 
 > Webhook events and configuration: [docs/api-reference.md](docs/api-reference.md#webhooks)
 

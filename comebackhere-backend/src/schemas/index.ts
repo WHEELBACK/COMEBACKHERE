@@ -28,10 +28,6 @@ const futureTimestamp = z
   })
 
 export const createInvoiceSchema = z.object({
-  merchant_address: z
-    .string()
-    .min(1, "merchant_address is required")
-    .refine(isValidStellarAddress, "merchant_address must be a valid Stellar public key"),
   token: z.string().min(1, "token is required"),
   amount: z
     .number({ message: "amount must be a positive number" })
@@ -42,6 +38,10 @@ export const createInvoiceSchema = z.object({
     .refine((val) => Buffer.byteLength(val, "utf8") <= 64, "reference must not exceed 64 bytes")
     .optional(),
 })
+
+export const merchantApiKeySchema = z.object({ merchant_address: stellarAddress })
+export const merchantApiKeyIdSchema = z.object({ keyId: z.string().uuid("keyId must be a UUID") })
+export const webhookDeliveryIdSchema = z.object({ deliveryId: z.string().uuid("deliveryId must be a UUID") })
 
 export const invoiceIdParamSchema = z.object({
   id: z.string().regex(/^\d+$/, "id must be a positive integer"),

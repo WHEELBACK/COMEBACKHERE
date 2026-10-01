@@ -259,6 +259,7 @@ export async function processIndexerBatch(
       const signer = valueAddress(event.value, 1)
       const newWeight = valueU64(event.value, 3)
       await processSettlementApproved(settlements, settlementId, signer, newWeight)
+      const settlement = await settlements.findOne({ id: settlementId })
 
       // Dispatch signed webhook for settlement_approved
       const webhookUrl = process.env.WEBHOOK_URL
@@ -275,6 +276,7 @@ export async function processIndexerBatch(
       }
     } else if (eventType === "settlement_executed") {
       await processSettlementExecuted(settlements, settlementId, txHash)
+      const settlement = await settlements.findOne({ id: settlementId })
 
       // Treasury balances changed on-chain; drop the cached copy so the next
       // GET /api/treasury/balances reads fresh data instead of waiting for TTL.
