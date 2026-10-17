@@ -1,5 +1,6 @@
 import type { FC, ReactNode } from "react"
 import type { WalletState } from "../hooks/useWallet"
+import { truncateAddress } from "../utils/truncateAddress"
 
 interface WalletBarProps {
   wallet: WalletState
@@ -9,7 +10,7 @@ interface WalletBarProps {
 }
 
 function shortAddress(address: string): string {
-  return `${address.slice(0, 6)}...${address.slice(-4)}`
+  return truncateAddress(address)
 }
 
 /** Human-readable name for a network passphrase, e.g. "Test SDF Network". */
