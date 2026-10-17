@@ -12,9 +12,9 @@ import { useCompletedPaymentGuard } from "../hooks/useCompletedPaymentGuard"
 import { formatAmount, USDC_DECIMALS } from "../utils/format"
 
 export function InvoicePayment() {
-  const { invoice, loading, error, loadInvoice, pay, cancel } = useInvoice()
   const { isCompleted, markCompleted } = useCompletedPaymentGuard()
   const { address, connected, connecting, connect, notReadyReason } = useWallet()
+  const { invoice, loading, error, loadInvoice, pay, cancel } = useInvoice(address)
   const [invoiceId, setInvoiceId] = useState("")
   const [showConfirm, setShowConfirm] = useState(false)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)

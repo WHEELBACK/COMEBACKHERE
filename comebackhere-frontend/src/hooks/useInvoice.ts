@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { InvoiceStatus, type Invoice, type PaymentResult } from "../types"
 import { fetchInvoice, payInvoice, cancelInvoice, requestRefund, releaseEscrow } from "../utils/soroban"
 
@@ -17,10 +17,20 @@ interface UseInvoiceReturn {
 
 const LOAD_TIMEOUT_MS = 30_000
 
-export function useInvoice(): UseInvoiceReturn {
+export function useInvoice(accountKey?: string | null): UseInvoiceReturn {
   const [invoice, setInvoice] = useState<Invoice | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Drop cached invoice details when the connected account changes.
+  const prevAccount = useRef(accountKey)
+  useEffect(() => {
+    if (prevAccount.current !== accountKey) {
+      prevAccount.current = accountKey
+      setInvoice(null)
+      setError(null)
+    }
+  }, [accountKey])
 
   const loadInvoice = useCallback(async (id: number) => {
     setLoading(true)
