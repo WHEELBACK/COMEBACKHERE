@@ -15,6 +15,8 @@ interface UseInvoiceReturn {
   release: (publicKey: string) => Promise<PaymentResult>
 }
 
+const LOAD_TIMEOUT_MS = 30_000
+
 export function useInvoice(): UseInvoiceReturn {
   const [invoice, setInvoice] = useState<Invoice | null>(null)
   const [loading, setLoading] = useState(false)
@@ -23,12 +25,17 @@ export function useInvoice(): UseInvoiceReturn {
   const loadInvoice = useCallback(async (id: number) => {
     setLoading(true)
     setError(null)
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      const result = await fetchInvoice(CONTRACT_ID, id)
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Invoice request timed out")), LOAD_TIMEOUT_MS)
+      })
+      const result = await Promise.race([fetchInvoice(CONTRACT_ID, id), timeout])
       setInvoice(result)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load invoice")
     } finally {
+      clearTimeout(timer)
       setLoading(false)
     }
   }, [])
