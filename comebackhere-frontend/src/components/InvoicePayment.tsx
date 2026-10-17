@@ -8,10 +8,12 @@ import { PayConfirmationModal } from "./PayConfirmationModal"
 import { CancelConfirmationModal } from "./CancelConfirmationModal"
 import { TransactionHistory } from "./TransactionHistory"
 import { InvoiceQRCode } from "./InvoiceQRCode"
+import { useCompletedPaymentGuard } from "../hooks/useCompletedPaymentGuard"
 import { formatAmount, USDC_DECIMALS } from "../utils/format"
 
 export function InvoicePayment() {
   const { invoice, loading, error, loadInvoice, pay, cancel } = useInvoice()
+  const { isCompleted, markCompleted } = useCompletedPaymentGuard()
   const { address, connected, connecting, connect, notReadyReason } = useWallet()
   const [invoiceId, setInvoiceId] = useState("")
   const [showConfirm, setShowConfirm] = useState(false)
@@ -80,9 +82,10 @@ export function InvoicePayment() {
   }
 
   const handleConfirmPayment = async () => {
-    if (!address) return
+    if (!address || submitting || (invoice && isCompleted(invoice.id))) return
     setSubmitting(true)
     const res = await pay(address)
+    if (res.success && invoice) markCompleted(invoice.id)
     setSubmitting(false)
     setShowConfirm(false)
     setResult({
