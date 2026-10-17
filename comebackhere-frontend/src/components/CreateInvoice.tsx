@@ -1,6 +1,7 @@
 import { useState, useRef, type FormEvent, type ChangeEvent } from "react"
 import { CopyableText } from "./CopyableText"
 import { InvoiceQRCode } from "./InvoiceQRCode"
+import { limitFractionDigits } from "../utils/amountInput"
 import { createInvoice, ApiError, type CreateInvoiceResponse } from "../utils/api"
 import {
   INVOICE_TOKENS,
@@ -63,7 +64,8 @@ export function CreateInvoice({ merchantAddress }: CreateInvoiceProps) {
   }
 
   const handleChange = (field: InvoiceFormField) => (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-    const value = e.target.value
+    let value = e.target.value
+    if (field === "amount") value = limitFractionDigits(value, INVOICE_TOKENS[values.token])
     setValues((prev) => ({ ...prev, [field]: value }))
     setServerFieldErrors((prev) => ({ ...prev, [field]: undefined }))
     setServerError(null)
