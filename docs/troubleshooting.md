@@ -2,6 +2,23 @@
 
 This guide covers the most common problems developers encounter during local setup and how to resolve them.
 
+## Health and Metrics
+
+`GET /health` is a liveness check: it reports whether the backend process can
+serve requests and does not contact dependencies. `GET /health/ready` is a
+readiness check: it returns `200` only when MongoDB, Redis, and Soroban RPC
+respond within 1.5 seconds; otherwise it returns `503` with each dependency
+marked `ok` or `unavailable`.
+
+`GET /metrics` exposes Prometheus text metrics and is enabled by default. Set
+`METRICS_ENABLED=false` to disable the endpoint. Request latency is recorded in
+`http_request_duration_seconds` (route templates, method, and status code),
+indexer lag in `indexer_ledger_lag` (ledger count, labelled by indexer), and
+webhook outcomes in `webhook_delivery_total` (labelled by `delivered` or
+`failed`). Standard Node.js process metrics are also included. Logs are
+structured JSON; `LOG_LEVEL` controls verbosity, and `pino-pretty` is enabled
+only when `NODE_ENV=development`.
+
 ## Soroban RPC Connection Errors
 
 ### "Soroban RPC not reachable" or connection refused on port 8000
@@ -592,3 +609,191 @@ curl -H "X-Request-Id: my-trace-id-abc123" http://localhost:3000/invoices/1
 
 The response will echo the same `X-Request-Id: my-trace-id-abc123` header,
 confirming the backend used your ID throughout the request lifecycle.
+
+## Indexer Retention Gaps
+
+Soroban RPC nodes keep contract events only for a limited retention window
+(about 7 days by default on public nodes). If the invoice indexer is stopped,
+or falls behind, for longer than that window, its saved cursor points at
+ledgers the node no longer has and `getEvents` rejects the request.
+
+### How the indexer reacts
+
+When the resume ledger is older than the node's oldest retained ledger, the
+indexer:
+
+1. Logs an error such as
+   `[indexer] RETENTION GAP: ledgers 3000-4999 (2000 ledgers) are no longer retained by the RPC node; events in this range were NOT indexed.`
+2. Updates the metrics served at `GET /metrics`:
+
+   | Metric | Meaning |
+   | --- | --- |
+   | `indexer_retention_gaps_total{indexer="invoice"}` | Number of gaps detected |
+   | `indexer_retention_gap_ledgers_total{indexer="invoice"}` | Total ledgers skipped |
+   | `indexer_retention_gap_last_missing_ledgers{indexer="invoice"}` | Size of the most recent gap |
+
+3. Stores the missing range in the `indexer_gaps` Mongo collection with
+   `status: "open"`.
+4. Only then moves its cursor to the oldest retained ledger and continues.
+
+Alert on any increase of `indexer_retention_gaps_total`. Invoices whose events
+fell in the gap may show a stale status and their webhooks were not sent.
+
+### Recovering from a gap
+
+1. List the open gaps:
+
+   ```sh
+   mongosh "$MONGODB_URI" --eval 'db.indexer_gaps.find({ status: "open" })'
+   ```
+
+2. Find an RPC node that still retains the range: an archive RPC
+   (captive-core with a long `HISTORY_RETENTION_WINDOW`) or a provider
+   offering full history.
+3. Run a one-off indexer against that node, starting at the gap. Processing is
+   idempotent per event id, so overlapping ranges are safe to replay:
+
+   ```sh
+   # Point the one-off run's cursor at the start of the gap
+   mongosh "$MONGODB_URI" --eval '
+     db.indexer_cursors.updateOne(
+       { _id: "invoice_events" },
+       { $set: { paging_token: null, last_ledger: <from_ledger> } })'
+
+   SOROBAN_RPC_URL=<archive-rpc-url> INVOICE_CONTRACT_ID=... \
+     node dist/indexer.js
+   ```
+
+   Stop the main indexer while the backfill runs, and stop the backfill once
+   its logs show ledgers past `to_ledger`. Then restart the main indexer; it
+   continues from the saved cursor and skips events it has already applied.
+
+4. Mark the gap as resolved:
+
+   ```sh
+   mongosh "$MONGODB_URI" --eval '
+     db.indexer_gaps.updateOne(
+       { _id: "invoice:<from>-<to>" },
+       { $set: { status: "backfilled", resolved_at: new Date() } })'
+   ```
+
+   If no archive source is available, set `status: "accepted"` instead and
+   reconcile the affected invoices manually with
+   `stellar contract invoke ... -- get_invoice --invoice_id <id>`.
+
+### Preventing gaps
+
+- Keep indexer downtime well below the RPC node's retention window.
+- Watch `indexer_retention_gap_last_missing_ledgers` and indexer logs after
+  outages.
+- For self-hosted RPC, raise the event retention window if maintenance windows
+  are long.
+
+---
+
+## Freighter Wallet Troubleshooting
+
+This section covers the most common Freighter wallet issues end users encounter when paying invoices.
+
+### Freighter Extension Not Installed
+
+**Symptom:** "Install Freighter" button appears, or clicking "Connect Wallet" shows no wallet options.
+
+**Cause:** Freighter browser extension is not installed.
+
+**Fix:**
+1. Go to [https://www.freighter.app](https://www.freighter.app)
+2. Click "Install Freighter" for your browser (Chrome, Firefox, Edge, Safari)
+3. Follow the browser's installation prompts
+4. After installation, refresh the payment page in your browser
+5. Click "Connect Wallet" — Freighter should now appear
+
+### "Locked Wallet" Error
+
+**Symptom:** Freighter icon shows a lock, or you see "Wallet is locked" when trying to pay.
+
+**Cause:** Freighter is locked and requires your password to unlock.
+
+**Fix:**
+1. Click the Freighter icon in your browser toolbar (top-right corner)
+2. Enter your password in the unlock popup
+3. Click "Unlock"
+4. Return to the payment page and try again
+
+> After 15 minutes of inactivity, Freighter auto-locks for security. Simply unlock again to continue.
+
+### "Wrong Network Selected"
+
+**Symptom:** Payment fails with "network mismatch" or the Freighter popup shows "Testnet" or the wrong network.
+
+**Cause:** Freighter is connected to a different Stellar network than what the application uses.
+
+**Fix:**
+1. Click the Freighter icon in your browser toolbar
+2. Look for the network selector (usually at the top of the Freighter window)
+3. Select **"Mainnet"** (or the correct network for this application)
+4. Close Freighter and return to the payment page
+5. Try paying again
+
+> The application should display which network it's connected to (usually near the top of the page or in the wallet connection button).
+
+### Signature Request Never Appeared
+
+**Symptom:** After clicking "Pay," nothing happens; no Freighter popup appears.
+
+**Cause:** Browser popup permissions are blocked, or Freighter encountered an error.
+
+**Fix:**
+1. **Check popup blockers:**
+   - Look for a "blocked popups" icon in your browser's address bar
+   - Click it and select "Allow popups for this site"
+   - Try paying again
+
+2. **Refresh the page:**
+   - Refresh your browser tab (Ctrl+R or Cmd+R)
+   - Disconnect and reconnect your wallet
+   - Try paying again
+
+3. **Restart Freighter:**
+   - Click the Freighter icon
+   - Open Freighter's settings (gear icon, usually bottom-right)
+   - Scroll down and click "Clear Data" or "Lock"
+   - Unlock Freighter again and retry
+
+### Signature Request Rejected
+
+**Symptom:** A Freighter popup appeared, but you clicked "Reject" or the request timed out.
+
+**Cause:** You declined the transaction, or the request expired before you approved it.
+
+**Fix:**
+1. Return to the payment page or refresh it
+2. Click "Pay" again
+3. **When the Freighter popup appears**, carefully review the transaction details (amounts, recipient, etc.)
+4. Click **"Approve"** (not "Reject")
+5. Wait for the transaction to complete (usually 30 seconds–1 minute on Mainnet)
+
+### "Insufficient Balance"
+
+**Symptom:** Payment fails with "insufficient balance" even though your Freighter account shows enough funds.
+
+**Cause:** Your balance includes less than the full invoice amount (sometimes accounts display rounding or your balance is in a different asset).
+
+**Fix:**
+1. In Freighter, make sure your balance is displayed in **USDC** (the correct stablecoin)
+2. Confirm the amount shown in your Freighter account is at least the invoice amount
+3. If you just received funds, wait a few minutes for the balance to sync (Stellar has ~5-10 second block times)
+4. If the balance is still too low, you need to receive more funds or cancel this invoice and request a smaller amount
+
+### "Transaction Failed" After Approval
+
+**Symptom:** You approved the signature in Freighter, but the payment page shows "Transaction failed."
+
+**Cause:** The transaction was submitted to the Stellar network but could not be processed (insufficient fees, network congestion, or invalid transaction details).
+
+**Fix:**
+1. **Wait 1–2 minutes** to ensure the transaction settled
+2. Refresh the payment page — sometimes it shows as paid after a reload
+3. If still failed, contact the merchant or support; you may need to retry or request a new payment link
+
+---

@@ -3,11 +3,14 @@ import { StatusBadge } from "./StatusBadge"
 import { fetchInvoice, batchExpireInvoices } from "../utils/soroban"
 import type { Invoice } from "../types"
 import { InvoiceStatus } from "../types"
+import { formatAmount, USDC_DECIMALS } from "../utils/format"
 
 const CONTRACT_ID = import.meta.env.VITE_INVOICE_CONTRACT_ID as string
 
 interface BatchExpireInvoicesProps {
   walletAddress: string | null
+  /** Why the wallet cannot sign right now; disables batch expire when set. */
+  walletNotReadyReason?: string | null
 }
 
 interface ConfirmationState {
@@ -23,7 +26,7 @@ interface ResultSummary {
   errors: { id: string; msg: string }[]
 }
 
-export function BatchExpireInvoices({ walletAddress }: BatchExpireInvoicesProps) {
+export function BatchExpireInvoices({ walletAddress, walletNotReadyReason = null }: BatchExpireInvoicesProps) {
   const [idInput, setIdInput] = useState("")
   const [invoices, setInvoices] = useState<Invoice[]>([])
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -333,15 +336,17 @@ export function BatchExpireInvoices({ walletAddress }: BatchExpireInvoicesProps)
             <button
               className="btn btn--danger"
               onClick={handleShowConfirmation}
-              disabled={submitting || selected.size === 0 || !walletAddress}
+              disabled={submitting || selected.size === 0 || !walletAddress || !!walletNotReadyReason}
               aria-label={`Expire ${selected.size} selected invoices`}
             >
               {submitting
                 ? "Expiring..."
                 : `Batch Expire (${selected.size} selected)`}
             </button>
-            {!walletAddress && (
-              <p className="status-text">Connect wallet to batch expire.</p>
+            {(walletNotReadyReason || !walletAddress) && (
+              <p className="wallet-required" data-testid="wallet-not-ready">
+                {walletNotReadyReason ?? "Connect wallet to batch expire."}
+              </p>
             )}
           </div>
 
@@ -380,7 +385,7 @@ export function BatchExpireInvoices({ walletAddress }: BatchExpireInvoicesProps)
                       </td>
                       <td>#{inv.id}</td>
                       <td className="address-cell">{inv.merchant}</td>
-                      <td>{inv.amount_usdc}</td>
+                      <td>{formatAmount(inv.amount_usdc, USDC_DECIMALS)}</td>
                       <td>{new Date(inv.expires_at * 1000).toLocaleString()}</td>
                       <td>
                         <StatusBadge status={inv.status} />

@@ -1,0 +1,56 @@
+name: CI - Webhook and Rate-Limit Documentation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'comebackhere-backend/src/services/webhooks.ts'
+      - 'comebackhere-backend/src/services/webhook-delivery.ts'
+      - 'comebackhere-backend/src/services/treasury-indexer.ts'
+      - 'comebackhere-backend/src/middleware/rateLimiter.ts'
+      - 'comebackhere-backend/src/middleware/cors.ts'
+      - 'comebackhere-backend/src/lib/env.ts'
+      - 'comebackhere-backend/src/routes/webhook-dead-letters.ts'
+      - 'comebackhere-backend/package.json'
+      - 'backend/src/rate_limiter.rs'
+      - 'docs/webhooks.md'
+      - 'docs/rate-limits.md'
+      - 'docs/api-reference.md'
+      - 'docs/dev-environment.md'
+      - 'docs/threat-model.md'
+      - 'scripts/validate_backend_env.sh'
+      - 'scripts/check_webhook_docs_sync.sh'
+      - 'scripts/check_ratelimit_docs_sync.sh'
+      - '.env.local.example'
+      - '.env.testnet.example'
+      - '.env.mainnet.example'
+      - '.github/workflows/ci-webhook-ratelimit-docs.yml'
+  workflow_call: # called by ci-summary.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-webhook-docs-sync:
+    name: check-webhook-docs-sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify webhook docs match the signing implementation
+        run: ./scripts/check_webhook_docs_sync.sh
+
+  check-ratelimit-docs-sync:
+    name: check-ratelimit-docs-sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify rate-limit docs match the limiter implementation
+        run: ./scripts/check_ratelimit_docs_sync.sh

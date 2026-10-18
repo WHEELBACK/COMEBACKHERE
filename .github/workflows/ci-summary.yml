@@ -30,6 +30,14 @@ jobs:
     name: ci / contract tests
     uses: ./.github/workflows/ci-contracts.yml
 
+  ci-legacy-contracts:
+    name: ci / legacy contract tests
+    uses: ./.github/workflows/ci-legacy-contracts.yml
+
+  ci-legacy-frontend:
+    name: ci / legacy frontend tests
+    uses: ./.github/workflows/ci-legacy-frontend.yml
+
   ci-abi-metadata:
     name: ci / abi metadata
     uses: ./.github/workflows/ci-abi-metadata.yml
@@ -50,9 +58,25 @@ jobs:
     name: ci / backend tests
     uses: ./.github/workflows/backend-tests.yml
 
+  ci-stack-smoke:
+    name: ci / stack smoke test
+    uses: ./.github/workflows/ci-stack-smoke.yml
+
+  ci-webhook-ratelimit-docs:
+    name: ci / webhook and rate-limit docs sync
+    uses: ./.github/workflows/ci-webhook-ratelimit-docs.yml
+
   ci-lint-docs:
     name: ci / lint docs
     uses: ./.github/workflows/lint-docs.yml
+
+  ci-npm-audit:
+    name: ci / npm audit
+    uses: ./.github/workflows/npm-audit.yml
+
+  ci-playwright-e2e:
+    name: ci / playwright e2e
+    uses: ./.github/workflows/playwright-e2e.yml
 
   # ── Aggregator ────────────────────────────────────────────────────────
   # This is the *only* job that needs to be listed in branch protection
@@ -64,12 +88,18 @@ jobs:
     needs:
       - ci-frontend
       - ci-contracts
+      - ci-legacy-contracts
+      - ci-legacy-frontend
       - ci-abi-metadata
       - ci-abi-snapshots
       - ci-coverage
       - ci-error-docs
       - ci-backend-tests
+      - ci-stack-smoke
+      - ci-webhook-ratelimit-docs
       - ci-lint-docs
+      - ci-npm-audit
+      - ci-playwright-e2e
     steps:
       - name: All CI checks passed
         run: echo "All required CI checks passed."

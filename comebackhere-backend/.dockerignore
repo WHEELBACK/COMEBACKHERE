@@ -1,0 +1,24 @@
+# Dependencies and build output are produced inside the image
+node_modules
+dist
+coverage
+
+# Tests are not part of the runtime image
+src/tests
+**/*.test.ts
+**/*.spec.ts
+
+# Local environment files — pass config at runtime (--env-file / -e) instead
+.env
+.env.*
+!.env.example
+
+# Tooling / VCS noise
+.git
+.gitignore
+.vscode
+.idea
+*.log
+npm-debug.log*
+Dockerfile
+.dockerignore

@@ -33,8 +33,29 @@ const options: swaggerJsdoc.Options = {
       schemas: {
         ErrorResponse: {
           type: "object",
+          description: "Standard error envelope returned by every endpoint.",
           properties: {
-            error: { type: "string", example: "Human-readable description of the error." },
+            error: {
+              type: "object",
+              properties: {
+                code: { type: "string", example: "VALIDATION_ERROR", description: "Stable machine-readable error code." },
+                message: { type: "string", example: "settlement_id: Must be a positive integer" },
+                details: {
+                  nullable: true,
+                  description:
+                    "Extra context. For VALIDATION_ERROR: an array of { field, message }. " +
+                    "For CONTRACT_ERROR: { contractCode }. For RATE_LIMITED: { retryAfter }. Otherwise usually null.",
+                  example: [{ field: "settlement_id", message: "Must be a positive integer" }],
+                },
+                correlationId: {
+                  type: "string",
+                  nullable: true,
+                  description: "Same value as the X-Request-Id response header.",
+                  example: "5f1c9a8e-2b7d-4c1e-9a3f-0d2e6b7c8a91",
+                },
+              },
+              required: ["code", "message", "details", "correlationId"],
+            },
           },
           required: ["error"],
         },
@@ -59,15 +80,37 @@ const options: swaggerJsdoc.Options = {
             hold_reason: { type: "string", nullable: true },
           },
         },
+        AnalyticsMetrics: {
+          type: "object",
+          properties: {
+            invoices: { type: "object", additionalProperties: { type: "integer" } },
+            settled_volume: { type: "array", items: { type: "object", properties: { token: { type: "string" }, volume: { type: "number" } } } },
+            open_disputes: { type: "integer" },
+            compliance_blocks: { type: "integer" },
+            settlement_throughput: { type: "integer" },
+          },
+        },
+        AnalyticsSeries: {
+          type: "object",
+          properties: {
+            bucket: { type: "string", enum: ["day", "week", "month"] },
+            timezone: { type: "string", example: "UTC" },
+            start_date: { type: "integer" },
+            end_date: { type: "integer" },
+            series: { type: "array", items: { type: "object", properties: { period: { type: "string" }, count: { type: "integer" }, volume: { type: "number" } } } },
+          },
+        },
       },
     },
     tags: [
       { name: "Health", description: "Service health checks" },
       { name: "Invoices", description: "Invoice creation and status" },
+      { name: "Webhooks", description: "Webhook delivery operations" },
       { name: "Disputes", description: "Dispute management" },
       { name: "Treasury", description: "Settlement and treasury operations" },
       { name: "Invoice Settings", description: "Grace window configuration" },
       { name: "Compliance", description: "Compliance status and audit history" },
+      { name: "Analytics", description: "Protocol analytics and metrics" },
     ],
   },
   // Glob must resolve at spec-generation time; use absolute path

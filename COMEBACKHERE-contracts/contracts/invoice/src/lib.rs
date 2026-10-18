@@ -3,15 +3,29 @@
 mod events;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, String, Symbol,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, IntoVal, String,
+    Symbol, Vec,
 };
 
 /// Maximum length, in bytes, allowed for the optional `reference` field on an invoice.
 const MAX_REFERENCE_LEN: u32 = 64;
 
+/// Maximum number of invoice IDs accepted by a single batch operation.
+const MAX_BATCH_SIZE: u32 = 50;
+
 /// Minimum invoice amount, in stroops (10,000,000 stroops == 1 USDC given 7 decimals).
 const MIN_AMOUNT_USDC: i128 = 10_000_000;
+
+/// Maximum grace window allowed: 90 days (7,776,000 seconds).
+/// Bounds the delay before escrow can be released so funds cannot be locked indefinitely.
+const MAX_GRACE_WINDOW: u64 = 90 * 24 * 60 * 60;
+
+// At five seconds per ledger, these keep state alive for roughly 335 days before
+// renewal and extend it to roughly 359 days after an access or mutation.
+const INSTANCE_TTL_THRESHOLD: u32 = 5_800_000;
+const INSTANCE_TTL_EXTEND_TO: u32 = 6_200_000;
+const INVOICE_TTL_THRESHOLD: u32 = 5_800_000;
+const INVOICE_TTL_EXTEND_TO: u32 = 6_200_000;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -38,6 +52,12 @@ pub enum ContractError {
     /// (e.g. `mark_paids` called on an invoice that is `RefundRequested`,
     /// `Released`, `Cancelled`, or `Expired`).
     InvalidStateTransition = 18,
+    /// A batch operation was called with more than `MAX_BATCH_SIZE` invoice IDs.
+    BatchTooLarge = 19,
+    /// The invoice amount is below the minimum (`MIN_AMOUNT_USDC`).
+    AmountPrecision = 20,
+    /// The `reference` field exceeds `MAX_REFERENCE_LEN` bytes.
+    ReferenceTooLong = 21,
 }
 
 #[contracttype]
@@ -70,6 +90,7 @@ pub struct Invoice {
 #[contracttype]
 pub enum DataKey {
     Admin,
+    PendingAdmin,
     Paused,
     Invoice(u64),
     InvoiceCount,
@@ -77,6 +98,7 @@ pub enum DataKey {
     Nonce(Address, u64),
     TreasuryContract,
     ComplianceContract,
+    CustomerInvoices(Address),
 }
 
 fn admin(env: &Env) -> Address {
@@ -94,8 +116,38 @@ fn check_not_paused(env: &Env) -> Result<(), ContractError> {
     if is_paused(env) {
         Err(ContractError::ContractPaused)
     } else {
+        extend_instance_ttl(env);
         Ok(())
     }
+}
+
+fn extend_instance_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+}
+
+fn extend_invoice_ttl(env: &Env, invoice_id: u64) {
+    env.storage().persistent().extend_ttl(
+        &DataKey::Invoice(invoice_id),
+        INVOICE_TTL_THRESHOLD,
+        INVOICE_TTL_EXTEND_TO,
+    );
+}
+
+fn extend_customer_invoices_ttl(env: &Env, customer: &Address) {
+    env.storage().persistent().extend_ttl(
+        &DataKey::CustomerInvoices(customer.clone()),
+        INVOICE_TTL_THRESHOLD,
+        INVOICE_TTL_EXTEND_TO,
+    );
+}
+
+fn store_invoice(env: &Env, invoice_id: u64, invoice: &Invoice) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Invoice(invoice_id), invoice);
+    extend_invoice_ttl(env, invoice_id);
 }
 
 fn check_admin(env: &Env, addr: &Address) -> Result<(), ContractError> {
@@ -116,6 +168,87 @@ pub struct InvoiceContract;
 
 #[contractimpl]
 impl InvoiceContract {
+    /// Replaces this contract's Wasm while preserving its address and storage.
+    /// The stored admin must authorize the call.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+        let contract_admin = admin(&env);
+        contract_admin.require_auth();
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        events::upgraded(&env, new_wasm_hash);
+        Ok(())
+    }
+
+    /// Initiates a two-step admin transfer by recording `new_admin` as the pending
+    /// admin. The change does **not** take effect until `accept_admin` is called by
+    /// `new_admin`.
+    ///
+    /// Only the current admin may call this. The contract must not be paused.
+    ///
+    /// # Parameters
+    /// - `caller`: Must be the current admin.
+    /// - `new_admin`: The address that will be able to accept admin rights.
+    ///
+    /// # Errors
+    /// - [`ContractError::Unauthorized`] if `caller` is not the current admin.
+    /// - [`ContractError::ContractPaused`] if the contract is currently paused.
+    ///
+    /// # Events
+    /// Emits `admin_transfer_initiated(caller, new_admin)` on success.
+    pub fn transfer_admin(
+        env: Env,
+        caller: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
+        check_not_paused(&env)?;
+        caller.require_auth();
+        check_admin(&env, &caller)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        events::admin_transfer_initiated(&env, &caller, &new_admin);
+        Ok(())
+    }
+
+    /// Completes a two-step admin transfer by accepting the pending nomination.
+    ///
+    /// The caller must be the address previously nominated via `transfer_admin`.
+    /// On success the caller becomes the new admin, the old admin loses all
+    /// privileges immediately, and the `PendingAdmin` key is cleared.
+    ///
+    /// The contract must not be paused.
+    ///
+    /// # Parameters
+    /// - `new_admin`: Must be the pending admin address previously set by `transfer_admin`.
+    ///
+    /// # Errors
+    /// - [`ContractError::Unauthorized`] if `new_admin` does not match the stored
+    ///   `PendingAdmin`, or if no transfer has been initiated.
+    /// - [`ContractError::ContractPaused`] if the contract is currently paused.
+    ///
+    /// # Events
+    /// Emits `admin_transfer_accepted(new_admin)` on success.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        check_not_paused(&env)?;
+        new_admin.require_auth();
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(ContractError::Unauthorized)?;
+        if new_admin != pending {
+            return Err(ContractError::Unauthorized);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Admin, &new_admin);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingAdmin);
+        events::admin_transfer_accepted(&env, &new_admin);
+        Ok(())
+    }
+
     /// Initialises the contract, setting the admin address and default configuration.
     ///
     /// # Parameters
@@ -139,6 +272,7 @@ impl InvoiceContract {
             .persistent()
             .set(&DataKey::InvoiceCount, &0u64);
         env.storage().persistent().set(&DataKey::Paused, &false);
+        extend_instance_ttl(&env);
         Ok(())
     }
 
@@ -200,6 +334,32 @@ impl InvoiceContract {
         }
         env.storage().persistent().set(&nonce_key, &true);
 
+        // Compliance check: reject if merchant or customer is blocked.
+        // Skipped when no compliance contract has been configured so that
+        // local dev and existing test setups keep working without change.
+        if let Some(compliance_addr) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::ComplianceContract)
+        {
+            let merchant_allowed: bool = env.invoke_contract(
+                &compliance_addr,
+                &Symbol::new(&env, "is_allowed"),
+                soroban_sdk::vec![&env, merchant.clone().into_val(&env)],
+            );
+            if !merchant_allowed {
+                return Err(ContractError::AddressBlocked);
+            }
+            let customer_allowed: bool = env.invoke_contract(
+                &compliance_addr,
+                &Symbol::new(&env, "is_allowed"),
+                soroban_sdk::vec![&env, customer.clone().into_val(&env)],
+            );
+            if !customer_allowed {
+                return Err(ContractError::AddressBlocked);
+            }
+        }
+
         let mut count: u64 = env
             .storage()
             .persistent()
@@ -214,7 +374,7 @@ impl InvoiceContract {
         let invoice = Invoice {
             id: count,
             merchant: merchant.clone(),
-            customer,
+            customer: customer.clone(),
             amount,
             token,
             status: InvoiceStatus::Pending,
@@ -222,9 +382,18 @@ impl InvoiceContract {
             expires_at,
             reference,
         };
+        store_invoice(&env, count, &invoice);
+
+        let mut customer_invoices: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CustomerInvoices(customer.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        customer_invoices.push_back(count);
         env.storage()
             .persistent()
-            .set(&DataKey::Invoice(count), &invoice);
+            .set(&DataKey::CustomerInvoices(customer.clone()), &customer_invoices);
+        extend_customer_invoices_ttl(&env, &customer);
 
         events::invoice_created(&env, &merchant, &count);
         Ok(count)
@@ -238,10 +407,13 @@ impl InvoiceContract {
     /// # Errors
     /// - [`ContractError::InvoiceNotFound`] if no invoice with that ID exists.
     pub fn get_invoice(env: Env, invoice_id: u64) -> Result<Invoice, ContractError> {
-        env.storage()
+        let invoice = env
+            .storage()
             .persistent()
             .get(&DataKey::Invoice(invoice_id))
-            .ok_or(ContractError::InvoiceNotFound)
+            .ok_or(ContractError::InvoiceNotFound)?;
+        extend_invoice_ttl(&env, invoice_id);
+        Ok(invoice)
     }
 
     /// Returns only the [`InvoiceStatus`] for a given invoice ID, without fetching
@@ -258,7 +430,18 @@ impl InvoiceContract {
             .persistent()
             .get::<DataKey, Invoice>(&DataKey::Invoice(invoice_id))
             .ok_or(ContractError::InvoiceNotFound)?;
+        extend_invoice_ttl(&env, invoice_id);
         Ok(invoice.status)
+    }
+
+    /// Returns the number of invoices ever created, including cancelled and expired invoices.
+    ///
+    /// This is a read-only view of the counter used to allocate invoice IDs.
+    pub fn get_invoice_count(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::InvoiceCount)
+            .unwrap_or(0)
     }
 
     /// Returns a paginated list of invoice IDs belonging to a given merchant, most useful
@@ -323,6 +506,66 @@ impl InvoiceContract {
         result
     }
 
+    /// Returns a paginated list of invoice IDs addressed to a given customer,
+    /// enabling payers to inspect their invoice history without scanning all IDs.
+    ///
+    /// Follows the same pagination shape and caps as [`Self::get_invoices_by_merchant`].
+    /// Note: Invoices created before this index was introduced will not appear here.
+    ///
+    /// # Parameters
+    /// - `customer`: The customer address to filter invoices by.
+    /// - `start_after`: Number of matching invoices to skip before collecting the page
+    ///   (defaults to 0 when `None`).
+    /// - `limit`: Maximum number of invoice IDs to return. Capped at 100 regardless of the
+    ///   value passed in.
+    ///
+    /// # Returns
+    /// A `Vec<u64>` of invoice IDs addressed to `customer`, oldest first.
+    pub fn get_invoices_by_customer(
+        env: Env,
+        customer: Address,
+        start_after: Option<u32>,
+        limit: u32,
+    ) -> Vec<u64> {
+        const MAX_PAGE_SIZE: u32 = 100;
+        let cap: u32 = if limit > MAX_PAGE_SIZE {
+            MAX_PAGE_SIZE
+        } else {
+            limit
+        };
+        let skip: u32 = start_after.unwrap_or(0);
+
+        let list: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CustomerInvoices(customer.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if list.is_empty() {
+            return Vec::new(&env);
+        }
+
+        extend_customer_invoices_ttl(&env, &customer);
+
+        let mut result: Vec<u64> = Vec::new(&env);
+        let len = list.len();
+        if skip >= len {
+            return result;
+        }
+
+        let end = if skip.saturating_add(cap) < len {
+            skip.saturating_add(cap)
+        } else {
+            len
+        };
+        for i in skip..end {
+            if let Some(id) = list.get(i) {
+                result.push_back(id);
+            }
+        }
+        result
+    }
+
     /// Marks a batch of invoices as [`InvoiceStatus::Paid`] in a single transaction.
     ///
     /// Each invoice in the batch must be in `Pending` status and must not have expired.
@@ -335,6 +578,7 @@ impl InvoiceContract {
     /// # Errors
     /// - [`ContractError::ContractPaused`] if the contract is currently paused.
     /// - [`ContractError::InvoiceNotFound`] if any ID in the batch does not exist.
+    /// - [`ContractError::BatchTooLarge`] if `invoice_ids` has more than `MAX_BATCH_SIZE` IDs.
     /// - [`ContractError::InvalidStateTransition`] if any invoice is `RefundRequested`,
     ///   `Released`, `Cancelled`, or `Expired` — a payment confirmation must never
     ///   silently override a refund already in progress or a closed invoice.
@@ -345,6 +589,9 @@ impl InvoiceContract {
     /// Emits `invoice_paid(invoice_id)` for each successfully marked invoice.
     pub fn mark_paids(env: Env, invoice_ids: Vec<u64>) -> Result<(), ContractError> {
         check_not_paused(&env)?;
+        if invoice_ids.len() > MAX_BATCH_SIZE {
+            return Err(ContractError::BatchTooLarge);
+        }
 
         // Resolve compliance contract once; if set, every invoice
         // customer must be allowed.
@@ -380,8 +627,16 @@ impl InvoiceContract {
                 return Err(ContractError::InvoiceExpired);
             }
 
-            // Compliance check: reject if customer is blocked
+            // Compliance check: reject if customer or merchant is blocked.
             if let Some(ref compliance_addr) = compliance {
+                let merchant_allowed: bool = env.invoke_contract(
+                    compliance_addr,
+                    &Symbol::new(&env, "is_allowed"),
+                    soroban_sdk::vec![&env, invoice.merchant.clone().into_val(&env)],
+                );
+                if !merchant_allowed {
+                    return Err(ContractError::AddressBlocked);
+                }
                 let is_allowed: bool = env.invoke_contract(
                     compliance_addr,
                     &Symbol::new(&env, "is_allowed"),
@@ -393,11 +648,101 @@ impl InvoiceContract {
             }
 
             invoice.status = InvoiceStatus::Paid;
-            env.storage()
-                .persistent()
-                .set(&DataKey::Invoice(id), &invoice);
+            store_invoice(&env, id, &invoice);
             events::invoice_paid(&env, &id);
         }
+        Ok(())
+    }
+
+    /// Pays a `Pending` invoice on-chain by transferring the invoice amount from
+    /// `payer` to the contract itself (held in escrow until `release_escrow` or a
+    /// refund).
+    ///
+    /// This is the on-chain payment path. For backend-confirmed off-chain payments
+    /// use [`Self::mark_paids`] instead — both paths emit the same `invoice_paid`
+    /// event and apply identical state guards, so the indexer does not need to
+    /// distinguish between them.
+    ///
+    /// The `payer` does not have to be the invoice's `customer` field — any address
+    /// may settle an invoice on behalf of the customer. The compliance check (when a
+    /// compliance contract is configured) is applied to `payer`, not the stored
+    /// `customer`.
+    ///
+    /// # Parameters
+    /// - `payer`: The address funding the payment; must authorise this transaction.
+    /// - `invoice_id`: The invoice being paid.
+    ///
+    /// # Errors
+    /// - [`ContractError::ContractPaused`] if the contract is currently paused.
+    /// - [`ContractError::InvoiceNotFound`] if no invoice with that ID exists.
+    /// - [`ContractError::InvalidStateTransition`] if the invoice is in
+    ///   `RefundRequested`, `Released`, `Cancelled`, or `Expired`.
+    /// - [`ContractError::InvoiceAlreadyPaid`] if the invoice is already `Paid`.
+    /// - [`ContractError::InvoiceExpired`] if `expires_at` has passed.
+    /// - [`ContractError::AddressBlocked`] if a compliance contract is configured and
+    ///   `payer` is not allowed.
+    ///
+    /// # Events
+    /// Emits `invoice_paid(invoice_id)` on success.
+    pub fn pay_invoice(env: Env, payer: Address, invoice_id: u64) -> Result<(), ContractError> {
+        check_not_paused(&env)?;
+        payer.require_auth();
+
+        let mut invoice = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Invoice>(&DataKey::Invoice(invoice_id))
+            .ok_or(ContractError::InvoiceNotFound)?;
+
+        // Reuse the same state guards as mark_paids so the state machine stays
+        // consistent regardless of which payment path was used.
+        if matches!(
+            invoice.status,
+            InvoiceStatus::RefundRequested
+                | InvoiceStatus::Released
+                | InvoiceStatus::Cancelled
+                | InvoiceStatus::Expired
+        ) {
+            return Err(ContractError::InvalidStateTransition);
+        }
+        if invoice.status != InvoiceStatus::Pending {
+            return Err(ContractError::InvoiceAlreadyPaid);
+        }
+        if env.ledger().timestamp() >= invoice.expires_at {
+            return Err(ContractError::InvoiceExpired);
+        }
+
+        // Compliance check — skipped when no compliance contract is configured.
+        if let Some(compliance_addr) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::ComplianceContract)
+        {
+            let is_allowed: bool = env.invoke_contract(
+                &compliance_addr,
+                &Symbol::new(&env, "is_allowed"),
+                soroban_sdk::vec![&env, payer.clone().into_val(&env)],
+            );
+            if !is_allowed {
+                return Err(ContractError::AddressBlocked);
+            }
+        }
+
+        // Transfer invoice.amount from payer → this contract (escrow).
+        let _: () = env.invoke_contract(
+            &invoice.token,
+            &Symbol::new(&env, "transfer"),
+            soroban_sdk::vec![
+                &env,
+                payer.into_val(&env),
+                env.current_contract_address().into_val(&env),
+                invoice.amount.into_val(&env),
+            ],
+        );
+
+        invoice.status = InvoiceStatus::Paid;
+        store_invoice(&env, invoice_id, &invoice);
+        events::invoice_paid(&env, &invoice_id);
         Ok(())
     }
 
@@ -431,9 +776,7 @@ impl InvoiceContract {
             // No funds have moved yet — simple cancellation.
             InvoiceStatus::Pending => {
                 invoice.status = InvoiceStatus::Cancelled;
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::Invoice(invoice_id), &invoice);
+                store_invoice(&env, invoice_id, &invoice);
                 events::invoice_cancelled(&env, &invoice_id);
                 Ok(())
             }
@@ -442,9 +785,7 @@ impl InvoiceContract {
             // complete the refund without leaving funds stuck.
             InvoiceStatus::Paid => {
                 invoice.status = InvoiceStatus::RefundRequested;
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::Invoice(invoice_id), &invoice);
+                store_invoice(&env, invoice_id, &invoice);
                 events::invoice_refund_req(&env, &invoice_id);
                 Ok(())
             }
@@ -497,9 +838,7 @@ impl InvoiceContract {
             return Err(ContractError::AlreadyRefundRequested);
         }
         invoice.status = InvoiceStatus::RefundRequested;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Invoice(invoice_id), &invoice);
+        store_invoice(&env, invoice_id, &invoice);
         events::invoice_refund_req(&env, &invoice_id);
         Ok(())
     }
@@ -555,9 +894,7 @@ impl InvoiceContract {
             return Err(ContractError::GraceWindowNotExpired);
         }
         invoice.status = InvoiceStatus::Released;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Invoice(invoice_id), &invoice);
+        store_invoice(&env, invoice_id, &invoice);
         events::escrow_released(&env, &invoice_id);
         Ok(())
     }
@@ -573,11 +910,15 @@ impl InvoiceContract {
     /// # Errors
     /// - [`ContractError::ContractPaused`] if the contract is currently paused.
     /// - [`ContractError::InvoiceNotFound`] if any ID in the batch does not exist.
+    /// - [`ContractError::BatchTooLarge`] if `invoice_ids` has more than `MAX_BATCH_SIZE` IDs.
     ///
     /// # Events
     /// Emits `invoice_expired(invoice_id)` for each invoice that transitions to `Expired`.
     pub fn batch_expire(env: Env, invoice_ids: Vec<u64>) -> Result<(), ContractError> {
         check_not_paused(&env)?;
+        if invoice_ids.len() > MAX_BATCH_SIZE {
+            return Err(ContractError::BatchTooLarge);
+        }
         let now = env.ledger().timestamp();
         for id in invoice_ids.iter() {
             let mut invoice = env
@@ -587,9 +928,7 @@ impl InvoiceContract {
                 .ok_or(ContractError::InvoiceNotFound)?;
             if invoice.status == InvoiceStatus::Pending && now >= invoice.expires_at {
                 invoice.status = InvoiceStatus::Expired;
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::Invoice(id), &invoice);
+                store_invoice(&env, id, &invoice);
                 events::invoice_expired(&env, &id);
             }
         }
@@ -621,6 +960,49 @@ impl InvoiceContract {
     /// Returns `None` if `set_treasury` has not been called yet.
     pub fn get_treasury(env: Env) -> Option<Address> {
         env.storage().persistent().get(&DataKey::TreasuryContract)
+    }
+
+    /// Configures the compliance contract address used to gate invoice creation
+    /// and payment. Admin-only. The contract must not be paused.
+    ///
+    /// When set, `create_invoice` calls `compliance.is_allowed` for both the
+    /// merchant and the customer before creating the invoice. `mark_paids` calls
+    /// `is_allowed` for both the merchant and the customer before marking each
+    /// invoice paid. If either party is blocked the operation returns
+    /// [`ContractError::AddressBlocked`].
+    ///
+    /// Pass `compliance = contract_address` to enable checks. To disable checks
+    /// entirely (e.g. for local dev), call `set_compliance` with the zero address
+    /// or simply never call it — if the key is absent the checks are skipped.
+    ///
+    /// # Parameters
+    /// - `caller`: Must be the contract admin.
+    /// - `compliance`: The address of the deployed compliance contract.
+    ///
+    /// # Errors
+    /// - [`ContractError::ContractPaused`] if the contract is currently paused.
+    /// - [`ContractError::Unauthorized`] if `caller` is not the admin.
+    pub fn set_compliance(
+        env: Env,
+        caller: Address,
+        compliance: Address,
+    ) -> Result<(), ContractError> {
+        check_not_paused(&env)?;
+        check_admin(&env, &caller)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::ComplianceContract, &compliance);
+        Ok(())
+    }
+
+    /// Returns the currently configured compliance contract address, if any.
+    ///
+    /// Returns `None` if `set_compliance` has not been called yet.
+    /// When `None`, compliance checks are skipped.
+    pub fn get_compliance(env: Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ComplianceContract)
     }
 
     /// Raises a dispute on an invoice via a cross-contract call to the treasury.
@@ -698,6 +1080,7 @@ impl InvoiceContract {
     pub fn pause(env: Env, caller: Address) -> Result<(), ContractError> {
         check_admin(&env, &caller)?;
         env.storage().persistent().set(&DataKey::Paused, &true);
+        extend_instance_ttl(&env);
         events::contract_paused(&env);
         Ok(())
     }
@@ -715,6 +1098,7 @@ impl InvoiceContract {
     pub fn unpause(env: Env, caller: Address) -> Result<(), ContractError> {
         check_admin(&env, &caller)?;
         env.storage().persistent().set(&DataKey::Paused, &false);
+        extend_instance_ttl(&env);
         events::contract_unpaused(&env);
         Ok(())
     }
@@ -725,17 +1109,30 @@ impl InvoiceContract {
     /// # Parameters
     /// - `caller`: Must be the contract admin.
     /// - `window`: Grace window in seconds measured from `invoice.created_at`.
-    ///   Defaults to 86 400 (24 h) on initialisation.
+    ///   Defaults to 86 400 (24 h) on initialisation. Capped at [`MAX_GRACE_WINDOW`].
     ///
     /// # Errors
     /// - [`ContractError::ContractPaused`] if the contract is currently paused.
     /// - [`ContractError::Unauthorized`] if `caller` is not the admin.
+    /// - [`ContractError::GraceWindowTooLarge`] if `window` exceeds [`MAX_GRACE_WINDOW`].
+    ///
+    /// # Events
+    /// Emits `grace_window_updated(old_window, new_window)` on success.
     pub fn set_grace_window(env: Env, caller: Address, window: u64) -> Result<(), ContractError> {
         check_not_paused(&env)?;
         check_admin(&env, &caller)?;
+        if window > MAX_GRACE_WINDOW {
+            return Err(ContractError::GraceWindowTooLarge);
+        }
+        let old_window = env
+            .storage()
+            .persistent()
+            .get(&DataKey::GraceWindow)
+            .unwrap_or(86400);
         env.storage()
             .persistent()
             .set(&DataKey::GraceWindow, &window);
+        events::grace_window_updated(&env, &old_window, &window);
         Ok(())
     }
 
@@ -768,6 +1165,21 @@ mod tests {
     }
 
     #[test]
+    fn test_get_invoice_count_tracks_created_invoices() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        assert_eq!(client.get_invoice_count(), 0);
+        client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &1, &None);
+        client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &2, &None);
+
+        assert_eq!(client.get_invoice_count(), 2);
+    }
+
+    #[test]
     fn test_create_invoice_with_unique_nonce_succeeds() {
         let (env, cid, _admin) = setup_contract(1000);
         let client = InvoiceContractClient::new(&env, &cid);
@@ -776,6 +1188,30 @@ mod tests {
         let token = Address::generate(&env);
         let invoice_id = client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &5000, &1, &None);
         assert_eq!(invoice_id, 1);
+    }
+
+    #[test]
+    fn test_invoice_storage_remains_readable_after_many_ledgers() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+        let invoice_id = client.create_invoice(
+            &merchant,
+            &customer,
+            &10_000_000i128,
+            &token,
+            &5000,
+            &1,
+            &None,
+        );
+
+        env.ledger().with_mut(|li| {
+            li.sequence_number = INVOICE_TTL_EXTEND_TO - INVOICE_TTL_THRESHOLD + 1;
+        });
+        assert_eq!(client.get_invoice(&invoice_id).id, invoice_id);
+        assert_eq!(client.get_invoice_status(&invoice_id), InvoiceStatus::Pending);
     }
 
     #[test]
@@ -1269,4 +1705,448 @@ mod tests {
         let res = client.try_mark_paids(&soroban_sdk::vec![&env, id]);
         assert_eq!(res, Err(Ok(ContractError::InvoiceAlreadyPaid)));
     }
+
+    // ── two-step admin transfer tests ────────────────────────────────────────
+
+    /// Happy path: current admin initiates transfer, new admin accepts.
+    /// After acceptance the new admin is effective and the old admin loses privileges.
+    #[test]
+    fn test_transfer_and_accept_admin_full_flow() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let new_admin = Address::generate(&env);
+
+        // Step 1: current admin nominates new_admin
+        client.transfer_admin(&admin, &new_admin);
+
+        // Step 2: new_admin accepts
+        client.accept_admin(&new_admin);
+
+        // new_admin can now exercise admin privileges (e.g. pause)
+        client.pause(&new_admin);
+
+        // old admin can no longer pause
+        let res = client.try_unpause(&admin);
+        assert_eq!(
+            res,
+            Err(Ok(ContractError::Unauthorized)),
+            "old admin must lose privileges immediately after accept_admin"
+        );
+    }
+
+    /// transfer_admin must reject a caller that is not the current admin.
+    #[test]
+    fn test_transfer_admin_unauthorized_caller_fails() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let non_admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        let res = client.try_transfer_admin(&non_admin, &new_admin);
+        assert_eq!(res, Err(Ok(ContractError::Unauthorized)));
+    }
+
+    /// accept_admin must reject any address other than the pending admin.
+    #[test]
+    fn test_accept_admin_wrong_caller_fails() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+
+        client.transfer_admin(&admin, &new_admin);
+
+        let res = client.try_accept_admin(&impostor);
+        assert_eq!(
+            res,
+            Err(Ok(ContractError::Unauthorized)),
+            "impostor must not be able to accept a pending admin transfer"
+        );
+    }
+
+    /// accept_admin must return Unauthorized when no transfer is pending.
+    #[test]
+    fn test_accept_admin_with_no_pending_transfer_fails() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let random = Address::generate(&env);
+
+        let res = client.try_accept_admin(&random);
+        assert_eq!(
+            res,
+            Err(Ok(ContractError::Unauthorized)),
+            "accept_admin without a prior transfer_admin must fail"
+        );
+    }
+
+    /// transfer_admin must fail when the contract is paused.
+    #[test]
+    fn test_transfer_admin_when_paused_fails() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let new_admin = Address::generate(&env);
+
+        client.pause(&admin);
+
+        let res = client.try_transfer_admin(&admin, &new_admin);
+        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    /// accept_admin must fail when the contract is paused.
+    #[test]
+    fn test_accept_admin_when_paused_fails() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let new_admin = Address::generate(&env);
+
+        client.transfer_admin(&admin, &new_admin);
+        client.pause(&admin);
+
+        let res = client.try_accept_admin(&new_admin);
+        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    /// transfer_admin emits admin_transfer_initiated event.
+    #[test]
+    fn test_transfer_admin_emits_event() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let new_admin = Address::generate(&env);
+
+        client.transfer_admin(&admin, &new_admin);
+
+        let all_events = env.events().all();
+        assert!(
+            all_events
+                .iter()
+                .any(|ev| ev.0 == (cid.clone(), "admin_transfer_initiated".into())),
+            "admin_transfer_initiated event must be emitted"
+        );
+    }
+
+    /// accept_admin emits admin_transfer_accepted event.
+    #[test]
+    fn test_accept_admin_emits_event() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let new_admin = Address::generate(&env);
+
+        client.transfer_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        let all_events = env.events().all();
+        assert!(
+            all_events
+                .iter()
+                .any(|ev| ev.0 == (cid.clone(), "admin_transfer_accepted".into())),
+            "admin_transfer_accepted event must be emitted"
+        );
+    }
+
+    /// Pending admin is cleared after acceptance — a second accept_admin call fails.
+    #[test]
+    fn test_accept_admin_clears_pending_after_acceptance() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let new_admin = Address::generate(&env);
+
+        client.transfer_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        // PendingAdmin key should be gone; second accept must fail.
+        let res = client.try_accept_admin(&new_admin);
+        assert_eq!(
+            res,
+            Err(Ok(ContractError::Unauthorized)),
+            "PendingAdmin must be cleared after a successful accept_admin"
+        );
+    }
+
+    /// The old admin cannot use admin-gated functions after transfer is accepted.
+    /// Tests pause, unpause, set_grace_window, and set_treasury.
+    #[test]
+    fn test_old_admin_loses_all_privileges_after_acceptance() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let new_admin = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        client.transfer_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        assert_eq!(
+            client.try_pause(&admin),
+            Err(Ok(ContractError::Unauthorized)),
+            "old admin must not be able to pause"
+        );
+        assert_eq!(
+            client.try_set_grace_window(&admin, &7200u64),
+            Err(Ok(ContractError::Unauthorized)),
+            "old admin must not be able to set_grace_window"
+        );
+        assert_eq!(
+            client.try_set_treasury(&admin, &treasury),
+            Err(Ok(ContractError::Unauthorized)),
+            "old admin must not be able to set_treasury"
+        );
+    }
+
+    // ── compliance integration tests ─────────────────────────────────────────
+
+    /// A minimal compliance stub: each address is individually allowed or blocked
+    /// via in-test storage writes, and `is_allowed` checks that flag.
+    mod compliance_stub {
+        use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+
+        #[contracttype]
+        pub enum StubKey {
+            Allowed(Address),
+        }
+
+        #[contract]
+        pub struct ComplianceStub;
+
+        #[contractimpl]
+        impl ComplianceStub {
+            pub fn allow(e: Env, addr: Address) {
+                e.storage()
+                    .instance()
+                    .set(&StubKey::Allowed(addr), &true);
+            }
+
+            pub fn block(e: Env, addr: Address) {
+                e.storage()
+                    .instance()
+                    .set(&StubKey::Allowed(addr), &false);
+            }
+
+            pub fn is_allowed(e: Env, addr: Address) -> bool {
+                e.storage()
+                    .instance()
+                    .get(&StubKey::Allowed(addr))
+                    .unwrap_or(false)
+            }
+        }
+    }
+
+    use compliance_stub::{ComplianceStub, ComplianceStubClient};
+
+    /// Helper: register the compliance stub and allow both merchant and customer by default.
+    fn setup_with_compliance(
+        ts: u64,
+    ) -> (Env, Address, Address, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let invoice_cid = env.register(InvoiceContract, ());
+        let compliance_cid = env.register(ComplianceStub, ());
+
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+        invoice_client.initialize(&admin);
+        invoice_client.set_compliance(&admin, &compliance_cid);
+
+        env.ledger().with_mut(|li| li.timestamp = ts);
+
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let compliance_client = ComplianceStubClient::new(&env, &compliance_cid);
+        // Allow both parties by default so individual tests can selectively block one.
+        compliance_client.allow(&merchant);
+        compliance_client.allow(&customer);
+
+        (env, invoice_cid, compliance_cid, admin, merchant, customer)
+    }
+
+    /// set_compliance must be admin-only.
+    #[test]
+    fn test_set_compliance_admin_only() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let non_admin = Address::generate(&env);
+        let compliance_addr = Address::generate(&env);
+
+        let res = client.try_set_compliance(&non_admin, &compliance_addr);
+        assert_eq!(res, Err(Ok(ContractError::Unauthorized)));
+    }
+
+    /// set_compliance must fail when the contract is paused.
+    #[test]
+    fn test_set_compliance_when_paused_fails() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let compliance_addr = Address::generate(&env);
+
+        client.pause(&admin);
+        let res = client.try_set_compliance(&admin, &compliance_addr);
+        assert_eq!(res, Err(Ok(ContractError::ContractPaused)));
+    }
+
+    /// get_compliance returns None before set_compliance is called.
+    #[test]
+    fn test_get_compliance_returns_none_when_not_configured() {
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        assert_eq!(client.get_compliance(), None);
+    }
+
+    /// get_compliance returns the address after set_compliance.
+    #[test]
+    fn test_get_compliance_returns_configured_address() {
+        let (env, cid, admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let compliance_addr = Address::generate(&env);
+
+        client.set_compliance(&admin, &compliance_addr);
+        assert_eq!(client.get_compliance(), Some(compliance_addr));
+    }
+
+    /// A blocked merchant cannot create an invoice.
+    #[test]
+    fn test_blocked_merchant_cannot_create_invoice() {
+        let (env, invoice_cid, compliance_cid, _admin, merchant, customer) =
+            setup_with_compliance(1000);
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+        let compliance_client = ComplianceStubClient::new(&env, &compliance_cid);
+        let token = Address::generate(&env);
+
+        compliance_client.block(&merchant);
+
+        let res = invoice_client.try_create_invoice(
+            &merchant,
+            &customer,
+            &10_000_000i128,
+            &token,
+            &9999,
+            &1,
+            &None,
+        );
+        assert_eq!(res, Err(Ok(ContractError::AddressBlocked)));
+    }
+
+    /// A blocked customer cannot be the payer on a new invoice.
+    #[test]
+    fn test_blocked_customer_cannot_create_invoice() {
+        let (env, invoice_cid, compliance_cid, _admin, merchant, customer) =
+            setup_with_compliance(1000);
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+        let compliance_client = ComplianceStubClient::new(&env, &compliance_cid);
+        let token = Address::generate(&env);
+
+        compliance_client.block(&customer);
+
+        let res = invoice_client.try_create_invoice(
+            &merchant,
+            &customer,
+            &10_000_000i128,
+            &token,
+            &9999,
+            &1,
+            &None,
+        );
+        assert_eq!(res, Err(Ok(ContractError::AddressBlocked)));
+    }
+
+    /// A blocked customer is rejected at mark_paids even if they were allowed at
+    /// invoice creation time (e.g. blocked after the invoice was created).
+    #[test]
+    fn test_blocked_customer_blocked_at_mark_paids() {
+        let (env, invoice_cid, compliance_cid, _admin, merchant, customer) =
+            setup_with_compliance(1000);
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+        let compliance_client = ComplianceStubClient::new(&env, &compliance_cid);
+        let token = Address::generate(&env);
+
+        // Invoice is created while both are allowed.
+        let invoice_id = invoice_client.create_invoice(
+            &merchant,
+            &customer,
+            &10_000_000i128,
+            &token,
+            &9999,
+            &1,
+            &None,
+        );
+
+        // Customer is blocked after creation.
+        compliance_client.block(&customer);
+
+        let res = invoice_client.try_mark_paids(&soroban_sdk::vec![&env, invoice_id]);
+        assert_eq!(res, Err(Ok(ContractError::AddressBlocked)));
+
+        // Invoice must remain Pending — the block must not leave it in a bad state.
+        let invoice = invoice_client.get_invoice(&invoice_id);
+        assert_eq!(invoice.status, InvoiceStatus::Pending);
+    }
+
+    /// A blocked merchant is rejected at mark_paids even if allowed at creation time.
+    #[test]
+    fn test_blocked_merchant_blocked_at_mark_paids() {
+        let (env, invoice_cid, compliance_cid, _admin, merchant, customer) =
+            setup_with_compliance(1000);
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+        let compliance_client = ComplianceStubClient::new(&env, &compliance_cid);
+        let token = Address::generate(&env);
+
+        let invoice_id = invoice_client.create_invoice(
+            &merchant,
+            &customer,
+            &10_000_000i128,
+            &token,
+            &9999,
+            &1,
+            &None,
+        );
+
+        compliance_client.block(&merchant);
+
+        let res = invoice_client.try_mark_paids(&soroban_sdk::vec![&env, invoice_id]);
+        assert_eq!(res, Err(Ok(ContractError::AddressBlocked)));
+
+        let invoice = invoice_client.get_invoice(&invoice_id);
+        assert_eq!(invoice.status, InvoiceStatus::Pending);
+    }
+
+    /// When no compliance contract is configured the checks are skipped entirely —
+    /// existing test setups and local dev keep working without any change.
+    #[test]
+    fn test_no_compliance_contract_skips_checks() {
+        // setup_contract does NOT call set_compliance.
+        let (env, cid, _admin) = setup_contract(1000);
+        let client = InvoiceContractClient::new(&env, &cid);
+        let merchant = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        // Both create and mark_paids must succeed with no compliance address set.
+        let invoice_id =
+            client.create_invoice(&merchant, &customer, &10_000_000i128, &token, &9999, &1, &None);
+        client.mark_paids(&soroban_sdk::vec![&env, invoice_id]);
+
+        let invoice = client.get_invoice(&invoice_id);
+        assert_eq!(invoice.status, InvoiceStatus::Paid);
+    }
+
+    /// Allowed merchant and customer pass both checkpoints without error.
+    #[test]
+    fn test_allowed_parties_can_create_and_pay_invoice() {
+        let (env, invoice_cid, _compliance_cid, _admin, merchant, customer) =
+            setup_with_compliance(1000);
+        let invoice_client = InvoiceContractClient::new(&env, &invoice_cid);
+        let token = Address::generate(&env);
+
+        let invoice_id = invoice_client.create_invoice(
+            &merchant,
+            &customer,
+            &10_000_000i128,
+            &token,
+            &9999,
+            &1,
+            &None,
+        );
+        invoice_client.mark_paids(&soroban_sdk::vec![&env, invoice_id]);
+
+        let invoice = invoice_client.get_invoice(&invoice_id);
+        assert_eq!(invoice.status, InvoiceStatus::Paid);
+    }
+}
 }

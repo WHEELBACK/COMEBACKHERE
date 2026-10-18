@@ -27,3 +27,14 @@ repos:
         entry: scripts/lint-docs.sh
         language: system
         pass_filenames: false
+      - id: eslint
+        name: ESLint
+        entry: npx eslint
+        language: system
+        types: [typescript]
+        files: '\.(ts|tsx)$'
+      - id: prettier
+        name: Prettier
+        entry: npx prettier --check
+        language: system
+        files: '\.(ts|tsx)$'

@@ -25,11 +25,19 @@ coverage/
 **/*.snap.bak
 test-results/
 playwright-report/
+**/playwright-report/
+**/test-results/
 coverage/
 .nyc_output/
 **/test-results/
 **/allure-results/
 **/allure-report/
+
+# Vitest / Jest HTML reports and coverage artefacts
+vitest-report/
+html/
+lcov.info
+*.lcov
 
 # Logs
 *.log
@@ -43,25 +51,27 @@ lerna-debug.log*
 .DS_Store
 Thumbs.db
 .vscode/settings.json
+.vscode/launch.json
 .idea/
 *.iml
-.project
-.classpath
-.settings/
+*.iws
 
-# TypeScript cache
+# TypeScript cache / incremental build info
 *.tsbuildinfo
 **/*.tsbuildinfo
 
 # Vite cache
 .vite/
+**/.vite/
 .vite-inspect/
+**/.vite/
 
 # Vitest / Jest output
 vitest-report/
 html/
 lcov.info
-jest-html-reporters-attach/
+vitest-coverage/
+**/.vitest-cache/
 
 # Lock files — not committed (each sub-package manages its own lock locally)
 package-lock.json
@@ -80,35 +90,24 @@ Cargo.lock
 *.local
 .turbo/
 .parcel-cache/
+.cache/
 
-# Vitest extended outputs
-vitest.config.ts.timestamp-*
-**/*.test-d.ts
+# Playwright state
+playwright/.auth/
+playwright-report/
 
 # Editor session files
 *.swp
 *.swo
 *~
 
-# Temporary / scratch files
-*.tmp
-*.temp
-*.bak
-*.orig
-*.rej
+# Coverage reports
+comebackhere-frontend/coverage/
+frontend/coverage/
+comebackhere-backend/coverage/
 
-# OS-generated metadata
-.DS_Store
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
+# Playwright state
+playwright/.auth/
 
-# Debug / profiling artifacts
-*.cpuprofile
-*.heapprofile
-*.heapsnapshot
-
-# Soroban / Stellar local dev artifacts
-.soroban/
-**/identity/
-wasm-pack.log
+# Playwright screenshots (generated during e2e runs)
+**/e2e/screenshots/

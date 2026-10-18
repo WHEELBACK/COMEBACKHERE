@@ -143,8 +143,8 @@ describe("InvoicePayment — invoice loaded", () => {
     mockUseInvoice.invoice = mockInvoice
     render(<InvoicePayment />)
     expect(screen.getAllByText("42").length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText("1000")).toBeInTheDocument()
-    expect(screen.getByText("1050")).toBeInTheDocument()
+    expect(screen.getByText("0.0001 USDC")).toBeInTheDocument()
+    expect(screen.getByText("0.000105 USDC")).toBeInTheDocument()
   })
 
   it("shows countdown timer when invoice has expires_at", () => {
@@ -356,5 +356,49 @@ describe("InvoicePayment — connect button disabled while connecting", () => {
     const btn = screen.getByRole("button", { name: /connect wallet/i })
     expect(btn).toBeDisabled()
     expect(btn).toHaveTextContent("Connecting...")
+  })
+})
+
+describe("InvoicePayment — wallet not ready", () => {
+  const WRONG_NETWORK_REASON = "Your wallet is on the wrong network. Switch Freighter to the expected network."
+
+  it("disables pay and explains why when the wallet is on the wrong network", () => {
+    mockUseWallet.connected = true
+    mockUseWallet.address = "GDR7WUDWIKWVBCUBVYLOGT3TJF5FGNQU5U7TACDDA2ZIQUETGGUET5XT"
+    mockUseWallet.notReadyReason = WRONG_NETWORK_REASON
+    mockUseInvoice.invoice = mockInvoice
+    render(<InvoicePayment />)
+
+    const pay = screen.getByRole("button", { name: /pay invoice #42/i })
+    expect(pay).toBeDisabled()
+    expect(pay).toHaveAttribute("aria-describedby", "payment-wallet-reason")
+    expect(screen.getByTestId("wallet-not-ready")).toHaveTextContent(WRONG_NETWORK_REASON)
+  })
+
+  it("disables cancel for the merchant when the wallet is not ready", () => {
+    mockUseWallet.connected = true
+    mockUseWallet.address = mockInvoice.merchant
+    mockUseWallet.notReadyReason = WRONG_NETWORK_REASON
+    mockUseInvoice.invoice = mockInvoice
+    render(<InvoicePayment />)
+    expect(screen.getByRole("button", { name: "Cancel Invoice" })).toBeDisabled()
+  })
+
+  it("explains why alongside the connect button when disconnected", () => {
+    mockUseWallet.notReadyReason = "Connect your wallet to sign transactions."
+    mockUseInvoice.invoice = mockInvoice
+    render(<InvoicePayment />)
+    expect(screen.getByRole("button", { name: /connect wallet/i })).toBeInTheDocument()
+    expect(screen.getByTestId("wallet-not-ready")).toHaveTextContent("Connect your wallet to sign transactions.")
+  })
+
+  it("enables pay with no explanation when the wallet is ready", () => {
+    mockUseWallet.connected = true
+    mockUseWallet.address = "GDR7WUDWIKWVBCUBVYLOGT3TJF5FGNQU5U7TACDDA2ZIQUETGGUET5XT"
+    mockUseWallet.notReadyReason = null
+    mockUseInvoice.invoice = mockInvoice
+    render(<InvoicePayment />)
+    expect(screen.getByRole("button", { name: /pay invoice #42/i })).toBeEnabled()
+    expect(screen.queryByTestId("wallet-not-ready")).not.toBeInTheDocument()
   })
 })

@@ -306,3 +306,22 @@ describe("RefundRequest — submit flow", () => {
     expect(screen.queryByLabelText(/reason for refund/i)).not.toBeInTheDocument()
   })
 })
+
+describe("RefundRequest — wallet not ready", () => {
+  it("disables the request with an explanation even with a valid reason", async () => {
+    const user = userEvent.setup()
+    render(
+      <RefundRequest
+        invoice={paidInvoice}
+        walletAddress={PAYER_ADDRESS}
+        walletNotReadyReason="Your wallet is locked. Unlock Freighter and try again."
+        onRequestRefund={vi.fn()}
+      />
+    )
+    await user.type(screen.getByLabelText(/reason for refund/i), "This is a valid reason for refund")
+    const button = screen.getByRole("button", { name: /request refund for invoice #42/i })
+    expect(button).toBeDisabled()
+    expect(button).toHaveAttribute("aria-describedby", "refund-wallet-reason")
+    expect(screen.getByTestId("wallet-not-ready")).toHaveTextContent(/wallet is locked/)
+  })
+})

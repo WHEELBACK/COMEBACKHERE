@@ -1,5 +1,6 @@
-import { useRef, useEffect, useCallback, useState } from 'react'
-import { renderQRToCanvas, downloadQRAsPNG, getQRDataURL } from '../utils/qrcode'
+import { useRef, useEffect, useCallback, useState } from "react"
+import { renderQRToCanvas, downloadQRAsPNG, getQRDataURL } from "../utils/qrcode"
+import { useT } from "../i18n"
 
 interface InvoiceQRCodeProps {
   invoiceId: string
@@ -9,26 +10,26 @@ interface InvoiceQRCodeProps {
 function getPaymentUrl(invoiceId: string, baseUrl?: string): string {
   const base = baseUrl || `${window.location.origin}${window.location.pathname}`
   const url = new URL(base)
-  url.searchParams.set('invoiceId', invoiceId)
+  url.searchParams.set("invoiceId", invoiceId)
   return url.toString()
 }
 
-/**
- * Convert data URL to Blob for Web Share API
- */
+/** Convert data URL to Blob for Web Share API */
 async function dataURLToBlob(dataURL: string): Promise<Blob> {
   const response = await fetch(dataURL)
   return response.blob()
 }
 
 export function InvoiceQRCode({ invoiceId, paymentBaseUrl }: InvoiceQRCodeProps) {
+  const t = useT()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [isSharing, setIsSharing] = useState(false)
   const [shareError, setShareError] = useState<string | null>(null)
   const [showShareFallback, setShowShareFallback] = useState(false)
 
   const paymentUrl = getPaymentUrl(invoiceId, paymentBaseUrl)
-  const filename = `invoice-${invoiceId}-qr.png`
+  // Issue #725: file named invoice-<id>.png
+  const filename = `invoice-${invoiceId}.png`
 
   useEffect(() => {
     if (canvasRef.current) {
@@ -36,16 +37,41 @@ export function InvoiceQRCode({ invoiceId, paymentBaseUrl }: InvoiceQRCodeProps)
     }
   }, [paymentUrl])
 
+  /**
+   * Issue #725 — Download the QR code as a PNG named invoice-<id>.png.
+   * Uses the canvas already rendered on screen (avoids a second render).
+   * Falls back to the util helper which creates its own off-screen canvas.
+   */
   const handleDownload = useCallback(() => {
-    downloadQRAsPNG(paymentUrl, filename)
     setShareError(null)
+
+    if (canvasRef.current) {
+      // Prefer reading the already-rendered canvas at its current resolution
+      canvasRef.current.toBlob((blob) => {
+        if (!blob) {
+          // Fallback to the util helper
+          downloadQRAsPNG(paymentUrl, filename)
+          return
+        }
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement("a")
+        link.download = filename
+        link.href = url
+        link.setAttribute("aria-hidden", "true")
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        URL.revokeObjectURL(url)
+      }, "image/png")
+    } else {
+      downloadQRAsPNG(paymentUrl, filename)
+    }
   }, [paymentUrl, filename])
 
   const handleShare = useCallback(async () => {
     setShareError(null)
     setIsSharing(true)
 
-    // Check if Web Share API is supported
     if (!navigator.share) {
       setShowShareFallback(true)
       setIsSharing(false)
@@ -55,11 +81,9 @@ export function InvoiceQRCode({ invoiceId, paymentBaseUrl }: InvoiceQRCodeProps)
     try {
       const dataURL = getQRDataURL(paymentUrl, 10, 4)
       const blob = await dataURLToBlob(dataURL)
-      const file = new File([blob], filename, { type: 'image/png' })
+      const file = new File([blob], filename, { type: "image/png" })
 
-      // Check if canShare is supported for files
       if (navigator.canShare && !navigator.canShare({ files: [file] })) {
-        // Fallback to copying URL if file sharing isn't supported
         await navigator.share({
           title: `Invoice ${invoiceId} QR Code`,
           text: `Scan this QR code to pay Invoice #${invoiceId}`,
@@ -72,7 +96,6 @@ export function InvoiceQRCode({ invoiceId, paymentBaseUrl }: InvoiceQRCodeProps)
           text: `Scan this QR code to pay Invoice #${invoiceId}`,
         })
       } else {
-        // Fallback for browsers that don't support file sharing
         await navigator.share({
           title: `Invoice ${invoiceId} QR Code`,
           text: `Scan this QR code to pay Invoice #${invoiceId}`,
@@ -82,15 +105,15 @@ export function InvoiceQRCode({ invoiceId, paymentBaseUrl }: InvoiceQRCodeProps)
       setShowShareFallback(false)
     } catch (error: unknown) {
       const errorMessage =
-        error instanceof Error && error.name !== 'AbortError'
+        error instanceof Error && error.name !== "AbortError"
           ? error.message
-          : 'Share failed or was cancelled'
+          : t("qrCode.shareError")
       setShareError(errorMessage)
       setShowShareFallback(true)
     } finally {
       setIsSharing(false)
     }
-  }, [paymentUrl, filename, invoiceId])
+  }, [paymentUrl, filename, invoiceId, t])
 
   const handleCopyUrl = useCallback(() => {
     navigator.clipboard
@@ -99,30 +122,36 @@ export function InvoiceQRCode({ invoiceId, paymentBaseUrl }: InvoiceQRCodeProps)
         setShareError(null)
       })
       .catch(() => {
-        setShareError('Failed to copy URL')
+        setShareError(t("qrCode.shareError"))
       })
-  }, [paymentUrl])
+  }, [paymentUrl, t])
 
-  const supportsWebShare = typeof navigator !== 'undefined' && !!navigator.share
+  const supportsWebShare = typeof navigator !== "undefined" && !!navigator.share
 
   return (
     <div className="qr-code-section">
-      <h3 className="qr-code-section__title">Payment QR Code</h3>
+      <h3 className="qr-code-section__title">{t("qrCode.title")}</h3>
       <p className="qr-code-section__desc">
-        Scan this QR code to open the payment page for Invoice #{invoiceId}
+        {t("qrCode.description", { id: invoiceId })}
       </p>
       <div className="qr-code-section__canvas-wrap">
         <canvas ref={canvasRef} className="qr-code-section__canvas" />
       </div>
 
       <div className="qr-code-section__actions">
+        {/*
+          Issue #725 — keyboard-accessible download button with a clear label.
+          Named invoice-<id>.png via the `filename` variable above.
+        */}
         <button
           className="btn btn--secondary qr-code-section__download"
           onClick={handleDownload}
           type="button"
-          title="Download QR code as PNG image"
+          aria-label={t("qrCode.downloadAriaLabel")}
+          title={t("qrCode.downloadTitle")}
+          data-testid="qr-download-btn"
         >
-          📥 Download QR Code
+          📥 {t("qrCode.downloadButton")}
         </button>
 
         {supportsWebShare && (
@@ -131,9 +160,9 @@ export function InvoiceQRCode({ invoiceId, paymentBaseUrl }: InvoiceQRCodeProps)
             onClick={handleShare}
             disabled={isSharing}
             type="button"
-            title="Share QR code using native share menu"
+            title={t("qrCode.share")}
           >
-            {isSharing ? '⏳ Sharing...' : '📤 Share'}
+            {isSharing ? `⏳ ${t("qrCode.sharing")}` : `📤 ${t("qrCode.share")}`}
           </button>
         )}
 
@@ -142,9 +171,9 @@ export function InvoiceQRCode({ invoiceId, paymentBaseUrl }: InvoiceQRCodeProps)
             className="btn btn--secondary qr-code-section__copy"
             onClick={handleCopyUrl}
             type="button"
-            title="Copy payment URL to clipboard"
+            title={t("qrCode.copyUrl")}
           >
-            🔗 Copy URL
+            🔗 {t("qrCode.copyUrl")}
           </button>
         )}
       </div>
@@ -156,7 +185,9 @@ export function InvoiceQRCode({ invoiceId, paymentBaseUrl }: InvoiceQRCodeProps)
       )}
 
       <details className="qr-code-section__details">
-        <summary className="qr-code-section__summary">Show Payment URL</summary>
+        <summary className="qr-code-section__summary">
+          {t("qrCode.showPaymentUrl")}
+        </summary>
         <p className="qr-code-section__url">{paymentUrl}</p>
       </details>
     </div>

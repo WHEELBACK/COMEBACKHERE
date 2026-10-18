@@ -11,6 +11,7 @@
  * - dispatchWebhook signature matches what verifySignature accepts
  * - dispatchWebhook throws when no signing secret is configured
  * - dispatchWebhook result includes ok/status from the upstream response
+ * - dispatchWebhook sends exactly the headers docs/webhooks.md documents
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
@@ -20,6 +21,7 @@ import {
   verifySignature,
   dispatchWebhook,
   WEBHOOK_SIGNATURE_HEADER,
+  type WebhookPayload,
 } from "../services/webhooks.js"
 
 const TEST_SECRET = "super-secret-hmac-key-at-least-32-chars!"
@@ -278,5 +280,95 @@ describe("dispatchWebhook", () => {
     )
 
     expect(capturedContentType).toBe("application/json")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Header contract
+//
+// These pin the exact claims docs/webhooks.md makes about the live dispatch
+// path. If dispatchWebhook starts (or stops) sending a header, this fails and
+// the docs must be updated to match.
+// ---------------------------------------------------------------------------
+
+describe("dispatchWebhook — header contract", () => {
+  const capture = async (payload: WebhookPayload): Promise<Record<string, string>> => {
+    const captured: Record<string, string> = {}
+    const mockFetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      for (const [k, v] of Object.entries((init?.headers ?? {}) as Record<string, string>)) {
+        captured[k.toLowerCase()] = v
+      }
+      return Promise.resolve(new Response(null, { status: 200 }))
+    })
+
+    await dispatchWebhook(TEST_URL, payload, TEST_SECRET, mockFetch as unknown as typeof fetch)
+    return captured
+  }
+
+  it("sends exactly Content-Type and the signature header", async () => {
+    const headers = await capture({ event: "settlement_executed", settlement_id: 1 })
+    expect(Object.keys(headers).sort()).toEqual(["content-type", "x-comebackhere-signature"])
+  })
+
+  it("does not send X-Idempotency-Key", async () => {
+    // docs/webhooks.md documents that the live path sends no idempotency key,
+    // so receivers must build their own dedupe key.
+    const headers = await capture({ event: "settlement_executed", settlement_id: 1 })
+    expect(headers["x-idempotency-key"]).toBeUndefined()
+  })
+
+  it("does not send X-Request-Id", async () => {
+    const headers = await capture({ event: "settlement_executed", settlement_id: 1 })
+    expect(headers["x-request-id"]).toBeUndefined()
+  })
+
+  it("sends a bare digest with no timestamp envelope", async () => {
+    // The docs promise a bare 64-char lowercase hex digest, so a consumer can
+    // never reconstruct a "t=...,v1=..." style string from the header.
+    const headers = await capture({ event: "settlement_executed", settlement_id: 1 })
+    expect(headers["x-comebackhere-signature"]).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it("sends a flat payload with an `event` field and no data envelope", async () => {
+    let capturedBody = ""
+    const mockFetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      capturedBody = init?.body as string
+      return Promise.resolve(new Response(null, { status: 200 }))
+    })
+
+    await dispatchWebhook(
+      TEST_URL,
+      { event: "settlement_proposed", settlement_id: 15, amount: "5000000", token: "USDC" },
+      TEST_SECRET,
+      mockFetch as unknown as typeof fetch,
+    )
+
+    const parsed = JSON.parse(capturedBody) as Record<string, unknown>
+    expect(parsed.event).toBe("settlement_proposed")
+    expect(parsed).not.toHaveProperty("event_type")
+    expect(parsed).not.toHaveProperty("data")
+    expect(parsed).not.toHaveProperty("idempotency_key")
+    expect(parsed).not.toHaveProperty("timestamp")
+  })
+
+  it("signs a signature that a consumer can still verify after re-parsing", async () => {
+    // Re-serialising a parsed body must not be required: the digest is over the
+    // bytes on the wire.
+    let capturedBody = ""
+    let capturedSignature = ""
+    const mockFetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      capturedBody = init?.body as string
+      capturedSignature = (init?.headers as Record<string, string>)[WEBHOOK_SIGNATURE_HEADER]
+      return Promise.resolve(new Response(null, { status: 200 }))
+    })
+
+    await dispatchWebhook(
+      TEST_URL,
+      { event: "settlement_executed", settlement_id: 1, tx_hash: "abc123" },
+      TEST_SECRET,
+      mockFetch as unknown as typeof fetch,
+    )
+
+    expect(verifySignature(TEST_SECRET, capturedBody, capturedSignature)).toBe(true)
   })
 })

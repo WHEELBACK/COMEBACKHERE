@@ -79,7 +79,7 @@ describe("POST /invoices/:id/release-escrow — HTTP layer", () => {
   it("401 when x-admin-key header is missing", async () => {
     const res = await request(app).post("/invoices/1/release-escrow").send()
     expect(res.status).toBe(401)
-    expect(res.body.error).toMatch(/Unauthorized/)
+    expect(res.body.error.message).toMatch(/Unauthorized/)
   })
 
   it("401 when x-admin-key header is wrong", async () => {
@@ -88,7 +88,7 @@ describe("POST /invoices/:id/release-escrow — HTTP layer", () => {
       .set("x-admin-key", "wrong-key")
       .send()
     expect(res.status).toBe(401)
-    expect(res.body.error).toMatch(/Unauthorized/)
+    expect(res.body.error.message).toMatch(/Unauthorized/)
   })
 
   it("400 when id is not a positive integer", async () => {
@@ -97,7 +97,7 @@ describe("POST /invoices/:id/release-escrow — HTTP layer", () => {
       .set("x-admin-key", ADMIN_KEY)
       .send()
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/positive integer/)
+    expect(res.body.error.message).toMatch(/positive integer/)
   })
 
   it("400 when id is zero", async () => {
@@ -106,7 +106,7 @@ describe("POST /invoices/:id/release-escrow — HTTP layer", () => {
       .set("x-admin-key", ADMIN_KEY)
       .send()
     expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/positive integer/)
+    expect(res.body.error.message).toMatch(/positive integer/)
   })
 
   it("503 when required env vars are missing", async () => {
@@ -116,7 +116,7 @@ describe("POST /invoices/:id/release-escrow — HTTP layer", () => {
       .set("x-admin-key", ADMIN_KEY)
       .send()
     expect(res.status).toBe(503)
-    expect(res.body.error).toMatch(/misconfiguration/)
+    expect(res.body.error.message).toMatch(/misconfiguration/)
   })
 })
 
@@ -179,7 +179,7 @@ describe("POST /invoices/:id/release-escrow — authorization", () => {
       .send()
 
     expect(res.status).toBe(401)
-    expect(res.body.error).toMatch(/Unauthorized/)
+    expect(res.body.error.message).toMatch(/Unauthorized/)
   })
 
   it("401 — unauthorized caller with wrong x-admin-key is rejected (unauthorized-caller-rejection)", async () => {
@@ -190,7 +190,7 @@ describe("POST /invoices/:id/release-escrow — authorization", () => {
       .send()
 
     expect(res.status).toBe(401)
-    expect(res.body.error).toMatch(/Unauthorized/)
+    expect(res.body.error.message).toMatch(/Unauthorized/)
   })
 
   it("403 — on-chain Unauthorized contract error maps to 403 Forbidden", async () => {
@@ -213,8 +213,9 @@ describe("POST /invoices/:id/release-escrow — authorization", () => {
       .send()
 
     expect(res.status).toBe(403)
-    expect(res.body.error).toMatch(/authoris/)
-    expect(res.body.code).toBe(1)
+    expect(res.body.error.message).toMatch(/authoris/)
+    expect(res.body.error.code).toBe("CONTRACT_ERROR")
+    expect(res.body.error.details).toEqual({ contractCode: 1 })
   })
 })
 

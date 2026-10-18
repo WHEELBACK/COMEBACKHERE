@@ -197,6 +197,113 @@ every remaining signer's identity before the admin proceeds.
 
 ---
 
+## Admin Key Rotation
+
+All three contracts — invoice, treasury, and compliance — support a two-step
+`transfer_admin` / `accept_admin` pattern. The change is atomic and safe: the
+current admin nominates a new admin, and only that nominee can complete the
+transfer. The old admin retains full privileges until `accept_admin` is called,
+preventing accidental lockout from a typo or a key that nobody can sign for.
+
+### When to rotate
+
+- The admin key is moving to a hardware wallet or multisig.
+- The admin key holder is leaving the organization.
+- Routine annual rotation per the [Key Custody Requirements](#key-custody-requirements).
+- A key compromise is suspected (use the [Signer Loss or Compromise Recovery](#signer-loss-or-compromise-recovery) procedure to pause first).
+
+### Rotation procedure
+
+This procedure applies identically to the invoice, treasury, and compliance
+contracts. Run it once per contract that needs its admin rotated.
+
+1. **Prepare the new key.** Generate and custody the new admin keypair per
+   [Key Custody Requirements](#key-custody-requirements). Record the new
+   public key in a deployment issue and collect the required ceremony
+   approvals before proceeding.
+
+2. **Nominate the new admin (Step 1).** Call `transfer_admin` with the
+   current admin keypair:
+
+   ```sh
+   soroban contract invoke \
+     --id $CONTRACT_ID \
+     --source-account $CURRENT_ADMIN_SECRET \
+     --network mainnet \
+     -- transfer_admin \
+     --admin $CURRENT_ADMIN_ADDRESS \
+     --new_admin $NEW_ADMIN_ADDRESS
+   ```
+
+   This stores `NEW_ADMIN_ADDRESS` as the pending admin but does **not**
+   change the active admin yet. The current admin keeps all privileges.
+   Record the transaction hash in the ceremony log.
+
+   > For the treasury contract the parameter name is `admin`; for invoice and
+   > compliance it is `caller`. Check the relevant ABI snapshot under `abis/`
+   > if unsure.
+
+3. **Verify the nomination on-chain.** Confirm the pending admin was recorded
+   correctly before the new key signs anything:
+
+   ```sh
+   soroban contract invoke \
+     --id $CONTRACT_ID \
+     --source-account $CURRENT_ADMIN_SECRET \
+     --network mainnet \
+     -- get_pending_admin
+   ```
+
+   *(If the contract does not expose a `get_pending_admin` read function,
+   verify via the Soroban RPC `getLedgerEntries` using the `PendingAdmin`
+   storage key.)*
+
+4. **Accept the transfer (Step 2).** Sign with the **new** admin keypair:
+
+   ```sh
+   soroban contract invoke \
+     --id $CONTRACT_ID \
+     --source-account $NEW_ADMIN_SECRET \
+     --network mainnet \
+     -- accept_admin \
+     --new_admin $NEW_ADMIN_ADDRESS
+   ```
+
+   On success the new admin is active, the old admin loses all privileges
+   immediately, and the pending nomination is cleared. Record the transaction
+   hash in the ceremony log.
+
+5. **Smoke-test the new admin.** Call a low-impact admin-only function (e.g.
+   `get_threshold` for treasury, or `get_grace_window` for invoice) and
+   confirm the call succeeds under the new key. Then attempt the same call
+   with the old key and confirm it returns `Unauthorized`.
+
+6. **Revoke the old key.** Remove the old admin keypair from KMS / the
+   hardware wallet and confirm it cannot be used to sign Stellar transactions.
+
+7. **Record the rotation** in the deployment/ceremony log: old and new admin
+   addresses, the contract(s) rotated, transaction hashes for both
+   `transfer_admin` and `accept_admin`, and the identity of all ceremony
+   participants.
+
+### Safety properties
+
+- **No lockout risk.** If `accept_admin` is never called, the current admin
+  keeps full control. Overwriting a pending nomination with a new
+  `transfer_admin` call is allowed, so a mistaken nomination can be corrected
+  without deploying a new contract.
+- **Immediate revocation.** The old admin loses all privileges the moment
+  `accept_admin` is executed — not after a delay or a separate revoke step.
+- **Pause before rotating under compromise.** If the admin key may already be
+  in unauthorized hands, call `pause(admin)` from a still-trusted session
+  before starting the rotation so no settlements can be manipulated during the
+  window between nomination and acceptance.
+- **Events.** Both steps emit on-chain events (`admin_transfer_initiated` and
+  `admin_transfer_accepted`) that can be indexed by the backend and monitored
+  for unexpected rotations.
+
+---
+
 ## Mainnet Signing Ceremony Checklist
 
 The signing ceremony is a structured process that ensures every mainnet
@@ -413,6 +520,8 @@ A `SYSTEM` contract event is emitted automatically on upgrade with:
 - `data = []`
 
 Backend services that monitor contract events can use this to detect upgrades.
+Each protocol contract also emits an application-level `upgraded` event whose
+data is the uploaded Wasm hash.
 
 ### Upgrade Procedure
 
@@ -442,12 +551,23 @@ Backend services that monitor contract events can use this to detect upgrades.
 5. **Invoke the upgrade function** through the standard ceremony process:
 
    ```sh
-   stellar contract invoke \
-     --id <CONTRACT_ID> \
-     --source-account <ADMIN_KEY> \
-     --network mainnet \
-     -- upgrade \
-     --new_wasm_hash <NEW_WASM_HASH>
+    # Invoice
+    INVOICE_WASM_HASH=$(stellar contract upload --source-account "$ADMIN_KEY" \
+       --wasm target/wasm32-unknown-unknown/release/comebackhere_invoice.wasm --network mainnet)
+    stellar contract invoke --id "$INVOICE_CONTRACT_ID" --source-account "$ADMIN_KEY" \
+       --network mainnet -- upgrade --new_wasm_hash "$INVOICE_WASM_HASH"
+
+    # Treasury
+    TREASURY_WASM_HASH=$(stellar contract upload --source-account "$ADMIN_KEY" \
+       --wasm target/wasm32-unknown-unknown/release/comebackhere_treasury.wasm --network mainnet)
+    stellar contract invoke --id "$TREASURY_CONTRACT_ID" --source-account "$ADMIN_KEY" \
+       --network mainnet -- upgrade --new_wasm_hash "$TREASURY_WASM_HASH"
+
+    # Compliance
+    COMPLIANCE_WASM_HASH=$(stellar contract upload --source-account "$ADMIN_KEY" \
+       --wasm target/wasm32-unknown-unknown/release/comebackhere_compliance.wasm --network mainnet)
+    stellar contract invoke --id "$COMPLIANCE_CONTRACT_ID" --source-account "$ADMIN_KEY" \
+       --network mainnet -- upgrade --new_wasm_hash "$COMPLIANCE_WASM_HASH"
    ```
 
 6. **Verify** the upgrade by querying contract state and running the
@@ -460,7 +580,15 @@ if a new contract was deployed rather than upgraded in-place.
 
 ### Upgrade Authorization
 
-Each contract enforces admin authorization in its `upgrade` function:
+Each contract's `upgrade(new_wasm_hash)` entrypoint loads the stored admin and
+requires that address to authorize the call. This is a single-key on-chain
+authorization; the treasury signer threshold does not gate contract upgrades.
+The multi-sig process described above is currently an off-chain governance
+control. A compromised admin key could bypass that process, so maintainers
+should consider moving upgrade authorization to the treasury multisig in a
+future change before relying on these entrypoints for mainnet governance.
+
+The on-chain authorization pattern is:
 
 ```rust
 pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {

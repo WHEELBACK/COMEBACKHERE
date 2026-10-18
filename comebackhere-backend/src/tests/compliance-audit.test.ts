@@ -46,7 +46,7 @@ describe("GET /compliance/audit", () => {
   it("rejects an invalid ledger range", async () => {
     const response = await request(createApp()).get("/compliance/audit").query({ from_ledger: 20, to_ledger: 10 })
     expect(response.status).toBe(400)
-    expect(response.body.error).toMatch(/from_ledger/i)
+    expect(response.body.error.message).toMatch(/from_ledger/i)
   })
 
   it("rejects a limit above the public maximum", async () => {

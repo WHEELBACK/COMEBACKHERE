@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react"
 import type { Invoice, TransactionEvent, TransactionEventType } from "../types"
+import { EmptyState, EmptyStateIcon } from "./EmptyState"
 
 const EVENT_LABELS: Record<TransactionEventType, string> = {
   invoice_created: "Invoice Created",
@@ -156,9 +157,11 @@ export function TransactionHistory({ invoice }: { invoice: Invoice }) {
     <div className="history-panel" role="region" aria-label="Transaction history">
       <div className="history-panel__header">
         <h3>Transaction History</h3>
-        <p className="status-text" aria-live="polite">
-          Showing {filteredEvents.length} event{filteredEvents.length === 1 ? "" : "s"}
-        </p>
+        {filteredEvents.length > 0 && (
+          <p className="status-text" aria-live="polite">
+            Showing {filteredEvents.length} event{filteredEvents.length === 1 ? "" : "s"}
+          </p>
+        )}
       </div>
 
       <div className="history-filters" role="search" aria-label="Filter transaction history">
@@ -216,8 +219,24 @@ export function TransactionHistory({ invoice }: { invoice: Invoice }) {
         )}
       </div>
 
-      {filteredEvents.length === 0 ? (
-        <p className="status-text">No events match the current filters.</p>
+      {events.length === 0 ? (
+        /* ── No transactions at all ── */
+        <EmptyState
+          icon={<EmptyStateIcon />}
+          title="No transactions yet"
+          description="Transaction events will appear here once activity is recorded for this invoice."
+        />
+      ) : filteredEvents.length === 0 ? (
+        /* ── Transactions exist but filters match nothing ── */
+        <EmptyState
+          icon={<EmptyStateIcon />}
+          title="No matching transactions"
+          description="No events match the current filters. Try broadening your search or clear the filters to see all events."
+          action={{
+            label: "Clear filters",
+            onClick: resetFilters,
+          }}
+        />
       ) : (
         <>
           <ul className="history-list">

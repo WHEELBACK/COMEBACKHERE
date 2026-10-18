@@ -62,82 +62,109 @@
         Read-only reference for deployed COMEBACKHERE Protocol contracts.
       </p>
     </header>
+    <div id="contract-selector" style="margin-bottom: 20px; display: none;">
+      <label for="contract-select" style="font-weight: 600; margin-right: 8px;">Select Contract:</label>
+      <select id="contract-select" style="padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; cursor: pointer;">
+        <option value="">-- Choose a contract --</option>
+      </select>
+      <span id="loading-indicator" style="display: none; margin-left: 8px;">Loading...</span>
+    </div>
+    <div id="error-message" style="display: none; padding: 12px 16px; background: #fee2e2; border: 1px solid #fecaca; border-radius: 6px; color: #991b1b; margin-bottom: 16px;"></div>
     <div id="explorer" role="main"></div>
   </div>
 
   <script>
-    const ABIS = [
-      {
-        "contract": "invoice",
-        "version": "1.1.0",
-        "functions": [
-          "initialize",
-          "create_invoice",
-          "mark_paid",
-          "get_invoice",
-          "get_invoice_status",
-          "cancel_invoice",
-          "request_refund",
-          "batch_expire(offset: u32, limit: u32, returns: u32)",
-          "pause",
-          "unpause",
-          "set_grace_window",
-          "get_grace_window",
-          "release_escrow"
-        ]
-      },
-      {
-        "contract": "treasury",
-        "version": "1.0.0",
-        "functions": [
-          "initialize",
-          "set_signer",
-          "propose_settlement",
-          "propose_partial_settlement",
-          "approve_settlement",
-          "approve_partial_settlement",
-          "execute_settlement",
-          "partially_execute_settlement",
-          "cancel_settlement",
-          "get_pending_settlements(offset: Option<u32>, limit: Option<u32>, returns: Vec<u64>)",
-          "get_pending_settlements_page",
-          "get_settlement",
-          "update_threshold",
-          "pause",
-          "unpause",
-          "raise_dispute",
-          "resolve_dispute",
-          "vote_dispute_resolution",
-          "deposit",
-          "withdraw",
-          "add_allowed_token",
-          "remove_allowed_token",
-          "get_allowed_tokens",
-          "propose_signer_rotation",
-          "approve_signer_rotation",
-          "update_merchant_payout_address",
-          "get_merchant_payout_address",
-          "hold_settlement",
-          "release_hold"
-        ]
-      },
-      {
-        "contract": "compliance",
-        "version": "1.0.0",
-        "functions": [
-          "initialize",
-          "is_allowed",
-          "allow_address",
-          "block_address",
-          "allow_address_until",
-          "transfer_admin",
-          "accept_admin",
-          "clear_address",
-          "pause",
-          "unpause"
-        ]
+    // #753: Load ABIs dynamically from abis/*.json files
+    const CONTRACTS = ['invoice', 'treasury', 'compliance'];
+    let loadedABIs = {};
+
+    async function loadABI(contractName) {
+      try {
+        const response = await fetch(`../abis/${contractName}.json`);
+        if (!response.ok) {
+          throw new Error(`Failed to load ABI for ${contractName}: ${response.statusText}`);
+        }
+        const abi = await response.json();
+        loadedABIs[contractName] = abi;
+        return abi;
+      } catch (error) {
+        console.error(`Error loading ABI for ${contractName}:`, error);
+        showError(`Failed to load ABI for ${contractName}: ${error.message}`);
+        return null;
       }
-    ];
+    }
+
+    function showError(message) {
+      const errorDiv = document.getElementById('error-message');
+      errorDiv.textContent = message;
+      errorDiv.style.display = 'block';
+    }
+
+    function hideError() {
+      const errorDiv = document.getElementById('error-message');
+      errorDiv.style.display = 'none';
+    }
+
+    async function initializeContracts() {
+      const selector = document.getElementById('contract-select');
+      const selectorDiv = document.getElementById('contract-selector');
+      const loader = document.getElementById('loading-indicator');
+
+      try {
+        loader.style.display = 'inline';
+        // Load all ABIs
+        const abiPromises = CONTRACTS.map(contract => loadABI(contract));
+        const results = await Promise.all(abiPromises);
+
+        // Populate selector
+        CONTRACTS.forEach((contract, idx) => {
+          if (results[idx]) {
+            const option = document.createElement('option');
+            option.value = contract;
+            option.textContent = contract;
+            selector.appendChild(option);
+          }
+        });
+
+        selectorDiv.style.display = 'block';
+        loader.style.display = 'none';
+
+        if (CONTRACTS.some(c => loadedABIs[c])) {
+          hideError();
+          // Display first available contract
+          const firstContract = CONTRACTS.find(c => loadedABIs[c]);
+          if (firstContract) {
+            selector.value = firstContract;
+            displayContract(firstContract);
+          }
+        } else {
+          showError('No contract ABIs could be loaded. Please check that abis/ directory contains JSON files.');
+        }
+      } catch (error) {
+        showError(`Initialization error: ${error.message}`);
+      }
+    }
+
+    function displayContract(contractName) {
+      const abi = loadedABIs[contractName];
+      if (!abi) {
+        showError(`Contract ${contractName} ABI not loaded`);
+        return;
+      }
+      hideError();
+      document.getElementById('explorer').innerHTML = renderContract(abi);
+    }
+
+    // Set up contract selector event listener
+    document.addEventListener('DOMContentLoaded', () => {
+      const selector = document.getElementById('contract-select');
+      selector.addEventListener('change', (e) => {
+        if (e.target.value) {
+          displayContract(e.target.value);
+        }
+      });
+      initializeContracts();
+    });
 
     // Parse "name(param: type, ..., returns: type)" into { name, params, returns }
     function parseFn(raw) {

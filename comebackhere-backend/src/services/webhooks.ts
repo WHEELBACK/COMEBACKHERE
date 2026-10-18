@@ -1,15 +1,15 @@
 /**
  * Outbound webhook delivery with HMAC-SHA256 request signing.
  *
- * Every webhook POST includes a `X-COMEBACKHERE-Signature` header containing
- * an HMAC-SHA256 hex digest of the raw JSON request body, keyed by the
- * per-merchant signing secret (`WEBHOOK_SIGNING_SECRET` env var, or the
- * `signingSecret` argument when called directly).
+ * Every webhook POST includes a timestamp and an HMAC-SHA256 signature over
+ * `timestamp.rawBody`, plus a body-only legacy digest during the migration
+ * release. Both digests use `WEBHOOK_SIGNING_SECRET` or the explicit secret.
  *
  * Consumers verify authenticity by:
  *   1. Reading the raw request body as bytes (before JSON.parse).
- *   2. Computing HMAC-SHA256(secret, rawBody) over those exact bytes.
- *   3. Comparing the hex digest to the `X-COMEBACKHERE-Signature` header
+ *   2. Rejecting timestamps outside the five-minute tolerance.
+ *   3. Computing HMAC-SHA256(secret, timestamp + "." + rawBody).
+ *   4. Comparing the hex digest to the `X-COMEBACKHERE-Signature` header
  *      using a constant-time comparison to prevent timing attacks.
  *
  * The signature is computed over the raw body bytes (Buffer/Uint8Array), not a
@@ -22,10 +22,13 @@
  * Encoding:    lowercase hex
  */
 
-import { createHmac, timingSafeEqual } from "crypto"
+import { createHmac, randomUUID, timingSafeEqual } from "crypto"
+import { connectMongo, type WebhookDeliveryHistoryRecord, type WebhookReplayRecord } from "../db/mongo.js"
 
 /** The header name sent on every outbound webhook request. */
 export const WEBHOOK_SIGNATURE_HEADER = "X-COMEBACKHERE-Signature"
+export const WEBHOOK_TIMESTAMP_HEADER = "X-COMEBACKHERE-Timestamp"
+export const WEBHOOK_LEGACY_SIGNATURE_HEADER = "X-COMEBACKHERE-Legacy-Signature"
 
 export interface WebhookPayload {
   event: string
@@ -37,6 +40,15 @@ export interface WebhookDeliveryResult {
   status: number
   ok: boolean
   signature: string
+  legacySignature: string
+  timestamp: string
+  deliveryId: string
+}
+
+export interface DispatchWebhookOptions {
+  merchantAddress?: string
+  correlationId?: string
+  replayOf?: string
 }
 
 /**
@@ -107,6 +119,7 @@ export async function dispatchWebhook(
   payload: WebhookPayload,
   signingSecret?: string,
   fetchImpl: typeof fetch = fetch,
+  options: DispatchWebhookOptions = {},
 ): Promise<WebhookDeliveryResult> {
   const secret = signingSecret ?? process.env.WEBHOOK_SIGNING_SECRET
   if (!secret) {
@@ -117,21 +130,98 @@ export async function dispatchWebhook(
   }
 
   const rawBody = JSON.stringify(payload)
-  const signature = signPayload(secret, rawBody)
+  const timestamp = Math.floor(Date.now() / 1000).toString()
+  const signature = signPayload(secret, `${timestamp}.${rawBody}`)
+  const legacySignature = signPayload(secret, rawBody)
+  const deliveryId = randomUUID()
+  let status: number | null = null
+  let failure: string | null = null
 
-  const response = await fetchImpl(url, {
-    method: "POST",
-    headers: {
+  try {
+    const headers: Record<string, string> = {
       "Content-Type": "application/json",
       [WEBHOOK_SIGNATURE_HEADER]: signature,
-    },
-    body: rawBody,
-  })
+      [WEBHOOK_TIMESTAMP_HEADER]: timestamp,
+      [WEBHOOK_LEGACY_SIGNATURE_HEADER]: legacySignature,
+    }
+    if (options.correlationId) headers["X-Request-Id"] = options.correlationId
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers,
+      body: rawBody,
+    })
+    status = response.status
+    if (!response.ok) failure = `HTTP ${response.status}`
+    return {
+      url,
+      status: response.status,
+      ok: response.ok,
+      signature,
+      legacySignature,
+      timestamp,
+      deliveryId,
+    }
+  } catch (err) {
+    failure = err instanceof Error ? err.message : String(err)
+    throw err
+  } finally {
+    await persistWebhookAttempt({
+      deliveryId,
+      merchantAddress: options.merchantAddress,
+      endpoint: url,
+      payload,
+      status,
+      failure,
+      requestId: options.correlationId ?? null,
+      replayOf: options.replayOf,
+    })
+  }
+}
 
-  return {
-    url,
-    status: response.status,
-    ok: response.ok,
-    signature,
+async function persistWebhookAttempt(attempt: {
+  deliveryId: string
+  merchantAddress?: string
+  endpoint: string
+  payload: WebhookPayload
+  status: number | null
+  failure: string | null
+  requestId: string | null
+  replayOf?: string
+}): Promise<void> {
+  if (!attempt.merchantAddress) return
+  try {
+    const collection = (await connectMongo()).collection<WebhookDeliveryHistoryRecord>("webhook_deliveries")
+    const attemptedAt = new Date()
+    const replay: WebhookReplayRecord = {
+      replay_id: attempt.deliveryId,
+      request_id: attempt.requestId,
+      attempted_at: attemptedAt,
+      status: attempt.status !== null && attempt.status >= 200 && attempt.status < 300 ? "delivered" : "failed",
+      status_code: attempt.status,
+      error: attempt.failure,
+    }
+
+    if (attempt.replayOf) {
+      await collection.updateOne(
+        { delivery_id: attempt.replayOf, merchant_address: attempt.merchantAddress },
+        { $push: { replays: replay } },
+      )
+      return
+    }
+
+    await collection.insertOne({
+      delivery_id: attempt.deliveryId,
+      merchant_address: attempt.merchantAddress,
+      endpoint: attempt.endpoint,
+      payload: attempt.payload,
+      status: replay.status,
+      attempts: 1,
+      last_status_code: attempt.status,
+      last_error: attempt.failure,
+      created_at: attemptedAt,
+      replays: [],
+    })
+  } catch (err) {
+    console.error("[webhook] failed to persist delivery history:", err instanceof Error ? err.message : err)
   }
 }
