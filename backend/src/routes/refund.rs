@@ -55,28 +55,28 @@ pub async fn refund_invoice(
             StatusCode::UNPROCESSABLE_ENTITY,
             serde_json::json!(ErrorResponse {
                 error: "Invoice has not been paid and is not eligible for a refund".to_string(),
-                code: Some(10),
+                code: Some(422),
             }),
         ),
         Err(e) if e.to_string().contains("UNAUTHORIZED") => (
             StatusCode::FORBIDDEN,
             serde_json::json!(ErrorResponse {
                 error: "Only the invoice payer is authorised to request a refund".to_string(),
-                code: Some(1),
+                code: Some(403),
             }),
         ),
         Err(e) if e.to_string().contains("NOT_FOUND") => (
             StatusCode::NOT_FOUND,
             serde_json::json!(ErrorResponse {
                 error: format!("Invoice {} not found", id),
-                code: Some(4),
+                code: Some(404),
             }),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!(ErrorResponse {
                 error: e.to_string(),
-                code: None,
+                code: Some(500),
             }),
         ),
     };

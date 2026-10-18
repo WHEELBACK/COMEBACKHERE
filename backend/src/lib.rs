@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use tower_http::cors::CorsLayer;
 use idempotency::IdempotencyStore;
 use rate_limiter::{new_store, RateLimitConfig, RateLimiterLayer};
 use utoipa::OpenApi as _;
@@ -71,6 +72,9 @@ pub fn build_router(state: AppState) -> Router {
     let rl_config = RateLimitConfig::from_env();
     let rl_layer = RateLimiterLayer::new(new_store(), rl_config);
 
+    // CORS layer: allow common frontend origins and methods
+    let cors_layer = CorsLayer::permissive();
+
     Router::new()
         .route("/health/rpc", axum::routing::get(get_rpc_health))
         .route("/health/ready", axum::routing::get(readiness_probe))
@@ -79,6 +83,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/invoices/:id/pay", axum::routing::post(pay_invoice))
         .route("/invoices/:id/cancel", axum::routing::post(cancel_invoice))
         .route("/invoices/:id/refund", axum::routing::post(refund_invoice))
+        .layer(cors_layer)
         .layer(rl_layer)
         .with_state(state)
 }
