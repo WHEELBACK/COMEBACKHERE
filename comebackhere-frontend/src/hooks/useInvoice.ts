@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react"
-import type { Invoice, PaymentResult } from "../types"
-import { fetchInvoice, payInvoice, requestRefund, releaseEscrow } from "../utils/soroban"
+import { InvoiceStatus, type Invoice, type PaymentResult } from "../types"
+import { fetchInvoice, payInvoice, cancelInvoice, requestRefund, releaseEscrow } from "../utils/soroban"
 
 const CONTRACT_ID = import.meta.env.VITE_INVOICE_CONTRACT_ID as string
 
@@ -10,6 +10,7 @@ interface UseInvoiceReturn {
   error: string | null
   loadInvoice: (id: number) => Promise<void>
   pay: (publicKey: string) => Promise<PaymentResult>
+  cancel: (publicKey: string) => Promise<PaymentResult>
   refund: (publicKey: string) => Promise<PaymentResult>
   release: (publicKey: string) => Promise<PaymentResult>
 }
@@ -25,8 +26,8 @@ export function useInvoice(): UseInvoiceReturn {
     try {
       const result = await fetchInvoice(CONTRACT_ID, id)
       setInvoice(result)
-    } catch (err: any) {
-      setError(err?.message ?? "Failed to load invoice")
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load invoice")
     } finally {
       setLoading(false)
     }
@@ -42,6 +43,30 @@ export function useInvoice(): UseInvoiceReturn {
         await loadInvoice(Number(invoice.id))
       }
       return result
+    },
+    [invoice, loadInvoice]
+  )
+
+  const cancel = useCallback(
+    async (publicKey: string): Promise<PaymentResult> => {
+      if (!invoice) {
+        return { success: false, error: "No invoice loaded" }
+      }
+      const previousInvoice = invoice
+      setInvoice({ ...invoice, status: InvoiceStatus.Cancelled })
+
+      try {
+        const result = await cancelInvoice(CONTRACT_ID, Number(invoice.id), publicKey)
+        if (result.success) {
+          await loadInvoice(Number(invoice.id))
+        } else {
+          setInvoice(previousInvoice)
+        }
+        return result
+      } catch (error) {
+        setInvoice(previousInvoice)
+        throw error
+      }
     },
     [invoice, loadInvoice]
   )
@@ -78,5 +103,5 @@ export function useInvoice(): UseInvoiceReturn {
     [invoice, loadInvoice]
   )
 
-  return { invoice, loading, error, loadInvoice, pay, refund, release }
+  return { invoice, loading, error, loadInvoice, pay, cancel, refund, release }
 }

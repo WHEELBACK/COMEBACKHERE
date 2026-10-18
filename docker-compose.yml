@@ -31,6 +31,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 5s
 
   mongodb:
     image: mongo:7
@@ -44,7 +45,52 @@ services:
       timeout: 3s
       retries: 10
 
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      - SOROBAN_RPC_URL=http://soroban:8000/soroban/rpc
+      - HORIZON_API_URL=http://soroban:8000
+      - INVOICE_CONTRACT_ID=${INVOICE_CONTRACT_ID:-CONTRACT_ID_PLACEHOLDER}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      soroban:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health/rpc"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    volumes:
+      - backend_data:/app/data
+
+  ## #755: Frontend service for canonical UI
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      - VITE_API_URL=http://backend:3001
+      - VITE_SOROBAN_RPC=http://soroban:8000/soroban/rpc
+      - VITE_HORIZON_URL=http://soroban:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5173/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
 volumes:
   soroban_data:
   redis_data:
   mongodb_data:
+  backend_data:

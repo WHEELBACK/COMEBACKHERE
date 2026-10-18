@@ -1,5 +1,7 @@
 # ── Secrets & environment ────────────────────────────────────────────────────
+# Environment files
 .env
+.env.local
 .env.mainnet
 .env.testnet
 .env.local
@@ -45,6 +47,96 @@ coverage/
 # ── OS / editor noise ────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+.env.*.local
+
+# Build output
+dist/
+build/
+out/
+
+# Dependencies
+node_modules/
+target/
+
+# Generated artifacts
+artifacts/addresses.json
+coverage/
+
+# Test snapshots & reports
+**/test_snapshots/
+**/__snapshots__/
+**/*.snap
+test-results/
+playwright-report/
+**/playwright-report/
+**/test-results/
+coverage/
+.nyc_output/
+
+# Vitest / Jest HTML reports and coverage artefacts
+vitest-report/
+html/
+lcov.info
+*.lcov
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.iml
+*.iws
+
+# TypeScript cache / incremental build info
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# Vite cache
+.vite/
+**/.vite/
+.vite-inspect/
+**/.vite/
+
+# Vitest / Jest output
+vitest-report/
+html/
+lcov.info
+vitest-coverage/
+**/.vitest-cache/
+
+# Lock files — not committed (each sub-package manages its own lock locally)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Rust lock file (library crates do not commit Cargo.lock)
+Cargo.lock
+**/Cargo.lock.bak
+
+# Rust build artifacts
+**/*.wasm
+**/target/
+
+# Miscellaneous generated files
+*.local
+.turbo/
+.parcel-cache/
+.cache/
+
+# Playwright state
+playwright/.auth/
+playwright-report/
+
+# Editor session files
 *.swp
 *.swo
 *~
@@ -64,3 +156,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+# Coverage reports
+comebackhere-frontend/coverage/
+frontend/coverage/
+comebackhere-backend/coverage/
+
+# Playwright state
+playwright/.auth/
+
+# Playwright screenshots (generated during e2e runs)
+**/e2e/screenshots/

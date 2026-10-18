@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react"
+import { useState, useCallback, useRef } from "react"
 
 interface CopyableTextProps {
   text: string
@@ -8,9 +8,21 @@ interface CopyableTextProps {
 
 export function CopyableText({ text, label, className }: CopyableTextProps) {
   const [copied, setCopied] = useState(false)
+  const textRef = useRef<HTMLSpanElement>(null)
 
   const handleCopy = useCallback(async () => {
-    await navigator.clipboard.writeText(text)
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable")
+      await navigator.clipboard.writeText(text)
+    } catch {
+      const selection = window.getSelection()
+      const range = document.createRange()
+      if (textRef.current && selection) {
+        range.selectNodeContents(textRef.current)
+        selection.removeAllRanges()
+        selection.addRange(range)
+      }
+    }
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }, [text])
@@ -26,7 +38,7 @@ export function CopyableText({ text, label, className }: CopyableTextProps) {
       aria-label={`${label ?? "Copy"}: ${text}`}
       style={{ cursor: "pointer", position: "relative", display: "inline-flex", alignItems: "center", gap: "4px" }}
     >
-      <span>{text}</span>
+      <span ref={textRef}>{text}</span>
       <svg
         width="14"
         height="14"

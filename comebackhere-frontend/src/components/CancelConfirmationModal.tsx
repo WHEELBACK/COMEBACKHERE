@@ -1,5 +1,7 @@
+import { useFocusTrap } from "../hooks/useFocusTrap"
 import type { Invoice } from "../types"
 import { StatusBadge } from "./StatusBadge"
+import { formatAmount, USDC_DECIMALS } from "../utils/format"
 
 interface CancelConfirmationModalProps {
   invoice: Invoice
@@ -14,10 +16,20 @@ export function CancelConfirmationModal({
   onCancel,
   submitting,
 }: CancelConfirmationModalProps) {
+  const modalRef = useFocusTrap({ onClose: onCancel, disabled: submitting })
+
   return (
-    <div className="modal-overlay" onClick={onCancel}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Cancel Invoice</h2>
+    <div className="modal-overlay" onClick={onCancel} role="presentation">
+      <div
+        ref={modalRef}
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cancel-confirm-title"
+        tabIndex={-1}
+      >
+        <h2 id="cancel-confirm-title">Cancel Invoice</h2>
         <p className="modal-desc">
           You are about to cancel this invoice. This action cannot be undone and
           will transition the invoice to <strong>Cancelled</strong> status.
@@ -29,8 +41,8 @@ export function CancelConfirmationModal({
             <span className="detail-value">#{invoice.id}</span>
           </div>
           <div className="detail-row">
-            <span className="detail-label">Amount (USDC)</span>
-            <span className="detail-value">{invoice.gross_usdc}</span>
+            <span className="detail-label">Amount</span>
+            <span className="detail-value">{formatAmount(invoice.gross_usdc, USDC_DECIMALS, "USDC")}</span>
           </div>
           <div className="detail-row">
             <span className="detail-label">Merchant</span>
@@ -44,11 +56,12 @@ export function CancelConfirmationModal({
           </div>
         </div>
 
-        <div className="modal-actions">
+        <div className="modal-actions" role="group" aria-label="Cancel confirmation actions">
           <button
             className="btn btn--secondary"
             onClick={onCancel}
             disabled={submitting}
+            aria-label="Go back without cancelling"
           >
             Go Back
           </button>
@@ -56,6 +69,7 @@ export function CancelConfirmationModal({
             className="btn btn--danger"
             onClick={onConfirm}
             disabled={submitting}
+            aria-label={submitting ? "Cancelling invoice" : "Confirm cancellation"}
           >
             {submitting ? "Cancelling..." : "Confirm Cancellation"}
           </button>

@@ -56,5 +56,29 @@ export function useSigners() {
     await fetchSigners()
   }, [fetchSigners])
 
-  return { signers, loading, error, addSigner, removeSigner, rotateSigners, refresh: fetchSigners }
+  /**
+   * Invalidate and re-fetch the signer list.
+   *
+   * Call this after any external mutation (e.g. a `rotate_signer` transaction
+   * submitted outside this hook) to ensure the UI reflects the latest on-chain
+   * state rather than showing a potentially stale list.
+   */
+  const invalidate = useCallback(() => fetchSigners(), [fetchSigners])
+
+  return {
+    signers,
+    loading,
+    error,
+    addSigner,
+    removeSigner,
+    rotateSigners,
+    /** Manually re-fetch signers (alias for invalidate). */
+    refresh: fetchSigners,
+    /**
+     * Invalidate the signer list and re-fetch from the API.
+     * Intended for use after external mutations such as a rotate_signer
+     * transaction submitted from another part of the app.
+     */
+    invalidate,
+  }
 }
