@@ -40,7 +40,39 @@ export function buildSorobanClient(rpcUrl: string): SorobanClient {
 }
 
 export function getNetworkPassphrase(): string {
-  return process.env.NETWORK_PASSPHRASE ?? Networks.STANDALONE
+  // #897 — never silently fall back to STANDALONE. An unset passphrase means the
+  // backend would sign transactions for the wrong network, causing silent
+  // failures on testnet/mainnet. Require the operator to configure it
+  // explicitly.
+  const passphrase = process.env.NETWORK_PASSPHRASE
+  if (!passphrase || passphrase.trim() === "") {
+    throw Object.assign(
+      new Error(
+        "NETWORK_PASSPHRASE is not set. Configure it to match your target Stellar network " +
+          "(e.g. \"Test SDF Network ; September 2015\" for testnet).",
+      ),
+      { status: 503 },
+    )
+  }
+  return passphrase
+}
+
+/**
+ * Converts an i128 ScVal (Int128Parts) to a bigint.
+ *
+ * #898 — Calling BigInt(int128Parts.toString()) throws "Cannot convert
+ * [object Object] to a BigInt" because Int128Parts does not override
+ * toString(). Instead, reconstruct the 128-bit value from its 64-bit halves:
+ *
+ *   value = (hi << 64) | lo
+ *
+ * Both halves are stored as XDR Integer instances whose toString() returns
+ * the numeric string, so BigInt(hi.toString()) / BigInt(lo.toString()) work.
+ */
+function i128ToBigInt(parts: xdr.Int128Parts): bigint {
+  const lo = BigInt(parts.lo().toString())
+  const hi = BigInt(parts.hi().toString())
+  return (hi << 64n) | lo
 }
 
 export async function simulateContractRead(
@@ -95,7 +127,9 @@ export async function getTokenBalance(
   if (!balance) {
     throw Object.assign(new Error("Invalid balance response from token contract"), { status: 422 })
   }
-  return BigInt(balance.toString())
+  // #898 — reconstruct the i128 from its halves instead of calling
+  // BigInt(int128Parts.toString()), which throws "[object Object]".
+  return i128ToBigInt(balance)
 }
 
 export interface OnChainSettlement {
@@ -197,8 +231,9 @@ export async function getSettlementSimulation(
     approvalWeight: BigInt(entries.approval_weight?.u64()?.toString() ?? "0"),
     threshold: BigInt(entries.threshold?.u64()?.toString() ?? "0"),
     settlementAmount: BigInt(entries.settlement_amount?.u64()?.toString() ?? "0"),
-    treasuryBalance: BigInt(entries.treasury_balance?.i128()?.toString() ?? "0"),
-    projectedBalance: BigInt(entries.projected_balance?.i128()?.toString() ?? "0"),
+    // #898 — use i128ToBigInt so treasury/projected balances parse correctly.
+    treasuryBalance: i128ToBigInt(entries.treasury_balance?.i128() ?? xdr.Int128Parts.fromXDR(Buffer.alloc(16))),
+    projectedBalance: i128ToBigInt(entries.projected_balance?.i128() ?? xdr.Int128Parts.fromXDR(Buffer.alloc(16))),
   }
 }
 
@@ -229,7 +264,29 @@ export async function submitContractCall(
     )
   }
 
-  const prepared = SorobanRpc.assembleTransaction(tx, simulated as any).build()
+  const successResponse = simulated as SorobanRpc.Api.SimulateTransactionSuccessResponse
+
+  // #895 — assembleTransaction only injects the auth entries produced during
+  // simulation when the raw result payload contains them. When the success
+  // response omits the `result` field (or its `auth` array), the assembled
+  // transaction silently drops the required authorization and the contract
+  // rejects it on submission. Guard against that here so we fail fast with a
+  // clear error instead of broadcasting an unauthorized transaction.
+  const authEntries = successResponse.result?.auth
+  if (authEntries === undefined) {
+    throw Object.assign(
+      new Error(
+        `Soroban simulation for "${method}" returned no authorization entries; ` +
+          "the transaction cannot be submitted without the required auth.",
+      ),
+      { status: 422 },
+    )
+  }
+
+  // Use the typed success response (no `as any`) so the SDK correctly attaches
+  // the simulation's Soroban transaction data and auth entries to the built
+  // transaction.
+  const prepared = SorobanRpc.assembleTransaction(tx, successResponse).build()
   prepared.sign(keypair)
 
   const sendResult = await client.sendTransaction(prepared)

@@ -27,8 +27,16 @@ const MAX_TOTAL_BACKOFF_MS: u64 = 30_000;
 /// - Network-level errors (connection refused, timeouts, resets)
 /// - HTTP 5xx responses from the RPC node
 ///
-/// 4xx responses, contract-level errors, and application logic errors are
-/// **not** retried because they will not resolve on their own.
+/// 4xx responses, contract-level errors, application logic errors, and
+/// **sequence number errors** are **not** retried because they will not
+/// resolve on their own.
+///
+/// #896 — retrying a transaction that carries an expired or stale sequence
+/// number will always fail: Soroban validates the sequence number against the
+/// current ledger state, so re-sending the same signed transaction after a
+/// `tx_bad_seq` / "bad sequence" rejection only produces the same rejection.
+/// The caller must re-fetch the account and rebuild the transaction before
+/// trying again.
 fn is_transient(err: &anyhow::Error) -> bool {
     let msg = err.to_string();
 
@@ -37,6 +45,19 @@ fn is_transient(err: &anyhow::Error) -> bool {
         || msg.contains("UNAUTHORIZED")
         || msg.contains("NOT_PAID")
         || msg.contains("Empty RPC result")
+    {
+        return false;
+    }
+
+    // #896 — Never retry expired / bad sequence number errors.
+    // Soroban uses the `tx_bad_seq` result code in its JSON-RPC error payloads;
+    // some RPC implementations also emit the human-readable phrases below.
+    if msg.contains("tx_bad_seq")
+        || msg.contains("bad_seq")
+        || msg.contains("bad sequence")
+        || msg.contains("BAD_SEQ")
+        || msg.contains("EXPIRED_SEQ")
+        || msg.contains("expired sequence")
     {
         return false;
     }
@@ -614,6 +635,18 @@ mod tests {
     #[test]
     fn transient_false_for_empty_rpc_result() {
         let err = anyhow!("Empty RPC result");
+        assert!(!is_transient(&err));
+    }
+
+    #[test]
+    fn transient_false_for_tx_bad_seq() {
+        let err = anyhow!("tx_bad_seq: transaction sequence number expired");
+        assert!(!is_transient(&err));
+    }
+
+    #[test]
+    fn transient_false_for_bad_sequence_message() {
+        let err = anyhow!("bad sequence number");
         assert!(!is_transient(&err));
     }
 
