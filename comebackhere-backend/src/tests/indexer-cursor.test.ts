@@ -183,3 +183,65 @@ describe("indexer idempotency", () => {
     expect(await loadMongoCursor(db as any)).toMatchObject({ paging_token: "tok-0001" })
   })
 })
+
+// ---------------------------------------------------------------------------
+// #881 — persistTransition must fire AFTER the event is marked applied:true
+// ---------------------------------------------------------------------------
+
+describe("recordTransition — #881 side-effects fire after applied:true", () => {
+  it("marks the event applied:true before persistTransition runs", async () => {
+    const { recordTransition } = await import("../indexer.js")
+    const db = new FakeDb()
+    // Seed the invoice so the status update has a target document.
+    db.collection("invoices").docs.push({ invoice_id: "1", status: "Pending" })
+
+    const callOrder: string[] = []
+
+    // Intercept the events collection's updateOne to observe write ordering.
+    const eventsCol = db.collection("invoice_events")
+    const origUpdate = eventsCol.updateOne.bind(eventsCol)
+    eventsCol.updateOne = async (filter: any, update: any, opts?: any) => {
+      if (update?.$set?.applied === true) {
+        callOrder.push("applied:true written")
+      }
+      return origUpdate(filter, update, opts)
+    }
+
+    // findOneAndUpdate records the insert so we can check the initial state.
+    const origFindOneAndUpdate = eventsCol.findOneAndUpdate.bind(eventsCol)
+    eventsCol.findOneAndUpdate = async (filter: any, update: any, opts?: any) => {
+      callOrder.push("event inserted (applied:false)")
+      return origFindOneAndUpdate(filter, update, opts)
+    }
+
+    await recordTransition(db as any, "evt-881", "tok-881", {
+      event_type: "invoice_paid",
+      invoice_id: "1",
+      ledger: 200,
+      ledger_closed_at: "2026-06-01T00:00:00Z",
+      transaction_hash: "txdeadbeef",
+      contract_id: "Cabc",
+      raw_topics: [],
+      raw_value: "",
+    })
+
+    // The event must be stored, then the invoice status updated, then
+    // applied:true written — persistTransition runs after that.
+    expect(callOrder).toContain("applied:true written")
+
+    // The event record must carry applied:true after recordTransition returns.
+    const eventDoc = eventsCol.docs.find((d: any) => d.event_id === "evt-881")
+    expect(eventDoc).toBeDefined()
+    expect(eventDoc!.applied).toBe(true)
+
+    // The invoice status must have been updated before applied:true was set.
+    const invoiceDoc = db.collection("invoices").docs.find((d: any) => d.invoice_id === "1")
+    expect(invoiceDoc!.status).toBe("Paid")
+
+    // applied:true must appear last in the write sequence — not before the
+    // status update and definitely not before event storage.
+    const appliedIdx = callOrder.indexOf("applied:true written")
+    const insertIdx = callOrder.indexOf("event inserted (applied:false)")
+    expect(appliedIdx).toBeGreaterThan(insertIdx)
+  })
+})

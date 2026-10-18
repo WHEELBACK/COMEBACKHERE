@@ -44,6 +44,16 @@ export async function createInvoice(
   signerSecret: string,
   networkPassphrase: string
 ): Promise<{ invoice_id: string; status: string }> {
+  // Reject calls that do not carry a network passphrase — a missing or empty
+  // passphrase means the transaction would be built without network context and
+  // could be replayed on any Stellar network (issue #882).
+  if (!networkPassphrase || !networkPassphrase.trim()) {
+    throw Object.assign(
+      new Error("Network passphrase is required; set NETWORK_PASSPHRASE in the backend environment"),
+      { status: 503 },
+    )
+  }
+
   const keypair = Keypair.fromSecret(signerSecret)
   const contract = new Contract(contractId)
 
@@ -525,7 +535,9 @@ router.get("/", validateQuery(invoiceListQuerySchema), asyncHandler(async (req: 
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req: Request, res: Response) => {
-  const { id } = req.params
+  // Normalize the invoice ID to strip leading zeros so that "042" and "42"
+  // resolve to the same invoice (issue #880: mixed-case / zero-padded IDs).
+  const id = String(BigInt(req.params.id))
 
   const env = requireEnv({ invoiceContractId: "INVOICE_CONTRACT_ID" })
 
@@ -601,7 +613,9 @@ router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req
  *         description: Invoice not found
  */
 router.get("/:id/events", validateParams(invoiceIdParamSchema), asyncHandler(async (req: Request, res: Response) => {
-  const { id } = req.params
+  // Normalize the invoice ID to strip leading zeros so that "042" and "42"
+  // resolve to the same invoice (issue #880: mixed-case / zero-padded IDs).
+  const id = String(BigInt(req.params.id))
   const db = await connectMongo()
   const invoice = await getInvoicesCollection(db).findOne({ invoice_id: id })
 

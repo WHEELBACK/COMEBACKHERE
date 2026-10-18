@@ -488,3 +488,100 @@ describe("GET /invoices/:id/events", () => {
     expect(res.status).toBe(404)
   })
 })
+
+// ---------------------------------------------------------------------------
+// #880 — Invoice retrieval normalises leading-zero IDs
+// ---------------------------------------------------------------------------
+
+describe("GET /invoices/:id/events — #880 ID normalisation", () => {
+  const app = createApp()
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("strips leading zeros so '042' resolves the same document as '42'", async () => {
+    const cursor = {
+      sort: vi.fn().mockReturnThis(),
+      toArray: vi.fn().mockResolvedValue([]),
+    }
+    const invoiceCollection = { findOne: vi.fn().mockResolvedValue({ invoice_id: "42" }) }
+    const eventCollection = { find: vi.fn().mockReturnValue(cursor) }
+
+    vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as never)
+    vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(invoiceCollection as never)
+    vi.spyOn(mongoModule, "getInvoiceEventsCollection").mockReturnValue(eventCollection as never)
+
+    const res = await request(app).get("/invoices/042/events")
+
+    expect(res.status).toBe(200)
+    // The normalised id should be "42", not "042"
+    expect(res.body.invoice_id).toBe("42")
+    // MongoDB was queried with the normalised id
+    expect(invoiceCollection.findOne).toHaveBeenCalledWith({ invoice_id: "42" })
+  })
+
+  it("does not alter IDs that have no leading zeros", async () => {
+    const cursor = {
+      sort: vi.fn().mockReturnThis(),
+      toArray: vi.fn().mockResolvedValue([]),
+    }
+    vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as never)
+    vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(
+      { findOne: vi.fn().mockResolvedValue({ invoice_id: "7" }) } as never,
+    )
+    vi.spyOn(mongoModule, "getInvoiceEventsCollection").mockReturnValue(
+      { find: vi.fn().mockReturnValue(cursor) } as never,
+    )
+
+    const res = await request(app).get("/invoices/7/events")
+
+    expect(res.status).toBe(200)
+    expect(res.body.invoice_id).toBe("7")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #882 — createInvoice rejects a missing or empty network passphrase
+// ---------------------------------------------------------------------------
+
+describe("createInvoice — #882 network passphrase validation", () => {
+  it("throws 503 when networkPassphrase is an empty string", async () => {
+    const client = makeMockClient()
+    await expect(
+      createInvoice(VALID_BODY, client, CONTRACT_ID, SIGNER_SECRET, ""),
+    ).rejects.toMatchObject({ status: 503, message: expect.stringMatching(/network passphrase/i) })
+  })
+
+  it("throws 503 when networkPassphrase is whitespace only", async () => {
+    const client = makeMockClient()
+    await expect(
+      createInvoice(VALID_BODY, client, CONTRACT_ID, SIGNER_SECRET, "   "),
+    ).rejects.toMatchObject({ status: 503, message: expect.stringMatching(/network passphrase/i) })
+  })
+
+  it("proceeds normally when a non-empty networkPassphrase is supplied", async () => {
+    const client = makeMockClient({
+      getAccount: vi.fn().mockResolvedValue(fakeAccount),
+      simulateTransaction: vi.fn().mockResolvedValue(PARSED_SIM_SUCCESS),
+      sendTransaction: vi.fn().mockResolvedValue({ status: "PENDING", hash: "txhash99" }),
+      getTransaction: vi.fn().mockResolvedValue({
+        status: SorobanRpc.Api.GetTransactionStatus.SUCCESS,
+        returnValue: { u64: () => BigInt(99) },
+        latestLedger: 1,
+        latestLedgerCloseTime: 0,
+        oldestLedger: 1,
+        oldestLedgerCloseTime: 0,
+        ledger: 1,
+        createdAt: 0,
+        applicationOrder: 1,
+        envelopeXdr: {},
+        resultXdr: {},
+        resultMetaXdr: {},
+      }),
+    })
+
+    const result = await createInvoice(VALID_BODY, client, CONTRACT_ID, SIGNER_SECRET, NETWORK)
+    expect(result).toMatchObject({ invoice_id: "99", status: "Pending" })
+  })
+})

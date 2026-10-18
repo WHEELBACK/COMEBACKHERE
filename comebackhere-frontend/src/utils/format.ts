@@ -104,7 +104,6 @@ export function formatAmount(
   }
 
   const maxFraction = Math.max(0, options.maximumFractionDigits ?? decimals)
-  const minFraction = Math.min(Math.max(0, options.minimumFractionDigits ?? 2), maxFraction)
 
   const negative = value < 0n
   let abs = negative ? -value : value
@@ -118,6 +117,12 @@ export function formatAmount(
     abs = abs / divisor + (remainder * 2n >= divisor ? 1n : 0n)
     fractionDigits = maxFraction
   }
+
+  // Clamp minFraction to the actual number of decimal places being displayed.
+  // Using maxFraction as the upper bound can cause tokens with fewer decimals
+  // than maximumFractionDigits to pad with spurious zeros (e.g. a 0-decimal
+  // token with maximumFractionDigits:2 would otherwise show "42.00").
+  const minFraction = Math.min(Math.max(0, options.minimumFractionDigits ?? 2), fractionDigits)
 
   const scale = 10n ** BigInt(fractionDigits)
   const integerPart = abs / scale

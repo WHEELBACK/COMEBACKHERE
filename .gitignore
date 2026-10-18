@@ -107,3 +107,14 @@ playwright/.auth/
 
 # Playwright screenshots (generated during e2e runs)
 **/e2e/screenshots/
+
+# Playwright trace files and cache
+**/e2e/traces/
+**/playwright/.cache/
+
+# Vitest coverage directories (any nesting level)
+**/coverage/
+
+# Temporary patch / diff files
+*.orig
+*.rej

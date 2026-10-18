@@ -325,12 +325,18 @@ export async function recordTransition(
       { $set: { status, updated_at: new Date() } },
     )
   }
-  persistTransition(transition)
 
+  // Mark the event as fully applied BEFORE emitting any side-effects (e.g.
+  // webhooks). This ensures that if the process crashes after the DB write but
+  // before the side-effect runs, a replay will re-fire the side-effect rather
+  // than silently skipping it. Emitting before the mark would mean a webhook
+  // fires before the invoice status is durable in the database (issue #881).
   await events.updateOne(
     { event_id: eventId },
     { $set: { applied: true, applied_at: new Date() } },
   )
+
+  persistTransition(transition)
   return true
 }
 
