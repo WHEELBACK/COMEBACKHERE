@@ -65,13 +65,17 @@ impl AppState {
 /// This is the single source of truth for the route table: `main` serves it
 /// in production and integration tests exercise it directly, so the two can
 /// never drift apart.
+///
+/// Supports API_PREFIX environment variable for deployments behind reverse proxies
+/// with path prefixes (e.g., API_PREFIX=/api/v1 routes /api/v1/invoices instead of /invoices).
 pub fn build_router(state: AppState) -> Router {
     // Rate-limiter layer: config is read from RATE_LIMIT_POINTS /
     // RATE_LIMIT_DURATION (defaults: 60 requests per 60-second window, per IP).
     let rl_config = RateLimitConfig::from_env();
     let rl_layer = RateLimiterLayer::new(new_store(), rl_config);
 
-    Router::new()
+    // Build the main API routes
+    let api_routes = Router::new()
         .route("/health/rpc", axum::routing::get(get_rpc_health))
         .route("/health/ready", axum::routing::get(readiness_probe))
         .route("/invoices", axum::routing::post(create_invoice))
@@ -80,7 +84,17 @@ pub fn build_router(state: AppState) -> Router {
         .route("/invoices/:id/cancel", axum::routing::post(cancel_invoice))
         .route("/invoices/:id/refund", axum::routing::post(refund_invoice))
         .layer(rl_layer)
-        .with_state(state)
+        .with_state(state.clone());
+
+    // Support optional API_PREFIX for reverse proxy deployments with path prefixes
+    // If API_PREFIX is set, nest all routes under that prefix
+    let api_prefix = std::env::var("API_PREFIX").unwrap_or_default();
+    if api_prefix.is_empty() {
+        api_routes
+    } else {
+        let prefix = api_prefix.trim_end_matches('/');
+        Router::new().nest(prefix, api_routes)
+    }
 }
 
 #[derive(utoipa::OpenApi)]
