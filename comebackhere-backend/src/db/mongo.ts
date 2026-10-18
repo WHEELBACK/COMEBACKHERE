@@ -1,4 +1,60 @@
-import { MongoClient, type Db, type Collection } from "mongodb"
+import { MongoClient, type Db, type Collection, MongoServerSelectionError } from "mongodb"
+import { logger } from "../lib/logger.js"
+
+export type InvoiceStatus = "Pending" | "Paid" | "Expired" | "Cancelled" | "RefundRequested" | "Released"
+
+export interface LegacyInvoiceRecord {
+  invoice_id: string
+  merchant_address: string
+  token: string
+  amount: number
+  due_date: number
+  status: InvoiceStatus
+  created_at: Date
+  updated_at: Date
+}
+
+export interface InvoiceRecord {
+  invoice_id: string
+  merchant_address: string
+  token: string
+  amount: number
+  due_date: number
+  reference?: string
+  status: InvoiceStatus
+  created_at: Date
+  updated_at: Date
+}
+
+export interface MerchantApiKeyRecord {
+  key_id: string
+  merchant_address: string
+  key_hash: string
+  created_at: Date
+  revoked_at?: Date
+}
+
+export interface WebhookReplayRecord {
+  replay_id: string
+  request_id: string | null
+  attempted_at: Date
+  status: "delivered" | "failed"
+  status_code: number | null
+  error: string | null
+}
+
+export interface WebhookDeliveryHistoryRecord {
+  delivery_id: string
+  merchant_address: string
+  endpoint: string
+  payload: unknown
+  status: "delivered" | "failed"
+  attempts: number
+  last_status_code: number | null
+  last_error: string | null
+  created_at: Date
+  replays: WebhookReplayRecord[]
+}
 
 export interface SettlementRecord {
   id: number
@@ -14,34 +70,199 @@ export interface SettlementRecord {
   executed_tx_hash?: string
 }
 
+export type ComplianceAuditEventType = "address_allowed" | "address_allowed_until" | "address_blocked" | "address_cleared"
+export type ComplianceAuditStatus = "Allowed" | "AllowedUntil" | "Blocked" | "Cleared"
+
+export interface ComplianceAuditRecord {
+  event_id: string
+  event_type: ComplianceAuditEventType
+  address: string
+  status?: ComplianceAuditStatus
+  expires_at: number | null
+  ledger: number
+  ledger_closed_at: string | null
+  transaction_hash: string
+  contract_id: string
+  paging_token: string | null
+  created_at: Date
+}
+
 export interface IndexerCursor {
   _id: string
   paging_token: string | null
   last_ledger: number
   updated_at: Date
+  /** Event IDs already applied — used for reorg / replay deduplication. */
+  processed_event_ids?: string[]
 }
+
+/**
+ * One indexed invoice contract event. `event_id` is the Soroban event id and
+ * is unique, so replaying a ledger range is a no-op for events already seen.
+ * `applied` flips to true once the event's side effects have run; an event
+ * stored with `applied: false` (crash mid-apply) is re-applied on replay.
+ */
+export interface InvoiceEventRecord {
+  event_id: string
+  paging_token: string | null
+  event_type: string
+  invoice_id: string
+  ledger: number
+  ledger_closed_at: string
+  transaction_hash: string
+  contract_id: string
+  raw_topics: string[]
+  raw_value: string
+  applied: boolean
+  created_at: Date
+  applied_at?: Date
+}
+
+/** A ledger range the indexer skipped because the RPC node no longer retained it. */
+export interface IndexerGapRecord {
+  _id: string
+  indexer: string
+  contract_id: string
+  from_ledger: number
+  to_ledger: number
+  missing_ledgers: number
+  status: "open" | "backfilled" | "accepted"
+  detected_at: Date
+  resolved_at?: Date
+}
+
+export const DEFAULT_PAGE_SIZE = 20
+export const MAX_PAGE_SIZE = 100
 
 let client: MongoClient | null = null
 let db: Db | null = null
+let connecting: Promise<Db> | null = null
+const indexesByDb = new WeakMap<Db, Promise<void>>()
 
-export async function connectMongo(): Promise<Db> {
-  if (db) return db
+export function ensureIndexes(database: Db): Promise<void> {
+  const existing = indexesByDb.get(database)
+  if (existing) return existing
+
+  const indexes: Array<{ collection: string; keys: Record<string, 1 | -1>; unique?: boolean }> = [
+    { collection: "settlements", keys: { id: 1 }, unique: true },
+    { collection: "settlements", keys: { status: 1 } },
+    { collection: "invoices", keys: { invoice_id: 1 }, unique: true },
+    { collection: "invoices", keys: { status: 1 } },
+    { collection: "invoices", keys: { merchant_address: 1 } },
+    { collection: "invoices", keys: { status: 1, merchant_address: 1 } },
+    { collection: "invoices", keys: { created_at: -1 } },
+    { collection: "invoices", keys: { created_at: -1, invoice_id: -1 } },
+    { collection: "indexer_cursors", keys: { _id: 1 }, unique: true },
+    { collection: "invoice_events", keys: { event_id: 1 }, unique: true },
+    { collection: "invoice_events", keys: { invoice_id: 1, ledger: 1 } },
+    { collection: "webhook_pending_deliveries", keys: { _id: 1 }, unique: true },
+    { collection: "webhook_dead_letters", keys: { _id: 1 }, unique: true },
+    { collection: "webhook_dead_letters", keys: { failed_at: -1 } },
+    { collection: "compliance_audit", keys: { event_id: 1 }, unique: true },
+    { collection: "compliance_audit", keys: { address: 1, ledger: -1 } },
+    { collection: "compliance_audit", keys: { event_type: 1, ledger: -1 } },
+    { collection: "compliance_audit", keys: { ledger: -1 } },
+  ]
+
+  const creating = Promise.all(
+    indexes.map(async ({ collection, keys, unique }) => {
+      const indexName = await database.collection(collection).createIndex(keys, unique ? { unique } : {})
+      logger.info({ collection, indexName }, "MongoDB index ensured")
+    }),
+  ).then(() => undefined)
+  const result = creating.catch((error: unknown) => {
+    indexesByDb.delete(database)
+    throw error
+  })
+  indexesByDb.set(database, result)
+  return result
+}
+
+// ---------------------------------------------------------------------------
+// #210 — Connection options: explicit pool size and timeouts so a slow or
+// unreachable MongoDB fails fast instead of hanging indefinitely.
+// ---------------------------------------------------------------------------
+
+const MONGO_OPTIONS = {
+  /** Maximum number of connections in the pool. */
+  maxPoolSize: 10,
+  /** Minimum number of idle connections to maintain. */
+  minPoolSize: 2,
+  /**
+   * How long (ms) the driver will wait when selecting a server before
+   * throwing a MongoServerSelectionError.  Default is 30 000; we tighten
+   * it so startup failures are discovered quickly.
+   */
+  serverSelectionTimeoutMS: 5_000,
+  /**
+   * How long (ms) to wait for a new connection to be established.
+   * Prevents requests from hanging when all pool slots are busy.
+   */
+  connectTimeoutMS: 10_000,
+  /**
+   * How long (ms) to wait for a socket operation to complete before
+   * giving up and returning an error to the caller.
+   */
+  socketTimeoutMS: 45_000,
+}
+
+export function connectMongo(): Promise<Db> {
+  if (db) return ensureIndexes(db).then(() => db!)
+  if (connecting) return connecting
+
+  connecting = connectMongoOnce().finally(() => {
+    connecting = null
+  })
+  return connecting
+}
+
+async function connectMongoOnce(): Promise<Db> {
 
   const uri = process.env.MONGODB_URI ?? "mongodb://localhost:27017"
   const dbName = process.env.MONGODB_DB ?? "comebackhere"
 
-  client = new MongoClient(uri)
-  await client.connect()
+  client = new MongoClient(uri, MONGO_OPTIONS)
+
+  try {
+    await client.connect()
+  } catch (err) {
+    client = null
+    // Provide a clear, actionable error message rather than letting the raw
+    // driver error bubble up silently.
+    const message =
+      err instanceof MongoServerSelectionError
+        ? `MongoDB unreachable at ${uri} — check that the server is running and MONGODB_URI is correct. ` +
+          `Original error: ${err.message}`
+        : `Failed to connect to MongoDB: ${err instanceof Error ? err.message : String(err)}`
+
+    logger.error({ errorName: err instanceof Error ? err.name : "UnknownError" }, "MongoDB connection failed")
+    // Re-throw so callers (routes, startup health-checks) can respond with 5xx.
+    throw Object.assign(new Error(message), { status: 503 })
+  }
+
   db = client.db(dbName)
 
-  const settlements = db.collection<SettlementRecord>("settlements")
-  await settlements.createIndex({ id: 1 }, { unique: true })
-  await settlements.createIndex({ status: 1 })
+  // Attach a top-level error handler so an unexpected mid-run topology
+  // failure is logged clearly rather than crashing the process silently.
+  client.on("error", (err: Error) => {
+    logger.error({ errorName: err.name }, "MongoDB client error")
+  })
 
-  const cursors = db.collection<IndexerCursor>("indexer_cursors")
-  await cursors.createIndex({ _id: 1 }, { unique: true })
+  client.on("close", () => {
+    logger.warn("MongoDB connection closed; subsequent requests will reconnect")
+    // Reset cached references so the next call to connectMongo() re-establishes
+    // the connection instead of returning a stale db handle.
+    db = null
+    client = null
+  })
+
+  await ensureIndexes(db)
 
   return db
+}
+
+export function getInvoicesCollection(database: Db): Collection<InvoiceRecord> {
+  return database.collection<InvoiceRecord>("invoices")
 }
 
 export function getSettlementsCollection(database: Db): Collection<SettlementRecord> {
@@ -52,10 +273,29 @@ export function getCursorsCollection(database: Db): Collection<IndexerCursor> {
   return database.collection<IndexerCursor>("indexer_cursors")
 }
 
+export function getInvoiceEventsCollection(database: Db): Collection<InvoiceEventRecord> {
+  return database.collection<InvoiceEventRecord>("invoice_events")
+}
+
+export function getIndexerGapsCollection(database: Db): Collection<IndexerGapRecord> {
+  return database.collection<IndexerGapRecord>("indexer_gaps")
+}
+
+export function getComplianceAuditCollection(database: Db): Collection<ComplianceAuditRecord> {
+  return database.collection<ComplianceAuditRecord>("compliance_audit")
+}
+
 export async function closeMongo(): Promise<void> {
   if (client) {
     await client.close()
     client = null
     db = null
   }
+}
+
+/** Exported for tests — resets the cached singleton so each test gets a fresh connection. */
+export function _resetMongoSingleton(): void {
+  client = null
+  db = null
+  connecting = null
 }

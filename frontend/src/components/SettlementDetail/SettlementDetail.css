@@ -285,3 +285,122 @@
   font-size: 0.875rem;
   color: #991b1b;
 }
+
+/* ── Status Timeline ──────────────────────────────────────────────────────── */
+
+.status-timeline {
+  margin-top: 1.5rem;
+}
+
+.status-timeline__title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  color: #111827;
+}
+
+.status-timeline__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  position: relative;
+}
+
+/* Vertical connector line running through the icon column */
+.status-timeline__list::before {
+  content: '';
+  position: absolute;
+  top: 12px;
+  left: 11px;
+  bottom: 12px;
+  width: 2px;
+  background: #e5e7eb;
+  z-index: 0;
+}
+
+.status-timeline__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  position: relative;
+  padding-bottom: 1.25rem;
+}
+
+.status-timeline__item:last-child {
+  padding-bottom: 0;
+}
+
+.status-timeline__dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  flex-shrink: 0;
+  z-index: 1;
+  position: relative;
+  top: 2px;
+}
+
+/* Dot colours keyed to Settlement status */
+.status-timeline__dot--pending        { background: #f59e0b; }
+.status-timeline__dot--executed       { background: #22c55e; }
+.status-timeline__dot--partiallyexecuted { background: #3b82f6; }
+.status-timeline__dot--onhold         { background: #ef4444; }
+.status-timeline__dot--cancelled      { background: #6b7280; }
+.status-timeline__dot--proposed       { background: #8b5cf6; }
+.status-timeline__dot--approved       { background: #0ea5e9; }
+.status-timeline__dot--default        { background: #9ca3af; }
+
+.status-timeline__content {
+  flex: 1;
+  min-width: 0;
+}
+
+.status-timeline__status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.status-timeline__status-label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #111827;
+}
+
+.status-timeline__timestamp {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.status-timeline__actor {
+  font-size: 0.75rem;
+  color: #6b7280;
+  font-family: monospace;
+}
+
+.status-timeline__note {
+  margin-top: 2px;
+  font-size: 0.8125rem;
+  color: #6b7280;
+  font-style: italic;
+}
+
+.status-timeline__empty {
+  font-size: 0.875rem;
+  color: #6b7280;
+  padding: 0.5rem 0;
+}
+
+.status-timeline__error {
+  font-size: 0.875rem;
+  color: #991b1b;
+  padding: 0.5rem 0;
+}
+
+.status-timeline__loading {
+  font-size: 0.875rem;
+  color: #6b7280;
+  padding: 0.5rem 0;
+}

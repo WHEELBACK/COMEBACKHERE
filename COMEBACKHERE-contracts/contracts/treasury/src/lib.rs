@@ -1,80 +1,316 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, Symbol, Vec};
+#[cfg(test)]
+extern crate std;
 
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, Symbol,
+    Vec,
+};
+
+mod events;
+
+const DEFAULT_SETTLEMENT_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
+
+/// Status of a settlement proposal within the Treasury contract.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SettlementStatus {
+    /// Proposal is created and pending approval or execution.
     Pending,
+    /// Proposal has been fully executed.
     Executed,
+    /// Proposal has been partially executed.
     PartiallyExecuted,
+    /// Proposal is placed on hold due to a dispute.
     OnHold,
+    /// Proposal was cancelled.
     Cancelled,
 }
 
+/// Represents a settlement proposal managed by the Treasury contract.
 #[contracttype]
 pub struct Settlement {
+    /// Token contract address for settlement transfers.
     pub token: Address,
+    /// Amount to be settled.
     pub amount: u64,
+    /// Merchant recipient address.
     pub merchant: Address,
+    /// Current status of the settlement.
     pub status: SettlementStatus,
+    /// Accumulated approval weight from authorized signers.
     pub approval_weight: u64,
+    /// Address of the signer who proposed the settlement.
     pub proposer: Address,
+    /// Ledger timestamp at which this proposal expires.
+    pub expires_at: u64,
 }
 
+/// Tracks cumulative withdrawals of one token within the current rolling
+/// 24h ledger-time window, used to enforce `daily_withdraw_limit`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawWindow {
+    /// Ledger timestamp (seconds) at which the current window started.
+    pub window_start: u64,
+    /// Cumulative amount withdrawn since `window_start`.
+    pub spent: u64,
+}
+
+/// Error types returned by Treasury contract operations.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum TreasuryError {
+    /// The contract is currently paused.
     ContractPaused = 1,
+    /// The settlement is not in `Pending` status.
     NotPending = 2,
+    /// Accumulated approval weight is insufficient for threshold.
     InsufficientApprovals = 3,
+    /// Token is not allowed by the token allowlist policy.
     TokenNotAllowed = 4,
+    /// Caller is unauthorized to perform the action.
     Unauthorized = 5,
+    /// Provided threshold is invalid (e.g. 0).
     InvalidThreshold = 6,
+    DuplicateSigner = 7,
+    InvalidWeightSum = 8,
+    NotSettlementParty = 9,
+    /// `update_threshold` was called with a threshold above the sum of all
+    /// registered signer weights.
+    ThresholdExceedsWeight = 10,
+    /// `get_pending_settlements` was called with `limit` above `MAX_PAGE_SIZE`.
+    InvalidPagination = 11,
+    /// `rotate_signer` was called with an `old_signer` that has no registered
+    /// weight (i.e. is not a current signer).
+    SignerNotFound = 12,
+    /// `withdraw` was called for a token with a configured
+    /// `daily_withdraw_limit` and the withdrawal would push cumulative
+    /// withdrawals for the current 24h window above that limit.
+    DailyLimitExceeded = 13,
+    /// An upgrade was requested while a settlement was partially executed.
+    UpgradeInProgress = 14,
 }
 
+// At five seconds per ledger, renew instance state from roughly 335 days
+// remaining back to roughly 359 days on each successful mutation.
+const INSTANCE_TTL_THRESHOLD: u32 = 5_800_000;
+const INSTANCE_TTL_EXTEND_TO: u32 = 6_200_000;
+
+/// Storage keys for Treasury contract instance state.
 #[contracttype]
 pub enum DataKey {
+    /// Admin address key.
     Admin,
+    /// Nominated-but-not-yet-accepted admin address (two-step transfer).
+    PendingAdmin,
+    /// Paused status key.
     Paused,
+    /// Mapping of signer address to voting weight key.
     Signer(Address),
+    /// List of all addresses ever registered as a signer, so total signer
+    /// weight can be recomputed on demand instead of relying on a cached
+    /// counter that could drift out of sync.
+    SignerList,
+    /// Settlement proposal storage key by settlement ID.
     Settlement(u64),
+    /// Auto-incrementing settlement ID counter key.
     NextSettlementId,
+    /// Approval threshold weight key.
     Threshold,
+    /// Token allowlist key.
     TokenAllowlist,
+    /// Per-token admin-configured daily withdrawal cap.
+    DailyWithdrawLimit(Address),
+    /// Per-token rolling-window withdrawal ledger; value is a [`WithdrawWindow`].
+    WithdrawWindow(Address),
+    /// Admin-configured settlement proposal lifetime in seconds.
+    SettlementTtl,
 }
 
 fn is_paused(e: &Env) -> bool {
-    e.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+    e.storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
 }
 
 fn check_not_paused(e: &Env) -> Result<(), TreasuryError> {
     if is_paused(e) {
         Err(TreasuryError::ContractPaused)
     } else {
+        extend_instance_ttl(e);
         Ok(())
     }
 }
 
+fn extend_instance_ttl(e: &Env) {
+    e.storage()
+        .instance()
+        .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+}
+
+/// Main Treasury contract managing multi-sig settlement approvals, token allowlists, and contract pauses.
 #[contract]
 pub struct TreasuryContract;
 
 #[contractimpl]
 impl TreasuryContract {
-    pub fn initialize(e: Env, signers: Vec<(Address, u64)>, threshold: u64, admin: Address) {
+    /// Replaces this contract's Wasm while preserving its address and storage.
+    /// The stored admin must authorize the call. Upgrades are rejected while any
+    /// settlement is in the partially executed state.
+    pub fn upgrade(e: Env, new_wasm_hash: BytesN<32>) -> Result<(), TreasuryError> {
+        let admin: Address = e.storage().instance().get(&DataKey::Admin).unwrap();
+        Self::check_admin(&e, &admin)?;
+
+        let next_settlement_id: u64 = e
+            .storage()
+            .instance()
+            .get(&DataKey::NextSettlementId)
+            .unwrap_or(1u64);
+        for settlement_id in 1..next_settlement_id {
+            if let Some(settlement) = e
+                .storage()
+                .instance()
+                .get::<DataKey, Settlement>(&DataKey::Settlement(settlement_id))
+            {
+                if settlement.status == SettlementStatus::PartiallyExecuted {
+                    return Err(TreasuryError::UpgradeInProgress);
+                }
+            }
+        }
+
+        e.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        e.events().publish(
+            (Symbol::new(&e, "upgraded"),),
+            new_wasm_hash,
+        );
+        Ok(())
+    }
+
+    /// Initiates a two-step admin transfer by recording `new_admin` as the
+    /// pending admin. The change does **not** take effect until `accept_admin`
+    /// is called by `new_admin`. Overwriting a previous (unaccepted) nomination
+    /// is allowed — only the most recent nominee can accept.
+    ///
+    /// The contract must not be paused. Only the current admin may call this.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Current admin address (must authenticate).
+    /// * `new_admin` - Address nominated as the next admin.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if the contract is paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if `admin` is not the stored admin.
+    ///
+    /// # Events
+    /// Emits `admin_transfer_initiated(admin, new_admin)` on success.
+    pub fn transfer_admin(
+        e: Env,
+        admin: Address,
+        new_admin: Address,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+        e.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        e.events().publish(
+            (Symbol::new(&e, "admin_transfer_initiated"),),
+            (admin, new_admin),
+        );
+        Ok(())
+    }
+
+    /// Completes a two-step admin transfer initiated by [`Self::transfer_admin`].
+    ///
+    /// The caller must be the address previously nominated. On success the
+    /// caller becomes the new admin, the old admin loses all privileges
+    /// immediately, and the `PendingAdmin` key is cleared.
+    ///
+    /// The contract must not be paused.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `new_admin` - Must be the pending admin set by `transfer_admin`.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if the contract is paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if `new_admin` does not match
+    ///   the stored `PendingAdmin`, or if no transfer was ever initiated.
+    ///
+    /// # Events
+    /// Emits `admin_transfer_accepted(new_admin)` on success.
+    pub fn accept_admin(e: Env, new_admin: Address) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        new_admin.require_auth();
+        let pending: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(TreasuryError::Unauthorized)?;
+        if new_admin != pending {
+            return Err(TreasuryError::Unauthorized);
+        }
+        e.storage().instance().set(&DataKey::Admin, &new_admin);
+        e.storage().instance().remove(&DataKey::PendingAdmin);
+        e.events().publish(
+            (Symbol::new(&e, "admin_transfer_accepted"),),
+            new_admin,
+        );
+        Ok(())
+    }
+
+    pub fn initialize(
+        e: Env,
+        signers: Vec<(Address, u64)>,
+        threshold: u64,
+        admin: Address,
+    ) -> Result<(), TreasuryError> {
         admin.require_auth();
+        let mut seen: Vec<Address> = Vec::new(&e);
+        let mut total_weight: u64 = 0;
+        for (signer, weight) in signers.iter() {
+            if seen.contains(&signer) {
+                return Err(TreasuryError::DuplicateSigner);
+            }
+            seen.push_back(signer.clone());
+            total_weight += weight;
+        }
+        if total_weight < threshold {
+            return Err(TreasuryError::InvalidWeightSum);
+        }
         e.storage().instance().set(&DataKey::Admin, &admin);
         e.storage().instance().set(&DataKey::Threshold, &threshold);
         e.storage().instance().set(&DataKey::Paused, &false);
         e.storage().instance().set(&DataKey::NextSettlementId, &1u64);
+        let mut signer_list: Vec<Address> = Vec::new(&e);
         for (signer, weight) in signers.iter() {
             e.storage()
                 .instance()
                 .set(&DataKey::Signer(signer.clone()), &weight);
+            signer_list.push_back(signer.clone());
         }
+        e.storage().instance().set(&DataKey::SignerList, &signer_list);
+        extend_instance_ttl(&e);
+        Ok(())
     }
 
+    /// Sets or updates the voting weight for a signer address.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Admin address (must authenticate).
+    /// * `signer` - Signer address whose weight is being updated.
+    /// * `weight` - Voting weight assigned to the signer (0 to remove signer).
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract operations are paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if `admin` is not the stored contract admin.
     pub fn set_signer(
         e: Env,
         admin: Address,
@@ -85,10 +321,125 @@ impl TreasuryContract {
         Self::check_admin(&e, &admin)?;
         e.storage()
             .instance()
-            .set(&DataKey::Signer(signer), &weight);
+            .set(&DataKey::Signer(signer.clone()), &weight);
+        // Maintain the signer list so update_threshold can compute total weight.
+        let mut signer_list: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::SignerList)
+            .unwrap_or_else(|| Vec::new(&e));
+        if !signer_list.contains(&signer) {
+            signer_list.push_back(signer);
+            e.storage().instance().set(&DataKey::SignerList, &signer_list);
+        }
         Ok(())
     }
 
+    /// Rotates a signer's key: deregisters `old_signer` entirely and
+    /// registers `new_signer` with `new_weight` in its place. Unlike calling
+    /// `set_signer` twice, this keeps `SignerList` (and therefore
+    /// `total_signer_weight`) exactly in sync with the active signer set
+    /// regardless of whether `new_weight` is higher or lower than the weight
+    /// `old_signer` held — `total_signer_weight` is always recomputed from
+    /// live storage rather than tracked as a separate running total, so it
+    /// cannot drift out of sync with the individual signer weights.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Admin address (must authenticate).
+    /// * `old_signer` - The signer address being replaced; must currently hold non-zero weight.
+    /// * `new_signer` - The replacement signer address.
+    /// * `new_weight` - Voting weight assigned to `new_signer`.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract operations are paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if `admin` is not the stored contract admin.
+    /// * Returns [`TreasuryError::SignerNotFound`] if `old_signer` is not a current signer.
+    /// * Returns [`TreasuryError::DuplicateSigner`] if `new_signer` is already a distinct
+    ///   active signer.
+    ///
+    /// # Note
+    /// Settlements that already accumulated approval weight from `old_signer` keep that
+    /// weight as a snapshot on the settlement record — rotating (or reweighting) a signer
+    /// does not retroactively change `approval_weight` on in-flight settlements, so a
+    /// settlement that already reached quorum remains executable.
+    pub fn rotate_signer(
+        e: Env,
+        admin: Address,
+        old_signer: Address,
+        new_signer: Address,
+        new_weight: u64,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+
+        let old_weight: u64 = e
+            .storage()
+            .instance()
+            .get(&DataKey::Signer(old_signer.clone()))
+            .unwrap_or(0u64);
+        if old_weight == 0 {
+            return Err(TreasuryError::SignerNotFound);
+        }
+
+        if new_signer != old_signer {
+            let existing_new_weight: u64 = e
+                .storage()
+                .instance()
+                .get(&DataKey::Signer(new_signer.clone()))
+                .unwrap_or(0u64);
+            if existing_new_weight > 0 {
+                return Err(TreasuryError::DuplicateSigner);
+            }
+        }
+
+        e.storage()
+            .instance()
+            .remove(&DataKey::Signer(old_signer.clone()));
+        e.storage()
+            .instance()
+            .set(&DataKey::Signer(new_signer.clone()), &new_weight);
+
+        let signer_list: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::SignerList)
+            .unwrap_or_else(|| Vec::new(&e));
+        let mut updated_list: Vec<Address> = Vec::new(&e);
+        for s in signer_list.iter() {
+            if s != old_signer {
+                updated_list.push_back(s);
+            }
+        }
+        if !updated_list.contains(&new_signer) {
+            updated_list.push_back(new_signer.clone());
+        }
+        e.storage().instance().set(&DataKey::SignerList, &updated_list);
+
+        e.events().publish(
+            (Symbol::new(&e, "signer_rotated"),),
+            (old_signer, new_signer, old_weight, new_weight),
+        );
+        Ok(())
+    }
+
+    /// Proposes a new settlement for approval and execution.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `signer` - Proposer address (must authenticate).
+    /// * `token` - Token address for the settlement.
+    /// * `amount` - Settlement amount.
+    /// * `merchant` - Merchant recipient address.
+    ///
+    /// # Returns
+    /// * `Ok(u64)` - The auto-incremented settlement ID for the created proposal.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::TokenNotAllowed`] if token allowlist is non-empty and `token` is not allowed.
+    ///   Checked first, before the pause and signer-auth checks, so a disallowed token is
+    ///   rejected without paying for the rest of a full validation pass.
+    /// * Returns [`TreasuryError::ContractPaused`] if contract operations are paused.
     pub fn propose_settlement(
         e: Env,
         signer: Address,
@@ -96,9 +447,6 @@ impl TreasuryContract {
         amount: u64,
         merchant: Address,
     ) -> Result<u64, TreasuryError> {
-        check_not_paused(&e)?;
-        signer.require_auth();
-
         let allowlist: Vec<Address> = e
             .storage()
             .instance()
@@ -108,11 +456,19 @@ impl TreasuryContract {
             return Err(TreasuryError::TokenNotAllowed);
         }
 
+        check_not_paused(&e)?;
+        signer.require_auth();
+
         let settlement_id: u64 = e
             .storage()
             .instance()
             .get(&DataKey::NextSettlementId)
             .unwrap_or(1u64);
+        let expires_at = e
+            .ledger()
+            .timestamp()
+            .checked_add(Self::get_settlement_ttl(e.clone()))
+            .ok_or(TreasuryError::InvalidSettlementTtl)?;
 
         let settlement = Settlement {
             token,
@@ -121,6 +477,7 @@ impl TreasuryContract {
             status: SettlementStatus::Pending,
             approval_weight: 0u64,
             proposer: signer,
+            expires_at,
         };
 
         e.storage()
@@ -133,6 +490,49 @@ impl TreasuryContract {
         Ok(settlement_id)
     }
 
+    /// Cancels a pending settlement when called by its proposer or the admin.
+    pub fn cancel_settlement(
+        e: Env,
+        caller: Address,
+        settlement_id: u64,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        caller.require_auth();
+
+        let mut settlement: Settlement = e
+            .storage()
+            .instance()
+            .get(&DataKey::Settlement(settlement_id))
+            .ok_or(TreasuryError::SettlementNotFound)?;
+        if settlement.status != SettlementStatus::Pending {
+            return Err(TreasuryError::NotPending);
+        }
+        let admin: Address = e.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != settlement.proposer && caller != admin {
+            return Err(TreasuryError::Unauthorized);
+        }
+
+        settlement.status = SettlementStatus::Cancelled;
+        e.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &settlement);
+        e.events().publish(
+            (Symbol::new(&e, "settlement_cancelled"),),
+            (settlement_id, caller, SettlementStatus::Cancelled),
+        );
+        Ok(())
+    }
+
+    /// Casts an approval vote on a pending settlement proposal.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `signer` - Authorized signer address casting the vote (must authenticate).
+    /// * `settlement_id` - ID of the settlement proposal to approve.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract operations are paused.
+    /// * Returns [`TreasuryError::NotPending`] if settlement is not in `Pending` status.
     pub fn approve_settlement(
         e: Env,
         signer: Address,
@@ -143,6 +543,9 @@ impl TreasuryContract {
         let mut settlement = Self::get_settlement_internal(&e, settlement_id);
         if settlement.status != SettlementStatus::Pending {
             return Err(TreasuryError::NotPending);
+        }
+        if e.ledger().timestamp() >= settlement.expires_at {
+            return Err(TreasuryError::SettlementExpired);
         }
         let weight: u64 = e
             .storage()
@@ -156,6 +559,18 @@ impl TreasuryContract {
         Ok(())
     }
 
+    /// Executes a pending settlement once accumulated approval weight meets or exceeds threshold.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `signer` - Caller address executing the settlement (must authenticate).
+    /// * `settlement_id` - ID of the settlement proposal to execute.
+    /// * `_token_contract` - Token contract address.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract operations are paused.
+    /// * Returns [`TreasuryError::NotPending`] if settlement is not in `Pending` status.
+    /// * Returns [`TreasuryError::InsufficientApprovals`] if accumulated approval weight is below threshold.
     pub fn execute_settlement(
         e: Env,
         signer: Address,
@@ -167,6 +582,9 @@ impl TreasuryContract {
         let mut settlement = Self::get_settlement_internal(&e, settlement_id);
         if settlement.status != SettlementStatus::Pending {
             return Err(TreasuryError::NotPending);
+        }
+        if e.ledger().timestamp() >= settlement.expires_at {
+            return Err(TreasuryError::SettlementExpired);
         }
         let threshold: u64 = e
             .storage()
@@ -183,17 +601,90 @@ impl TreasuryContract {
         Ok(())
     }
 
+    /// Previews the outcome of calling [`Self::execute_settlement`] on `settlement_id`
+    /// right now, performing the same checks (quorum reached, treasury balance sufficient)
+    /// without mutating any contract state. Intended for signers/frontends (e.g.
+    /// `SettlementDetail`) to preview the outcome and USDC balance impact before a signer
+    /// commits to the real transaction.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `settlement_id` - ID of the settlement proposal to preview.
+    ///
+    /// # Returns
+    /// * [`SettlementSimulation`] describing whether execution would succeed, along with
+    ///   the approval and balance figures behind that verdict.
+    pub fn simulate_settlement(
+        e: Env,
+        settlement_id: u64,
+    ) -> Result<SettlementSimulation, TreasuryError> {
+        let settlement: Settlement = e
+            .storage()
+            .instance()
+            .get(&DataKey::Settlement(settlement_id))
+            .ok_or(TreasuryError::SettlementNotFound)?;
+
+        let threshold: u64 = e
+            .storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(0u64);
+        let quorum_reached = settlement.approval_weight >= threshold;
+
+        let treasury_balance: i128 = e.invoke_contract(
+            &settlement.token,
+            &Symbol::new(&e, "balance"),
+            soroban_sdk::vec![&e, e.current_contract_address().into_val(&e)],
+        );
+        let settlement_amount: i128 = settlement.amount as i128;
+        let sufficient_balance = treasury_balance >= settlement_amount;
+
+        let would_succeed = !is_paused(&e)
+            && settlement.status == SettlementStatus::Pending
+            && e.ledger().timestamp() < settlement.expires_at
+            && quorum_reached
+            && sufficient_balance;
+
+        Ok(SettlementSimulation {
+            settlement_id,
+            status: settlement.status,
+            would_succeed,
+            approval_weight: settlement.approval_weight,
+            threshold,
+            settlement_amount: settlement.amount,
+            treasury_balance,
+            projected_balance: treasury_balance - settlement_amount,
+        })
+    }
+
+    /// Retrieves a paginated list of pending settlement IDs.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `offset` - Optional offset for pagination (defaults to 0).
+    /// * `limit` - Optional page limit (defaults to 100, max 100).
+    ///
+    /// # Returns
+    /// * `Vec<u64>` - List of pending settlement IDs matching pagination.
     pub fn get_pending_settlements(
         e: Env,
         offset: Option<u32>,
         limit: Option<u32>,
-    ) -> Vec<u64> {
+    ) -> Result<Vec<u64>, TreasuryError> {
+        const MAX_PAGE_SIZE: u32 = 100;
         let next_id: u64 = e
             .storage()
             .instance()
             .get(&DataKey::NextSettlementId)
             .unwrap_or(1u64);
-        let cap: u32 = limit.unwrap_or(100).min(100);
+        let cap: u32 = if let Some(limit) = limit {
+            if limit > MAX_PAGE_SIZE {
+                return Err(TreasuryError::InvalidPagination);
+            }
+            limit
+        } else {
+            MAX_PAGE_SIZE
+        };
         let skip: u32 = offset.unwrap_or(0);
 
         let mut result: Vec<u64> = Vec::new(&e);
@@ -206,7 +697,9 @@ impl TreasuryContract {
                 .instance()
                 .get::<DataKey, Settlement>(&DataKey::Settlement(id))
             {
-                if matches!(s.status, SettlementStatus::Pending) {
+                if matches!(s.status, SettlementStatus::Pending)
+                    && e.ledger().timestamp() < s.expires_at
+                {
                     if matched >= skip {
                         if collected >= cap {
                             break;
@@ -218,7 +711,26 @@ impl TreasuryContract {
                 }
             }
         }
-        result
+        Ok(result)
+    }
+
+    /// Sums the voting weight of every address in the signer list.
+    fn total_signer_weight(e: &Env) -> u64 {
+        let signer_list: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::SignerList)
+            .unwrap_or_else(|| Vec::new(e));
+        let mut total: u64 = 0;
+        for signer in signer_list.iter() {
+            let weight: u64 = e
+                .storage()
+                .instance()
+                .get(&DataKey::Signer(signer))
+                .unwrap_or(0);
+            total += weight;
+        }
+        total
     }
 
     fn check_admin(e: &Env, admin: &Address) -> Result<(), TreasuryError> {
@@ -230,18 +742,94 @@ impl TreasuryContract {
         Ok(())
     }
 
+    /// Pauses non-admin contract operations.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Admin address (must authenticate).
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::Unauthorized`] if caller is not the contract admin.
     pub fn pause(e: Env, admin: Address) -> Result<(), TreasuryError> {
         Self::check_admin(&e, &admin)?;
         e.storage().instance().set(&DataKey::Paused, &true);
+        extend_instance_ttl(&e);
+        e.events().publish(
+            (Symbol::new(&e, "contract_paused"),),
+            (),
+        );
         Ok(())
     }
 
+    /// Unpauses contract operations.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Admin address (must authenticate).
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::Unauthorized`] if caller is not the contract admin.
     pub fn unpause(e: Env, admin: Address) -> Result<(), TreasuryError> {
         Self::check_admin(&e, &admin)?;
         e.storage().instance().set(&DataKey::Paused, &false);
+        extend_instance_ttl(&e);
+        e.events().publish(
+            (Symbol::new(&e, "contract_unpaused"),),
+            (),
+        );
         Ok(())
     }
 
+    /// Returns the current total approval threshold weight required for executing settlements.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    ///
+    /// # Returns
+    /// * `u64` - Current approval weight threshold.
+    pub fn get_threshold(e: Env) -> u64 {
+        e.storage()
+            .instance()
+            .get(&DataKey::Threshold)
+            .unwrap_or(0u64)
+    }
+
+    /// Returns the configured settlement TTL, or the 30-day default.
+    pub fn get_settlement_ttl(e: Env) -> u64 {
+        e.storage()
+            .instance()
+            .get(&DataKey::SettlementTtl)
+            .unwrap_or(DEFAULT_SETTLEMENT_TTL_SECONDS)
+    }
+
+    /// Sets the lifetime, in seconds, of newly proposed settlements.
+    pub fn set_settlement_ttl(
+        e: Env,
+        admin: Address,
+        ttl_seconds: u64,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+        if ttl_seconds == 0 {
+            return Err(TreasuryError::InvalidSettlementTtl);
+        }
+        e.storage()
+            .instance()
+            .set(&DataKey::SettlementTtl, &ttl_seconds);
+        Ok(())
+    }
+
+    /// Updates the required approval threshold weight for settlement execution.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Admin address (must authenticate).
+    /// * `new_threshold` - New approval threshold weight (must be > 0).
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if caller is not the contract admin.
+    /// * Returns [`TreasuryError::InvalidThreshold`] if `new_threshold` is 0.
     pub fn update_threshold(
         e: Env,
         admin: Address,
@@ -252,12 +840,17 @@ impl TreasuryContract {
         if new_threshold == 0 {
             return Err(TreasuryError::InvalidThreshold);
         }
+        let threshold = new_threshold as u64;
+        // Reject if the requested threshold exceeds the sum of all signer weights.
+        let total_weight = Self::total_signer_weight(&e);
+        if threshold > total_weight {
+            return Err(TreasuryError::ThresholdExceedsWeight);
+        }
         let old_threshold: u64 = e
             .storage()
             .instance()
             .get(&DataKey::Threshold)
             .unwrap_or(0u64);
-        let threshold = new_threshold as u64;
         e.storage().instance().set(&DataKey::Threshold, &threshold);
         e.events().publish(
             (Symbol::new(&e, "threshold_updated"),),
@@ -266,6 +859,62 @@ impl TreasuryContract {
         Ok(())
     }
 
+    /// Returns the sum of all currently registered signer weights, recomputed
+    /// live from storage on every call (not a cached counter), so it can
+    /// never drift out of sync with the individual `Signer(address)` entries.
+    pub fn get_total_signer_weight(e: Env) -> u64 {
+        Self::total_signer_weight(&e)
+    }
+
+    /// Returns current signers and weights in stable registration order.
+    pub fn get_signers(e: Env) -> Vec<(Address, u64)> {
+        let signer_list: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::SignerList)
+            .unwrap_or_else(|| Vec::new(&e));
+        let mut signers = Vec::new(&e);
+        for signer in signer_list.iter() {
+            let weight: u64 = e
+                .storage()
+                .instance()
+                .get(&DataKey::Signer(signer.clone()))
+                .unwrap_or(0u64);
+            if weight > 0 {
+                signers.push_back((signer, weight));
+            }
+        }
+        signers
+    }
+
+    fn total_signer_weight(e: &Env) -> u64 {
+        let signer_list: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::SignerList)
+            .unwrap_or_else(|| Vec::new(e));
+        let mut total: u64 = 0;
+        for signer in signer_list.iter() {
+            let weight: u64 = e
+                .storage()
+                .instance()
+                .get(&DataKey::Signer(signer))
+                .unwrap_or(0u64);
+            total += weight;
+        }
+        total
+    }
+
+    /// Places a pending settlement on hold by raising a dispute.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `signer` - Authorized signer address raising the dispute (must authenticate).
+    /// * `settlement_id` - ID of the settlement proposal to dispute.
+    /// * `_reason` - Numeric reason code describing the dispute.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
     pub fn raise_dispute(
         e: Env,
         signer: Address,
@@ -274,7 +923,11 @@ impl TreasuryContract {
     ) -> Result<(), TreasuryError> {
         check_not_paused(&e)?;
         signer.require_auth();
-        let mut settlement = Self::get_settlement_internal(&e, settlement_id);
+        let settlement = Self::get_settlement_internal(&e, settlement_id);
+        if signer != settlement.merchant {
+            return Err(TreasuryError::NotSettlementParty);
+        }
+        let mut settlement = settlement;
         settlement.status = SettlementStatus::OnHold;
         e.storage()
             .instance()
@@ -282,34 +935,265 @@ impl TreasuryContract {
         Ok(())
     }
 
+    /// Resolves a dispute on a settlement proposal.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `signer` - Authorized signer address resolving the dispute (must authenticate).
+    /// * `settlement_id` - ID of the disputed settlement.
+    /// * `resolve_in_favor` - Whether the outcome favors the merchant.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
+    /// * Returns [`TreasuryError::NotDisputed`] if the settlement is not on hold.
     pub fn resolve_dispute(
         e: Env,
         signer: Address,
-        _settlement_id: u64,
-        _resolve_in_favor: bool,
+        settlement_id: u64,
+        resolve_in_favor: bool,
     ) -> Result<(), TreasuryError> {
         check_not_paused(&e)?;
         signer.require_auth();
+        let mut settlement = Self::get_settlement_internal(&e, settlement_id);
+        if settlement.status != SettlementStatus::OnHold {
+            return Err(TreasuryError::NotDisputed);
+        }
+        let resolution_weight = settlement.approval_weight;
+        settlement.status = if resolve_in_favor {
+            SettlementStatus::Pending
+        } else {
+            SettlementStatus::Cancelled
+        };
+        e.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &settlement);
+        crate::events::dispute_resolved(
+            &e,
+            &settlement_id,
+            &resolve_in_favor,
+            &resolution_weight,
+        );
         Ok(())
     }
 
-    pub fn deposit(e: Env, from: Address, _amount: u64) -> Result<(), TreasuryError> {
+    /// Update the merchant (payout) address on a pending settlement.
+    ///
+    /// Only the current merchant of the settlement may call this.
+    /// The change takes effect immediately; execution will send funds
+    /// to the new address.
+    pub fn update_settlement_merchant(
+        e: Env,
+        merchant_caller: Address,
+        settlement_id: u64,
+        new_merchant: Address,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        merchant_caller.require_auth();
+
+        let mut settlement = Self::get_settlement_internal(&e, settlement_id);
+
+        if settlement.status != SettlementStatus::Pending {
+            return Err(TreasuryError::NotPending);
+        }
+        if settlement.merchant != merchant_caller {
+            return Err(TreasuryError::Unauthorized);
+        }
+
+        let old_merchant = settlement.merchant.clone();
+        settlement.merchant = new_merchant.clone();
+
+        e.storage()
+            .instance()
+            .set(&DataKey::Settlement(settlement_id), &settlement);
+
+        e.events().publish(
+            (Symbol::new(&e, "merchant_updated"), settlement_id),
+            (old_merchant, new_merchant),
+        );
+
+        Ok(())
+    }
+
+    /// Return the full settlement struct (query-only, no auth required).
+    pub fn get_settlement(e: Env, settlement_id: u64) -> Option<Settlement> {
+        e.storage()
+            .instance()
+            .get(&DataKey::Settlement(settlement_id))
+    }
+
+    /// Deposits funds into the treasury.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `from` - Depositor address (must authenticate).
+    /// * `token` - Token contract address to deposit.
+    /// * `amount` - Amount of tokens to deposit.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::TokenNotAllowed`] if token is not on the allowlist.
+    /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
+    pub fn deposit(
+        e: Env,
+        from: Address,
+        token: Address,
+        amount: u64,
+    ) -> Result<(), TreasuryError> {
+        let allowlist: Vec<Address> = e
+            .storage()
+            .instance()
+            .get(&DataKey::TokenAllowlist)
+            .unwrap_or_else(|| Vec::new(&e));
+        if !allowlist.contains(&token) {
+            return Err(TreasuryError::TokenNotAllowed);
+        }
+
         check_not_paused(&e)?;
         from.require_auth();
+
+        token::Client::new(&e, &token).transfer(
+            &from,
+            &e.current_contract_address(),
+            &(amount as i128),
+        );
+
+        // (Symbol::new(&e, "deposit"),)
+        events::deposit(&e, &token, &from, &amount);
+
         Ok(())
     }
 
-    pub fn withdraw(
+    /// Sets (or clears, with `limit = 0`) the admin-configured daily withdrawal
+    /// cap for a token. `withdraw` enforces this cap over a rolling 24h
+    /// ledger-time window per token; a token with no configured limit is
+    /// unrestricted.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Admin address (must authenticate).
+    /// * `token` - Token contract address the cap applies to.
+    /// * `limit` - Maximum cumulative withdrawal amount per 24h window.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if caller is not the contract admin.
+    pub fn set_daily_withdraw_limit(
         e: Env,
         admin: Address,
-        _to: Address,
-        _amount: u64,
+        token: Address,
+        limit: u64,
     ) -> Result<(), TreasuryError> {
         check_not_paused(&e)?;
         Self::check_admin(&e, &admin)?;
+        if limit == 0 {
+            e.storage()
+                .instance()
+                .remove(&DataKey::DailyWithdrawLimit(token.clone()));
+            e.storage()
+                .instance()
+                .remove(&DataKey::WithdrawWindow(token.clone()));
+        } else {
+            e.storage()
+                .instance()
+                .set(&DataKey::DailyWithdrawLimit(token.clone()), &limit);
+        }
+        e.events().publish(
+            (Symbol::new(&e, "daily_withdraw_limit_set"),),
+            (token, limit),
+        );
         Ok(())
     }
 
+    /// Returns the configured daily withdrawal cap for a token, or `None` if
+    /// the admin has never set one or cleared it with a zero limit.
+    pub fn get_daily_withdraw_limit(e: Env, token: Address) -> Option<u64> {
+        e.storage()
+            .instance()
+            .get(&DataKey::DailyWithdrawLimit(token))
+    }
+
+    /// Withdraws funds from the treasury to a recipient address.
+    ///
+    /// If a `daily_withdraw_limit` has been configured for `token`, this
+    /// tracks cumulative withdrawals of that token in a 24h ledger-time
+    /// window (measured from the first withdrawal in the window; the window
+    /// resets once `ledger.timestamp()` has advanced 24h past its start) and
+    /// rejects any withdrawal that would push the window's cumulative total
+    /// above the limit. This bounds worst-case exposure from a compromised
+    /// signer set to one configured cap per settlement cycle, rather than
+    /// allowing the treasury to be drained in a single transaction.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Admin address (must authenticate).
+    /// * `token` - Token being withdrawn; used to look up the daily cap.
+    /// * `_to` - Target recipient address.
+    /// * `amount` - Amount to withdraw.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if caller is not the contract admin.
+    /// * Returns [`TreasuryError::DailyLimitExceeded`] if `token` has a configured
+    ///   daily limit and `amount` would push the current 24h window's cumulative
+    ///   withdrawals above it.
+    pub fn withdraw(
+        e: Env,
+        admin: Address,
+        token: Address,
+        _to: Address,
+        amount: u64,
+    ) -> Result<(), TreasuryError> {
+        check_not_paused(&e)?;
+        Self::check_admin(&e, &admin)?;
+
+        const WINDOW_SECONDS: u64 = 86_400;
+
+        let limit: Option<u64> = e
+            .storage()
+            .instance()
+            .get(&DataKey::DailyWithdrawLimit(token.clone()));
+
+        if let Some(limit) = limit {
+            let now = e.ledger().timestamp();
+            let window: Option<WithdrawWindow> = e
+                .storage()
+                .instance()
+                .get(&DataKey::WithdrawWindow(token.clone()));
+            let (window_start, spent) = match window {
+                Some(w) if now.saturating_sub(w.window_start) < WINDOW_SECONDS => {
+                    (w.window_start, w.spent)
+                }
+                _ => (now, 0u64),
+            };
+
+            let new_spent = spent
+                .checked_add(amount)
+                .ok_or(TreasuryError::DailyLimitExceeded)?;
+            if new_spent > limit {
+                return Err(TreasuryError::DailyLimitExceeded);
+            }
+
+            e.storage().instance().set(
+                &DataKey::WithdrawWindow(token.clone()),
+                &WithdrawWindow {
+                    window_start,
+                    spent: new_spent,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Adds a token contract address to the token allowlist.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Admin address (must authenticate).
+    /// * `token` - Token contract address to allow.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if caller is not the contract admin.
     pub fn add_token_to_allowlist(
         e: Env,
         admin: Address,
@@ -331,6 +1215,16 @@ impl TreasuryContract {
         Ok(())
     }
 
+    /// Removes a token contract address from the token allowlist.
+    ///
+    /// # Arguments
+    /// * `e` - Soroban environment handle.
+    /// * `admin` - Admin address (must authenticate).
+    /// * `token` - Token contract address to remove.
+    ///
+    /// # Errors
+    /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
+    /// * Returns [`TreasuryError::Unauthorized`] if caller is not the contract admin.
     pub fn remove_token_from_allowlist(
         e: Env,
         admin: Address,
@@ -355,6 +1249,14 @@ impl TreasuryContract {
         Ok(())
     }
 
+    /// Returns allowlisted tokens in stable insertion order.
+    pub fn get_allowlisted_tokens(e: Env) -> Vec<Address> {
+        e.storage()
+            .instance()
+            .get(&DataKey::TokenAllowlist)
+            .unwrap_or_else(|| Vec::new(&e))
+    }
+
     fn get_settlement_internal(e: &Env, settlement_id: u64) -> Settlement {
         e.storage()
             .instance()
@@ -368,6 +1270,9 @@ mod integration_settlement_multisig;
 
 #[cfg(test)]
 mod integration_dispute_lifecycle;
+
+#[cfg(test)]
+mod benchmark;
 
 #[cfg(test)]
 mod tests {
@@ -392,9 +1297,88 @@ mod tests {
         let (e, id) = setup();
         let c = client(&e, &id);
         let admin = soroban_sdk::Address::generate(&e);
-        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        let signer = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
         let result = c.get_pending_settlements(&None, &None);
-        assert_eq!(result.len(), 0);
+        assert_eq!(result, Vec::new(&e));
+    }
+
+    #[test]
+    fn test_proposer_can_cancel_and_record_remains_readable() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let proposer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (proposer.clone(), 1u64)], &1, &admin);
+        let settlement_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+
+        c.cancel_settlement(&proposer, &settlement_id);
+
+        let settlement = c.get_settlement(&settlement_id).unwrap();
+        assert_eq!(settlement.status, SettlementStatus::Cancelled);
+        assert_eq!(
+            c.try_approve_settlement(&proposer, &settlement_id),
+            Err(Ok(TreasuryError::NotPending))
+        );
+        assert!(!c
+            .get_pending_settlements(&None, &None)
+            .contains(&settlement_id));
+        assert!(e
+            .events()
+            .all()
+            .iter()
+            .any(|event| event.0 == (id.clone(), "settlement_cancelled".into())));
+    }
+
+    #[test]
+    fn test_admin_can_cancel_and_other_callers_are_rejected() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let proposer = soroban_sdk::Address::generate(&e);
+        let other = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (proposer.clone(), 1u64)], &1, &admin);
+        let settlement_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+
+        assert_eq!(
+            c.try_cancel_settlement(&other, &settlement_id),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
+        c.cancel_settlement(&admin, &settlement_id);
+        assert_eq!(
+            c.get_settlement(&settlement_id).unwrap().status,
+            SettlementStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn test_executed_and_disputed_settlements_cannot_be_cancelled() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let proposer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (proposer.clone(), 1u64)], &1, &admin);
+
+        let executed_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+        c.approve_settlement(&proposer, &executed_id);
+        c.execute_settlement(&proposer, &executed_id, &token);
+        assert_eq!(
+            c.try_cancel_settlement(&proposer, &executed_id),
+            Err(Ok(TreasuryError::NotPending))
+        );
+
+        let disputed_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+        c.raise_dispute(&merchant, &disputed_id, &1u32);
+        assert_eq!(
+            c.try_cancel_settlement(&proposer, &disputed_id),
+            Err(Ok(TreasuryError::NotPending))
+        );
     }
 
     #[test]
@@ -405,11 +1389,7 @@ mod tests {
         let token = soroban_sdk::Address::generate(&e);
         let merchant = soroban_sdk::Address::generate(&e);
         let signer = soroban_sdk::Address::generate(&e);
-        c.initialize(
-            &soroban_sdk::vec![&e, (signer.clone(), 1u64)],
-            &1,
-            &admin,
-        );
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
         let sid = c.propose_settlement(&signer, &token, &1000u64, &merchant);
         let result = c.get_pending_settlements(&None, &None);
         assert_eq!(result.len(), 1);
@@ -424,11 +1404,7 @@ mod tests {
         let token = soroban_sdk::Address::generate(&e);
         let merchant = soroban_sdk::Address::generate(&e);
         let signer = soroban_sdk::Address::generate(&e);
-        c.initialize(
-            &soroban_sdk::vec![&e, (signer.clone(), 2u64)],
-            &1,
-            &admin,
-        );
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 2u64)], &1, &admin);
         let s1 = c.propose_settlement(&signer, &token, &1000u64, &merchant);
         let s2 = c.propose_settlement(&signer, &token, &2000u64, &merchant);
         c.approve_settlement(&signer, &s1);
@@ -446,11 +1422,7 @@ mod tests {
         let token = soroban_sdk::Address::generate(&e);
         let merchant = soroban_sdk::Address::generate(&e);
         let signer = soroban_sdk::Address::generate(&e);
-        c.initialize(
-            &soroban_sdk::vec![&e, (signer.clone(), 1u64)],
-            &1,
-            &admin,
-        );
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
         for _ in 0..5 {
             c.propose_settlement(&signer, &token, &100u64, &merchant);
         }
@@ -468,16 +1440,26 @@ mod tests {
         let token = soroban_sdk::Address::generate(&e);
         let merchant = soroban_sdk::Address::generate(&e);
         let signer = soroban_sdk::Address::generate(&e);
-        c.initialize(
-            &soroban_sdk::vec![&e, (signer.clone(), 1u64)],
-            &1,
-            &admin,
-        );
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
         for _ in 0..5 {
             c.propose_settlement(&signer, &token, &100u64, &merchant);
         }
-        let result = c.get_pending_settlements(&None, &Some(200u32));
-        assert_eq!(result.len(), 5);
+        let result = c.try_get_pending_settlements(&None, &Some(200u32));
+        assert_eq!(result, Err(Ok(TreasuryError::InvalidPagination)));
+    }
+
+    #[test]
+    fn test_offset_beyond_pending_count_returns_empty_page() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
+        c.propose_settlement(&signer, &token, &100u64, &merchant);
+        let page = c.get_pending_settlements(&Some(10u32), &Some(5u32));
+        assert!(page.is_empty());
     }
 
     // ── paused guard tests ───────────────────────────────────────────────────
@@ -533,7 +1515,8 @@ mod tests {
         let c = client(&e, &id);
         let admin = soroban_sdk::Address::generate(&e);
         let signer = soroban_sdk::Address::generate(&e);
-        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        let initial = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (initial.clone(), 1u64)], &1, &admin);
         c.pause(&admin);
         let res = c.try_set_signer(&admin, &signer, &1u64);
         assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
@@ -544,7 +1527,8 @@ mod tests {
         let (e, id) = setup();
         let c = client(&e, &id);
         let admin = soroban_sdk::Address::generate(&e);
-        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        let signer = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
         c.pause(&admin);
         let res = c.try_update_threshold(&admin, &2u32);
         assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
@@ -557,15 +1541,27 @@ mod tests {
         let (e, id) = setup();
         let c = client(&e, &id);
         let admin = soroban_sdk::Address::generate(&e);
-        let signer = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let s2 = soroban_sdk::Address::generate(&e);
+        let s3 = soroban_sdk::Address::generate(&e);
         let token = soroban_sdk::Address::generate(&e);
         let merchant = soroban_sdk::Address::generate(&e);
-        // threshold=3, signer weight=1 → approval_weight after approve = 1 < 3
-        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &3, &admin);
-        let sid = c.propose_settlement(&signer, &token, &500u64, &merchant);
-        c.approve_settlement(&signer, &sid);
+        // threshold=3, each signer weight=1 → total weight=3 >= 3 (valid init)
+        // After s1 approves: approval_weight=1 < 3
+        c.initialize(
+            &soroban_sdk::vec![
+                &e,
+                (s1.clone(), 1u64),
+                (s2.clone(), 1u64),
+                (s3.clone(), 1u64)
+            ],
+            &3,
+            &admin,
+        );
+        let sid = c.propose_settlement(&s1, &token, &500u64, &merchant);
+        c.approve_settlement(&s1, &sid);
         // execute should fail with InsufficientApprovals
-        let res = c.try_execute_settlement(&signer, &sid, &token);
+        let res = c.try_execute_settlement(&s1, &sid, &token);
         assert_eq!(res, Err(Ok(TreasuryError::InsufficientApprovals)));
         // settlement must still be Pending
         let pending = c.get_pending_settlements(&None, &None);
@@ -612,9 +1608,80 @@ mod tests {
         let (e, id) = setup();
         let c = client(&e, &id);
         let admin = soroban_sdk::Address::generate(&e);
-        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        let signer = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
         let res = c.try_update_threshold(&admin, &0u32);
         assert_eq!(res, Err(Ok(TreasuryError::InvalidThreshold)));
+    }
+
+    #[test]
+    fn test_update_threshold_above_total_weight_rejected() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let s2 = soroban_sdk::Address::generate(&e);
+        // total weight = 3 (s1=1, s2=2)
+        c.initialize(
+            &soroban_sdk::vec![&e, (s1.clone(), 1u64), (s2.clone(), 2u64)],
+            &1,
+            &admin,
+        );
+        // Attempt to set threshold to 4 > total weight 3
+        let res = c.try_update_threshold(&admin, &4u32);
+        assert_eq!(res, Err(Ok(TreasuryError::ThresholdExceedsWeight)));
+    }
+
+    #[test]
+    fn test_update_threshold_exactly_at_total_weight_succeeds() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let s2 = soroban_sdk::Address::generate(&e);
+        // total weight = 3 (s1=1, s2=2)
+        c.initialize(
+            &soroban_sdk::vec![&e, (s1.clone(), 1u64), (s2.clone(), 2u64)],
+            &1,
+            &admin,
+        );
+        // Threshold == total weight should succeed
+        c.update_threshold(&admin, &3u32);
+        assert_eq!(c.get_threshold(), 3u64);
+    }
+
+    #[test]
+    fn test_update_threshold_below_total_weight_succeeds() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        // total weight = 5
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 5u64)], &1, &admin);
+        c.update_threshold(&admin, &3u32);
+        assert_eq!(c.get_threshold(), 3u64);
+    }
+
+    #[test]
+    fn test_update_threshold_reflects_set_signer_weight_increase() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        // initial total weight = 2
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 2u64)], &1, &admin);
+
+        // threshold=3 > total_weight=2 → rejected
+        let res = c.try_update_threshold(&admin, &3u32);
+        assert_eq!(res, Err(Ok(TreasuryError::ThresholdExceedsWeight)));
+
+        // Add a new signer with weight=2 → total_weight=4
+        let new_signer = soroban_sdk::Address::generate(&e);
+        c.set_signer(&admin, &new_signer, &2u64);
+
+        // Now threshold=3 ≤ total_weight=4 → should succeed
+        c.update_threshold(&admin, &3u32);
+        assert_eq!(c.get_threshold(), 3u64);
     }
 
     #[test]
@@ -642,5 +1709,728 @@ mod tests {
         c.execute_settlement(&s1, &sid, &token);
         let pending = c.get_pending_settlements(&None, &None);
         assert!(!pending.contains(&sid));
+    }
+
+    // ── additional coverage tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_unpause_resumes_operations() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
+        c.pause(&admin);
+        assert_eq!(c.try_propose_settlement(&signer, &token, &100u64, &merchant), Err(Ok(TreasuryError::ContractPaused)));
+        c.unpause(&admin);
+        let sid = c.propose_settlement(&signer, &token, &100u64, &merchant);
+        assert_eq!(sid, 1u64);
+    }
+
+    #[test]
+    fn test_get_and_update_threshold() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &5, &admin);
+        assert_eq!(c.get_threshold(), 5u64);
+        c.update_threshold(&admin, &10u32);
+        assert_eq!(c.get_threshold(), 10u64);
+    }
+
+    #[test]
+    fn test_token_allowlist_enforcement() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token1 = soroban_sdk::Address::generate(&e);
+        let token2 = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
+
+        c.add_token_to_allowlist(&admin, &token1);
+        let s1 = c.propose_settlement(&signer, &token1, &100u64, &merchant);
+        assert_eq!(s1, 1u64);
+
+        let err = c.try_propose_settlement(&signer, &token2, &100u64, &merchant);
+        assert_eq!(err, Err(Ok(TreasuryError::TokenNotAllowed)));
+
+        c.remove_token_from_allowlist(&admin, &token1);
+        let s2 = c.propose_settlement(&signer, &token2, &100u64, &merchant);
+        assert_eq!(s2, 2u64);
+    }
+
+    #[test]
+    fn test_allowlisted_tokens_preserve_order_across_remove_and_readd() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let token1 = soroban_sdk::Address::generate(&e);
+        let token2 = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        assert!(c.get_allowlisted_tokens().is_empty());
+        c.add_token_to_allowlist(&admin, &token1);
+        c.add_token_to_allowlist(&admin, &token2);
+        c.add_token_to_allowlist(&admin, &token1);
+        assert_eq!(
+            c.get_allowlisted_tokens(),
+            soroban_sdk::vec![&e, token1.clone(), token2.clone()]
+        );
+
+        c.remove_token_from_allowlist(&admin, &token1);
+        c.add_token_to_allowlist(&admin, &token1);
+        assert_eq!(
+            c.get_allowlisted_tokens(),
+            soroban_sdk::vec![&e, token2.clone(), token1.clone()]
+        );
+        c.remove_token_from_allowlist(&admin, &token2);
+        c.remove_token_from_allowlist(&admin, &token1);
+        assert!(c.get_allowlisted_tokens().is_empty());
+    }
+
+    #[test]
+    fn test_token_allowlist_checked_before_paused() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token1 = soroban_sdk::Address::generate(&e);
+        let token2 = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
+        c.add_token_to_allowlist(&admin, &token1);
+        c.pause(&admin);
+
+        // With the contract paused AND the token disallowed, TokenNotAllowed
+        // must win: the allowlist check runs before the pause check.
+        let err = c.try_propose_settlement(&signer, &token2, &100u64, &merchant);
+        assert_eq!(err, Err(Ok(TreasuryError::TokenNotAllowed)));
+
+        // An allowed token still correctly surfaces ContractPaused.
+        let err = c.try_propose_settlement(&signer, &token1, &100u64, &merchant);
+        assert_eq!(err, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_deposit_and_withdraw() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let token = token_contract.address();
+        let token_client = soroban_sdk::token::Client::new(&e, &token);
+        token_client.mint(&user, &1000i128);
+
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.add_token_to_allowlist(&admin, &token);
+
+        c.deposit(&user, &token, &1000u64);
+        assert_eq!(token_client.balance(&user), 0i128);
+        assert_eq!(token_client.balance(&id), 1000i128);
+
+        c.withdraw(&admin, &token, &user, &500u64);
+    }
+
+    #[test]
+    fn test_deposit_transfers_tokens_and_updates_balances() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let token = token_contract.address();
+        let token_client = soroban_sdk::token::Client::new(&e, &token);
+        token_client.mint(&user, &5000i128);
+
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.add_token_to_allowlist(&admin, &token);
+
+        assert_eq!(token_client.balance(&user), 5000i128);
+        assert_eq!(token_client.balance(&id), 0i128);
+
+        c.deposit(&user, &token, &2000u64);
+
+        assert_eq!(token_client.balance(&user), 3000i128);
+        assert_eq!(token_client.balance(&id), 2000i128);
+
+        assert!(
+            e.events().all().iter().any(|event| event.0 == (id.clone(), "deposit".into())),
+            "deposit event should be emitted"
+        );
+    }
+
+    #[test]
+    fn test_deposit_rejects_non_allowlisted_token() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let allowed_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let allowed_token = allowed_contract.address();
+        let disallowed_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let disallowed_token = disallowed_contract.address();
+
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.add_token_to_allowlist(&admin, &allowed_token);
+
+        let err = c.try_deposit(&user, &disallowed_token, &1000u64);
+        assert_eq!(err, Err(Ok(TreasuryError::TokenNotAllowed)));
+    }
+
+    #[test]
+    fn test_deposit_rejects_when_contract_paused() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let token = token_contract.address();
+
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.add_token_to_allowlist(&admin, &token);
+        c.pause(&admin);
+
+        let err = c.try_deposit(&user, &token, &1000u64);
+        assert_eq!(err, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    #[test]
+    fn test_deposit_disallowed_token_rejected_before_paused_check() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let allowed_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let allowed_token = allowed_contract.address();
+        let disallowed_contract = e.register_stellar_asset_contract_v2(admin.clone());
+        let disallowed_token = disallowed_contract.address();
+
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+        c.add_token_to_allowlist(&admin, &allowed_token);
+        c.pause(&admin);
+
+        // When paused AND disallowed, TokenNotAllowed must be returned first.
+        let err = c.try_deposit(&user, &disallowed_token, &1000u64);
+        assert_eq!(err, Err(Ok(TreasuryError::TokenNotAllowed)));
+    }
+
+    #[test]
+    fn test_unauthorized_admin_actions() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let non_admin = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        assert_eq!(c.try_pause(&non_admin), Err(Ok(TreasuryError::Unauthorized)));
+        assert_eq!(c.try_unpause(&non_admin), Err(Ok(TreasuryError::Unauthorized)));
+        assert_eq!(c.try_update_threshold(&non_admin, &2u32), Err(Ok(TreasuryError::Unauthorized)));
+        assert_eq!(
+            c.try_withdraw(&non_admin, &token, &non_admin, &100u64),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
+    }
+
+    // ── rotate_signer tests ──────────────────────────────────────────────────
+
+    /// Rotating a signer to a HIGHER weight must increase total_signer_weight
+    /// by exactly the delta, not leave the old weight double-counted or lost.
+    #[test]
+    fn test_rotate_signer_to_higher_weight_updates_total_signer_weight() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let s2 = soroban_sdk::Address::generate(&e);
+        let new_s1 = soroban_sdk::Address::generate(&e);
+        // total weight = 3 (s1=1, s2=2)
+        c.initialize(
+            &soroban_sdk::vec![&e, (s1.clone(), 1u64), (s2.clone(), 2u64)],
+            &1,
+            &admin,
+        );
+        assert_eq!(c.get_total_signer_weight(), 3u64);
+
+        // Rotate s1 (weight 1) -> new_s1 (weight 5): total should become 2 + 5 = 7.
+        c.rotate_signer(&admin, &s1, &new_s1, &5u64);
+        assert_eq!(c.get_total_signer_weight(), 7u64);
+
+        // The old signer address must no longer carry any weight.
+        let res = c.try_rotate_signer(&admin, &s1, &new_s1, &1u64);
+        assert_eq!(res, Err(Ok(TreasuryError::SignerNotFound)));
+    }
+
+    #[test]
+    fn test_get_signers_tracks_live_weights_in_stable_order() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let s2 = soroban_sdk::Address::generate(&e);
+        let s3 = soroban_sdk::Address::generate(&e);
+        let s4 = soroban_sdk::Address::generate(&e);
+        c.initialize(
+            &soroban_sdk::vec![&e, (s1.clone(), 1u64), (s2.clone(), 2u64)],
+            &1,
+            &admin,
+        );
+
+        let initial_signers = c.get_signers();
+        assert_eq!(
+            initial_signers,
+            soroban_sdk::vec![&e, (s1.clone(), 1u64), (s2.clone(), 2u64)]
+        );
+        let listed_weight: u64 = initial_signers.iter().map(|(_, weight)| weight).sum();
+        assert_eq!(listed_weight, c.get_total_signer_weight());
+
+        c.set_signer(&admin, &s1, &0u64);
+        let listed_weight: u64 = c.get_signers().iter().map(|(_, weight)| weight).sum();
+        assert_eq!(listed_weight, c.get_total_signer_weight());
+
+        c.set_signer(&admin, &s3, &3u64);
+        let listed_weight: u64 = c.get_signers().iter().map(|(_, weight)| weight).sum();
+        assert_eq!(listed_weight, c.get_total_signer_weight());
+
+        c.rotate_signer(&admin, &s2, &s4, &4u64);
+
+        let signers = c.get_signers();
+        assert_eq!(
+            signers,
+            soroban_sdk::vec![&e, (s3, 3u64), (s4, 4u64)]
+        );
+        let listed_weight: u64 = signers.iter().map(|(_, weight)| weight).sum();
+        assert_eq!(listed_weight, c.get_total_signer_weight());
+    }
+
+    /// Rotating a signer to a LOWER weight updates total_signer_weight, but
+    /// must not retroactively shrink approval_weight already accumulated on
+    /// an in-flight settlement — a settlement that already reached quorum
+    /// stays executable even after the approving signer's weight drops.
+    #[test]
+    fn test_rotate_signer_to_lower_weight_preserves_inflight_quorum() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let s2 = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        let new_s1 = soroban_sdk::Address::generate(&e);
+        // threshold=3, s1 weight=3 (alone meets threshold), s2 weight=1
+        c.initialize(
+            &soroban_sdk::vec![&e, (s1.clone(), 3u64), (s2.clone(), 1u64)],
+            &3,
+            &admin,
+        );
+        assert_eq!(c.get_total_signer_weight(), 4u64);
+
+        let sid = c.propose_settlement(&s1, &token, &500u64, &merchant);
+        c.approve_settlement(&s1, &sid);
+
+        // Rotate s1 down to weight 1 *after* it already approved.
+        c.rotate_signer(&admin, &s1, &new_s1, &1u64);
+        assert_eq!(c.get_total_signer_weight(), 2u64, "total weight must reflect the new, lower weight");
+
+        // The settlement's already-captured approval_weight (3) is a snapshot
+        // and is unaffected by the later rotation, so it still clears the
+        // threshold (3) and executes successfully.
+        c.execute_settlement(&s1, &sid, &token);
+        let settlement = c.get_settlement(&sid).unwrap();
+        assert!(matches!(settlement.status, SettlementStatus::Executed));
+    }
+
+    #[test]
+    fn test_rotate_signer_requires_admin() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let non_admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let new_s1 = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (s1.clone(), 1u64)], &1, &admin);
+
+        let res = c.try_rotate_signer(&non_admin, &s1, &new_s1, &1u64);
+        assert_eq!(res, Err(Ok(TreasuryError::Unauthorized)));
+    }
+
+    #[test]
+    fn test_rotate_signer_rejects_duplicate_new_signer() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let s1 = soroban_sdk::Address::generate(&e);
+        let s2 = soroban_sdk::Address::generate(&e);
+        c.initialize(
+            &soroban_sdk::vec![&e, (s1.clone(), 1u64), (s2.clone(), 2u64)],
+            &1,
+            &admin,
+        );
+
+        // s2 is already an active signer; rotating s1 onto it must be rejected.
+        let res = c.try_rotate_signer(&admin, &s1, &s2, &5u64);
+        assert_eq!(res, Err(Ok(TreasuryError::DuplicateSigner)));
+    }
+
+    // ── daily withdrawal limit tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_withdraw_within_daily_limit_succeeds() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.set_daily_withdraw_limit(&admin, &token, &1_000u64);
+        c.withdraw(&admin, &token, &user, &600u64);
+        c.withdraw(&admin, &token, &user, &400u64);
+    }
+
+    #[test]
+    fn test_withdraw_exceeding_daily_limit_rejected() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.set_daily_withdraw_limit(&admin, &token, &1_000u64);
+        c.withdraw(&admin, &token, &user, &600u64);
+
+        let res = c.try_withdraw(&admin, &token, &user, &500u64);
+        assert_eq!(res, Err(Ok(TreasuryError::DailyLimitExceeded)));
+    }
+
+    #[test]
+    fn test_withdraw_limit_is_per_token() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token_a = soroban_sdk::Address::generate(&e);
+        let token_b = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.set_daily_withdraw_limit(&admin, &token_a, &1_000u64);
+        c.withdraw(&admin, &token_a, &user, &1_000u64);
+
+        // token_b has no configured limit, so it is unrestricted even though
+        // token_a's window is exhausted.
+        c.withdraw(&admin, &token_b, &user, &1_000_000u64);
+    }
+
+    #[test]
+    fn test_withdraw_window_resets_after_24h() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.set_daily_withdraw_limit(&admin, &token, &1_000u64);
+        c.withdraw(&admin, &token, &user, &1_000u64);
+        e.ledger().with_mut(|li| li.timestamp += 86_399);
+        assert_eq!(
+            c.try_withdraw(&admin, &token, &user, &1u64),
+            Err(Ok(TreasuryError::DailyLimitExceeded))
+        );
+
+        e.ledger().with_mut(|li| li.timestamp += 86_399);
+        assert_eq!(
+            c.try_withdraw(&admin, &token, &user, &1_000u64),
+            Err(Ok(TreasuryError::DailyLimitExceeded))
+        );
+
+        e.ledger().with_mut(|li| li.timestamp += 1);
+        c.withdraw(&admin, &token, &user, &1_000u64);
+    }
+
+    #[test]
+    fn test_zero_daily_withdraw_limit_clears_cap_and_window() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.set_daily_withdraw_limit(&admin, &token, &1_000u64);
+        c.withdraw(&admin, &token, &user, &1_000u64);
+        c.set_daily_withdraw_limit(&admin, &token, &0u64);
+
+        assert_eq!(c.get_daily_withdraw_limit(&token), None);
+        c.withdraw(&admin, &token, &user, &1_000_000u64);
+    }
+
+    #[test]
+    fn test_withdraw_without_configured_limit_is_unrestricted() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let user = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e], &1, &admin);
+
+        c.withdraw(&admin, &token, &user, &1_000_000_000u64);
+    }
+
+    // ── two-step admin transfer tests ────────────────────────────────────────
+
+    fn setup_treasury(e: &Env, id: &soroban_sdk::Address) -> soroban_sdk::Address {
+        let admin = soroban_sdk::Address::generate(e);
+        let signer = soroban_sdk::Address::generate(e);
+        TreasuryContractClient::new(e, id)
+            .initialize(&soroban_sdk::vec![e, (signer, 1u64)], &1, &admin);
+        admin
+    }
+
+    /// Happy path: current admin nominates new_admin, new_admin accepts.
+    /// After acceptance new_admin can exercise admin privileges and old admin cannot.
+    #[test]
+    fn test_transfer_and_accept_admin_full_flow() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.accept_admin(&new_admin);
+
+        // new_admin can pause
+        c.pause(&new_admin);
+
+        // old admin is rejected
+        let res = c.try_unpause(&admin);
+        assert_eq!(
+            res,
+            Err(Ok(TreasuryError::Unauthorized)),
+            "old admin must lose privileges immediately after accept_admin"
+        );
+    }
+
+    /// transfer_admin must reject a non-admin caller.
+    #[test]
+    fn test_transfer_admin_unauthorized_fails() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let impostor = soroban_sdk::Address::generate(&e);
+        let new_admin = soroban_sdk::Address::generate(&e);
+        let _ = admin;
+
+        let res = c.try_transfer_admin(&impostor, &new_admin);
+        assert_eq!(res, Err(Ok(TreasuryError::Unauthorized)));
+    }
+
+    /// accept_admin must reject any address other than the nominated pending admin.
+    #[test]
+    fn test_accept_admin_wrong_caller_fails() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+        let impostor = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+
+        let res = c.try_accept_admin(&impostor);
+        assert_eq!(
+            res,
+            Err(Ok(TreasuryError::Unauthorized)),
+            "impostor must not be able to accept a pending transfer"
+        );
+    }
+
+    /// accept_admin with no prior transfer_admin must return Unauthorized.
+    #[test]
+    fn test_accept_admin_with_no_pending_transfer_fails() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let _ = setup_treasury(&e, &id);
+        let random = soroban_sdk::Address::generate(&e);
+
+        let res = c.try_accept_admin(&random);
+        assert_eq!(res, Err(Ok(TreasuryError::Unauthorized)));
+    }
+
+    /// transfer_admin must fail when the contract is paused.
+    #[test]
+    fn test_transfer_admin_when_paused_fails() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.pause(&admin);
+
+        let res = c.try_transfer_admin(&admin, &new_admin);
+        assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    /// accept_admin must fail when the contract is paused.
+    #[test]
+    fn test_accept_admin_when_paused_fails() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.pause(&admin);
+
+        let res = c.try_accept_admin(&new_admin);
+        assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
+    }
+
+    /// transfer_admin emits admin_transfer_initiated event.
+    #[test]
+    fn test_transfer_admin_emits_event() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+
+        assert!(
+            e.events()
+                .all()
+                .iter()
+                .any(|ev| ev.0 == (id.clone(), "admin_transfer_initiated".into())),
+            "admin_transfer_initiated event must be emitted"
+        );
+    }
+
+    /// accept_admin emits admin_transfer_accepted event.
+    #[test]
+    fn test_accept_admin_emits_event() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.accept_admin(&new_admin);
+
+        assert!(
+            e.events()
+                .all()
+                .iter()
+                .any(|ev| ev.0 == (id.clone(), "admin_transfer_accepted".into())),
+            "admin_transfer_accepted event must be emitted"
+        );
+    }
+
+    /// PendingAdmin is cleared after acceptance — a second accept_admin fails.
+    #[test]
+    fn test_accept_admin_clears_pending_after_acceptance() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.accept_admin(&new_admin);
+
+        let res = c.try_accept_admin(&new_admin);
+        assert_eq!(
+            res,
+            Err(Ok(TreasuryError::Unauthorized)),
+            "PendingAdmin must be cleared; second accept must fail"
+        );
+    }
+
+    /// Overwriting a pending nomination is allowed — only the last nominee can accept.
+    #[test]
+    fn test_transfer_admin_overwrites_previous_nomination() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let first_nominee = soroban_sdk::Address::generate(&e);
+        let second_nominee = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &first_nominee);
+        // Overwrite with a new nominee
+        c.transfer_admin(&admin, &second_nominee);
+
+        // First nominee can no longer accept
+        let res = c.try_accept_admin(&first_nominee);
+        assert_eq!(res, Err(Ok(TreasuryError::Unauthorized)));
+
+        // Second nominee can accept
+        c.accept_admin(&second_nominee);
+        c.pause(&second_nominee); // confirm they now hold admin
+    }
+
+    /// After acceptance, all admin-gated operations use the new admin.
+    /// Tests pause, unpause, update_threshold, set_daily_withdraw_limit, and
+    /// add_token_to_allowlist.
+    #[test]
+    fn test_old_admin_loses_all_privileges_after_acceptance() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.accept_admin(&new_admin);
+
+        assert_eq!(c.try_pause(&admin), Err(Ok(TreasuryError::Unauthorized)));
+        assert_eq!(c.try_unpause(&admin), Err(Ok(TreasuryError::Unauthorized)));
+        assert_eq!(
+            c.try_update_threshold(&admin, &1u32),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
+        assert_eq!(
+            c.try_set_daily_withdraw_limit(&admin, &token, &500u64),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
+        assert_eq!(
+            c.try_add_token_to_allowlist(&admin, &token),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
+        assert_eq!(
+            c.try_remove_token_from_allowlist(&admin, &token),
+            Err(Ok(TreasuryError::Unauthorized))
+        );
+    }
+
+    /// New admin can pause after transfer, and old admin cannot unpause.
+    #[test]
+    fn test_new_admin_pause_blocks_old_admin_unpause() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = setup_treasury(&e, &id);
+        let new_admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+
+        c.transfer_admin(&admin, &new_admin);
+        c.accept_admin(&new_admin);
+
+        // New admin pauses
+        c.pause(&new_admin);
+
+        // Signer cannot propose while paused
+        let res = c.try_propose_settlement(&signer, &token, &100u64, &merchant);
+        assert_eq!(res, Err(Ok(TreasuryError::ContractPaused)));
+
+        // Only new admin can unpause
+        assert_eq!(c.try_unpause(&admin), Err(Ok(TreasuryError::Unauthorized)));
+        c.unpause(&new_admin);
+
+        // Now signer can propose again
+        c.propose_settlement(&signer, &token, &100u64, &merchant);
     }
 }

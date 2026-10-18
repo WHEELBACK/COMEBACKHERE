@@ -1,0 +1,75 @@
+name: CI - Stack Smoke Test
+
+# Boots the docker-compose stack and asserts every service answers on its
+# published port, so a broken startup path (missing required env var, missing
+# Dockerfile, port clash) fails here instead of during someone's first manual
+# integration attempt. See tests/README.md.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docker-compose.yml'
+      - 'docker-compose.override.yml'
+      - 'comebackhere-backend/Dockerfile'
+      - 'comebackhere-backend/src/index.ts'
+      - 'comebackhere-backend/src/app.ts'
+      - 'comebackhere-backend/src/lib/env.ts'
+      - 'comebackhere-backend/src/middleware/**'
+      - 'comebackhere-backend/package.json'
+      - 'comebackhere-frontend/Dockerfile'
+      - 'comebackhere-frontend/vite.config.ts'
+      - 'comebackhere-frontend/package.json'
+      - 'tests/smoke_stack.sh'
+      - 'tests/README.md'
+      - '.github/workflows/ci-stack-smoke.yml'
+  workflow_call: # called by ci-summary.yml
+  workflow_dispatch: # useful for re-running a flaky stack start
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: stack startup smoke test
+    runs-on: ubuntu-latest
+    # stellar/quickstart pulls a large image and initialises a network, so a
+    # cold start is the long pole here.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Show Docker and Compose versions
+        run: docker --version && docker compose version
+
+      # Compose merges docker-compose.override.yml automatically, which is what
+      # a developer gets from a bare `docker compose up`. If the merge is
+      # malformed — or a referenced Dockerfile does not exist — fail here
+      # before spending minutes on a build.
+      - name: Validate the merged Compose configuration
+        run: docker compose config --quiet
+
+      - name: Start the stack
+        run: docker compose up -d --wait --wait-timeout 600
+
+      - name: Dump service status
+        if: always()
+        run: docker compose ps -a
+
+      - name: Dump service logs
+        if: always()
+        run: docker compose logs --no-color --tail 300
+
+      - name: Smoke test the running stack
+        # The service ports come from the published mappings in the merged
+        # config, so the defaults match a local `docker compose up`.
+        run: ./tests/smoke_stack.sh --timeout 180
+
+      - name: Tear the stack down
+        if: always()
+        run: docker compose down -v

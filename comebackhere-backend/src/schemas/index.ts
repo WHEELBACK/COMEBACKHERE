@@ -1,0 +1,233 @@
+import { z } from "zod"
+import { Keypair } from "stellar-sdk"
+
+const MAX_REFERENCE_LEN_BYTES = 64
+
+function isValidStellarAddress(addr: string): boolean {
+  try {
+    Keypair.fromPublicKey(addr)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const stellarAddress = z.string().min(1).refine(isValidStellarAddress, {
+  message: "Must be a valid Stellar public key",
+})
+
+const positiveInt = z
+  .number({ message: "Must be a positive integer" })
+  .int("Must be a positive integer")
+  .positive("Must be a positive integer")
+
+const futureTimestamp = z
+  .number()
+  .int("due_date must be a positive Unix timestamp")
+  .positive("due_date must be a positive Unix timestamp")
+  .refine((val) => val > Math.floor(Date.now() / 1000), {
+    message: "due_date must be in the future",
+  })
+
+export const createInvoiceSchema = z.object({
+  token: z.string().min(1, "token is required"),
+  amount: z
+    .number({ message: "amount must be a positive number" })
+    .positive("amount must be a positive number"),
+  due_date: futureTimestamp,
+  reference: z
+    .string()
+    .refine(
+      (val) => Buffer.byteLength(val, "utf8") <= MAX_REFERENCE_LEN_BYTES,
+      `reference must not exceed ${MAX_REFERENCE_LEN_BYTES} bytes`,
+    )
+    .optional(),
+})
+
+export const merchantApiKeySchema = z.object({ merchant_address: stellarAddress })
+export const merchantApiKeyIdSchema = z.object({ keyId: z.string().uuid("keyId must be a UUID") })
+export const webhookDeliveryIdSchema = z.object({ deliveryId: z.string().uuid("deliveryId must be a UUID") })
+
+export const invoiceIdParamSchema = z.object({
+  id: z.string().regex(/^\d+$/, "id must be a positive integer"),
+})
+
+export const invoiceActionIdParamSchema = z.object({
+  id: z.string().regex(/^[1-9]\d*$/, "id must be a positive integer").refine((value) => {
+    try {
+      return BigInt(value) <= 18_446_744_073_709_551_615n
+    } catch {
+      return false
+    }
+  }, "id must fit in an unsigned 64-bit integer"),
+})
+
+export const invoiceListQuerySchema = z.object({
+  cursor: z.string().max(1024).regex(/^[A-Za-z0-9_-]+$/, "cursor is invalid").optional(),
+  limit: z.string().regex(/^[1-9]\d*$/, "limit must be a positive integer")
+    .refine((value) => Number.isSafeInteger(Number(value)), "limit must be a positive integer").optional(),
+  page: z.string().regex(/^[1-9]\d*$/, "page must be a positive integer")
+    .refine((value) => Number.isSafeInteger(Number(value)), "page must be a positive integer").optional(),
+  offset: z.string().regex(/^\d+$/, "offset must be a non-negative integer")
+    .refine((value) => Number.isSafeInteger(Number(value)), "offset must be a non-negative integer").optional(),
+}).refine((query) => !(query.cursor && (query.page || query.offset)), {
+  message: "cursor cannot be combined with page or offset",
+})
+
+export const deadLetterIdParamSchema = z.object({
+  id: z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/, "idempotency key is invalid"),
+})
+
+export const releaseEscrowIdParamSchema = z.object({
+  id: z
+    .string()
+    .regex(/^\d+$/, "id must be a positive integer")
+    .refine((val) => parseInt(val, 10) > 0, "id must be a positive integer"),
+})
+
+export const allowBodySchema = z.object({
+  address: stellarAddress,
+  until: z
+    .number({ message: "until must be a positive Unix timestamp" })
+    .int("until must be a positive Unix timestamp")
+    .positive("until must be a positive Unix timestamp")
+    .optional(),
+})
+
+export const blockBodySchema = z.object({
+  address: stellarAddress,
+})
+
+export const settlementIdSchema = z.object({
+  settlement_id: positiveInt,
+})
+
+export const executeSettlementSchema = z.object({
+  settlement_id: positiveInt,
+  token_contract: z.string().optional(),
+})
+
+export const escalateHoldSchema = z.object({
+  settlement_id: positiveInt,
+  reason: z.string().max(512).optional(),
+})
+
+export const graceWindowSchema = z.object({
+  grace_window_seconds: z
+    .number({ message: "grace_window_seconds must be a positive integer" })
+    .int("grace_window_seconds must be a positive integer")
+    .positive("grace_window_seconds must be a positive integer")
+    .max(2_592_000, "grace_window_seconds must not exceed 2592000 (30 days)"),
+})
+
+export const thresholdSchema = z.object({
+  threshold: positiveInt,
+})
+
+export const voteBodySchema = z.object({
+  signer_address: z
+    .string()
+    .min(1, "signer_address is required")
+    .refine(isValidStellarAddress, "signer_address must be a valid Stellar public key"),
+  vote: z.enum(["ResolvedClaimant", "ResolvedCounterparty"], {
+    message: "vote must be 'ResolvedClaimant' or 'ResolvedCounterparty'",
+  }),
+  weight: z
+    .number({ message: "weight must be a positive integer" })
+    .int("weight must be a positive integer")
+    .positive("weight must be a positive integer")
+    .default(1),
+})
+
+export const createDisputeSchema = z.object({
+  claimant_address: stellarAddress,
+  settlement_id: z
+    .string()
+    .min(1, "settlement_id is required")
+    .regex(/^\d+$/, "settlement_id must be a positive integer string"),
+  reason: z.string().optional(),
+})
+
+export const disputeStatuses = ["Raised", "Resolved"] as const
+
+export const disputeListQuerySchema = z.object({
+  status: z.enum(disputeStatuses, { message: "status must be 'Raised' or 'Resolved'" }).optional(),
+  settlement_id: z
+    .string()
+    .regex(/^\d+$/, "settlement_id must be a positive integer string")
+    .optional(),
+  page: z.coerce.number().int("page must be a positive integer").positive("page must be a positive integer").default(1),
+  limit: z.coerce
+    .number()
+    .int("limit must be an integer between 1 and 100")
+    .positive("limit must be an integer between 1 and 100")
+    .max(100, "limit must be an integer between 1 and 100")
+    .default(20),
+})
+
+export const complianceAuditQuerySchema = z.object({
+  address: stellarAddress.optional(),
+  event_type: z.enum(["address_allowed", "address_allowed_until", "address_blocked", "address_cleared"]).optional(),
+  from_ledger: z.coerce.number().int().nonnegative().optional(),
+  to_ledger: z.coerce.number().int().nonnegative().optional(),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+}).refine((query) => query.from_ledger === undefined || query.to_ledger === undefined || query.from_ledger <= query.to_ledger, {
+  message: "from_ledger must be before to_ledger",
+})
+
+export const analyticsQuerySchema = z
+  .object({
+    start_date: z
+      .string()
+      .optional()
+      .transform((val) => (val ? parseInt(val, 10) : undefined))
+      .pipe(z.number().finite("Invalid start_date timestamp").optional()),
+    end_date: z
+      .string()
+      .optional()
+      .transform((val) => (val ? parseInt(val, 10) : undefined))
+      .pipe(z.number().finite("Invalid end_date timestamp").optional()),
+    bucket: z
+      .enum(["day", "week", "month"], { message: "bucket must be one of: day, week, month" })
+      .optional(),
+    merchant: stellarAddress.optional(),
+    token: z.string().min(1).optional(),
+  })
+  .refine(
+    (data) => {
+      if (data.start_date && data.end_date) {
+        return data.start_date <= data.end_date
+      }
+      return true
+    },
+    { message: "start_date must be before end_date" },
+  )
+
+export const invoiceResponseSchema = z.object({
+  invoice_id: z.string(),
+  status: z.string(),
+})
+
+export const invoiceListResponseSchema = z.object({
+  data: z.array(z.object({ invoice_id: z.union([z.string(), z.number()]) }).passthrough()),
+  total: z.number().int().nonnegative(),
+  page: z.number().int().positive(),
+  limit: z.number().int().positive(),
+  totalPages: z.number().int().nonnegative(),
+})
+
+export const treasuryBalancesResponseSchema = z.array(z.object({
+  token: z.string(),
+  balance: z.string(),
+}))
+
+export const treasurySettlementResponseSchema = z.object({
+  id: z.number().int().positive(),
+  merchant_address: z.string(),
+  amount: z.union([z.string(), z.number()]),
+  approvals: z.array(z.string()),
+  approval_weight: z.number().int().nonnegative(),
+  status: z.string(),
+  hold_reason: z.string().nullable(),
+}).passthrough()

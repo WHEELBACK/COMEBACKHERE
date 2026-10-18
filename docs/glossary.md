@@ -30,33 +30,36 @@ An optional SHA-256 (or equivalent) hash of off-chain invoice metadata (e.g. lin
 **payment_link_hash**
 An optional hash of a payment-link URI, enabling deterministic linking between on-chain state and an off-chain checkout page.
 
+**Grace Window**
+The duration (in seconds) after an invoice's `expires_at` during which payment is still accepted. Set by the contract admin via `set_grace_window`. A grace window allows for ledger drift and network congestion without forcing merchants to reissue invoices. Configurable per deployment; default matches the invoice contract's `DEFAULT_GRACE_WINDOW` constant.
+
 ### InvoiceStatus
 
-| Status            | Meaning                                                                 |
-|-------------------|-------------------------------------------------------------------------|
-| `Pending`         | Created and awaiting payment. Can be paid, cancelled, or expired.       |
-| `Paid`            | Marked paid by the admin. Payer and `paid_at` timestamp are recorded.   |
-| `Expired`         | The ledger passed `expires_at` before payment. Set by `batch_expire`.   |
-| `Cancelled`       | Cancelled by the merchant or admin before payment.                      |
-| `RefundRequested` | The payer requested a refund on a paid invoice (initiates escrow dispute). |
+|      Status       |                                   Meaning                                   |
+|-------------------|-----------------------------------------------------------------------------|
+| `Pending`         | Created and awaiting payment. Can be paid, cancelled, or expired.           |
+| `Paid`            | Marked paid by the admin. Payer and `paid_at` timestamp are recorded.       |
+| `Expired`         | The ledger passed `expires_at` before payment. Set by `batch_expire`.       |
+| `Cancelled`       | Cancelled by the merchant or admin before payment.                          |
+| `RefundRequested` | The payer requested a refund on a paid invoice (initiates escrow dispute).  |
 | `Released`        | Escrow funds have been released to the merchant after payment confirmation. |
 
 ### InvoiceError
 
-| Code | Name                  | Trigger                                                          |
-|------|-----------------------|------------------------------------------------------------------|
-| 1    | `Unauthorized`        | Caller is not the merchant, admin, or payer.                     |
-| 2    | `ContractPaused`      | A state-changing call was made while the contract is paused.     |
-| 3    | `InvalidAmount`       | `amount_usdc` ≤ 0 or `gross_usdc` < `amount_usdc`.              |
-| 4    | `NotPending`          | Operation requires `Pending` status but invoice is in another state. |
-| 5    | `Expired`             | Payment attempted after `expires_at`.                            |
-| 6    | `NotFound`            | No invoice exists for the given ID.                              |
-| 7    | `AlreadyInitialized`  | `initialize` called when the contract is already set up.         |
-| 8    | `ZeroDuration`        | `expires_in_seconds` was 0 on invoice creation.                  |
-| 9    | `ExpiryOverflow`      | `ledger_timestamp + expires_in_seconds` overflows `u64`.         |
-| 10   | `NotPaid`             | `request_refund` or `release_escrow` called on a non-`Paid` invoice. |
-| 12   | `AmountPrecision`     | Amount is below 1 USDC (10,000,000 stroops).                     |
-| 13   | `DuplicateNonce`      | Merchant nonce has already been used for a previous invoice.     |
+| Code |         Name         |                               Trigger                                |
+|------|----------------------|----------------------------------------------------------------------|
+| 1    | `Unauthorized`       | Caller is not the merchant, admin, or payer.                         |
+| 2    | `ContractPaused`     | A state-changing call was made while the contract is paused.         |
+| 3    | `InvalidAmount`      | `amount_usdc` ≤ 0 or `gross_usdc` < `amount_usdc`.                   |
+| 4    | `NotPending`         | Operation requires `Pending` status but invoice is in another state. |
+| 5    | `Expired`            | Payment attempted after `expires_at`.                                |
+| 6    | `NotFound`           | No invoice exists for the given ID.                                  |
+| 7    | `AlreadyInitialized` | `initialize` called when the contract is already set up.             |
+| 8    | `ZeroDuration`       | `expires_in_seconds` was 0 on invoice creation.                      |
+| 9    | `ExpiryOverflow`     | `ledger_timestamp + expires_in_seconds` overflows `u64`.             |
+| 10   | `NotPaid`            | `request_refund` or `release_escrow` called on a non-`Paid` invoice. |
+| 12   | `AmountPrecision`    | Amount is below 1 USDC (10,000,000 stroops).                         |
+| 13   | `DuplicateNonce`     | Merchant nonce has already been used for a previous invoice.         |
 
 ---
 
@@ -77,43 +80,49 @@ The minimum cumulative signer weight required to execute a settlement. Set at in
 **Token Allowlist**
 An optional list of token contract addresses accepted for settlement. If non-empty, any unlisted token is rejected with `TokenNotAllowed`.
 
+**On-Hold Settlement**
+A settlement whose status is `OnHold`, meaning execution is blocked pending review. A settlement enters the on-hold state automatically when a dispute is raised against it. It can also be placed on hold by an admin for compliance, fraud, or KYC reasons (see `SettlementHoldReason`). An on-hold settlement cannot be executed until the hold is lifted.
+
 ### SettlementStatus
 
-| Status               | Meaning                                                                 |
-|----------------------|-------------------------------------------------------------------------|
-| `Pending`            | Proposed and awaiting sufficient approvals.                             |
-| `Executed`           | Full amount transferred to the merchant.                                |
-| `PartiallyExecuted`  | A partial amount was transferred.                                       |
-| `OnHold`             | Blocked from execution (compliance review or open dispute).             |
-| `Cancelled`          | Cancelled by an authorised signer before execution.                     |
+|       Status        |                           Meaning                           |
+|---------------------|-------------------------------------------------------------|
+| `Pending`           | Proposed and awaiting sufficient approvals.                 |
+| `Executed`          | Full amount transferred to the merchant.                    |
+| `PartiallyExecuted` | A partial amount was transferred.                           |
+| `OnHold`            | Blocked from execution (compliance review or open dispute). |
+| `Cancelled`         | Cancelled by an authorised signer before execution.         |
 
 ### SettlementHoldReason
 
-| Variant             | Meaning                                         |
-|---------------------|-------------------------------------------------|
-| `None`              | Not on hold (default state).                    |
-| `ComplianceReview`  | Held pending a compliance review.               |
-| `FraudCheck`        | Held for fraud investigation.                   |
-| `KycPending`        | Held until KYC verification is complete.        |
-| `AdminHold`         | Held by an admin for an unspecified reason.     |
+|      Variant       |                   Meaning                   |
+|--------------------|---------------------------------------------|
+| `None`             | Not on hold (default state).                |
+| `ComplianceReview` | Held pending a compliance review.           |
+| `FraudCheck`       | Held for fraud investigation.               |
+| `KycPending`       | Held until KYC verification is complete.    |
+| `AdminHold`        | Held by an admin for an unspecified reason. |
 
 ---
 
 ## Dispute Terms
 
 **Dispute**
-An on-chain record raised by a claimant against a counterparty over a specific settlement. Raising a dispute automatically places the referenced settlement `OnHold`.
+An on-chain record raised by a claimant against a counterparty over a specific settlement. Raising a dispute automatically places the referenced settlement `OnHold`. Dispute records — including every resolution vote — are stored in the treasury contract's on-chain storage, so in-flight votes survive process restarts and are shared across backend replicas.
 
 **resolution_weight**
-Cumulative weight of signers who have voted on the dispute resolution. When it reaches the treasury threshold the dispute transitions to `ResolvedClaimant` or `ResolvedCounterparty`.
+Cumulative weight of signers who have voted on the dispute resolution. When it reaches the treasury threshold the dispute transitions to `ResolvedClaimant` or `ResolvedCounterparty`. A dispute resolved in favour of the counterparty (merchant) returns the settlement to `Pending` so it can resume the approval flow; a dispute resolved in favour of the claimant voids the settlement (`Cancelled`).
+
+**Dispute Quorum**
+The minimum cumulative signer weight required to finalise a dispute resolution. This is the same value as the treasury's `threshold` — when the `resolution_weight` of signers who have voted reaches this threshold, the dispute transitions from `Raised` to `ResolvedClaimant` or `ResolvedCounterparty`.
 
 ### DisputeStatus
 
-| Status                  | Meaning                                                         |
-|-------------------------|-----------------------------------------------------------------|
-| `Raised`                | Dispute created and awaiting resolution votes.                  |
-| `ResolvedClaimant`      | Resolved in favour of the claimant.                             |
-| `ResolvedCounterparty`  | Resolved in favour of the counterparty (merchant).              |
+|         Status         |                      Meaning                       |
+|------------------------|----------------------------------------------------|
+| `Raised`               | Dispute created and awaiting resolution votes.     |
+| `ResolvedClaimant`     | Resolved in favour of the claimant.                |
+| `ResolvedCounterparty` | Resolved in favour of the counterparty (merchant). |
 
 ---
 
@@ -130,6 +139,67 @@ An optional override address where a merchant's settlement funds are sent. Set v
 
 **Signer Rotation**
 A governance process for replacing one authorised signer with another. The old signer's weight transfers to the new signer and the old signer's weight is set to 0.
+
+---
+
+## Compliance Terms
+
+**Allowlist (Compliance)**
+The set of Stellar addresses permitted to interact with protocol contracts. Maintained by the compliance contract's admin via `allow_address`, `block_address`, `allow_address_until`, and `clear_address`. The contract exposes `is_allowed` to query whether a given address is currently on the allowlist. The invoice contract checks the compliance allowlist before marking invoices as paid. An address not on the allowlist (or explicitly blocked) is rejected with an `Unauthorized` error.
+
+**Allowlist (Token)**
+See _Token Allowlist_ under Settlement Terms.
+
+---
+
+## API Terms
+
+**Idempotency Key**
+A client-supplied token that ensures a request is processed at most once.
+The key is passed in the `Idempotency-Key` header. The backend stores the
+response against a namespaced key and returns the cached result on
+subsequent requests with the same idempotency key, preventing duplicate
+side-effects from retries or network glitches.
+
+**Idempotency Key Scoping**
+Keys are scoped as `{endpoint}:{invoice_id}:{idempotency_key}`. This means
+the same `Idempotency-Key` header value used on two different endpoints
+(or for two different invoice IDs) never collides. Each (endpoint, invoice,
+key) triple is an independent entry in the idempotency store.
+
+**Idempotency TTL**
+Cached idempotency entries expire after a configurable time-to-live (default:
+24 hours in production). Expired entries are evicted both lazily on lookup
+and periodically by a background sweeper, so memory usage stays bounded.
+
+> **Source:** `backend/src/idempotency.rs` (Rust/Axum backend).
+> The TypeScript backend (`comebackhere-backend`) does not currently
+> implement idempotency keys.
+
+---
+
+## Developer & Infrastructure Terms
+
+**ABI Snapshot**
+A committed JSON file in the `abis/` directory that captures the contract's current public interface (function signatures, types, error codes). Generated by `scripts/generate_abi_metadata.sh` after any contract code change. The CI workflow `ci-abi-snapshots.yml` enforces that snapshots stay in sync with the contract source.
+
+**Dispute Escalation**
+The automatic placement of a settlement into `OnHold` status when a `raise_dispute` call is made against it. Until the dispute is resolved (and the claimant or counterparty achieves the `resolution_weight` threshold), the settlement cannot be executed.
+
+**Mirrored Tree**
+The dual-source-tree pattern where the same contract source code exists in both `COMEBACKHERE-contracts/contracts/<name>/` and top-level `contracts/<name>/` directories. The `COMEBACKHERE-` prefix tree is canonical and CI-tested; the top-level tree is deprecated but still referenced in some documentation. See `docs/ARCHITECTURE.md` for migration status.
+
+**Signer Weight**
+The numeric weight assigned to each signer in the treasury via `add_signer` or `update_signer_weight`. When a signer approves a settlement or votes on a dispute, their weight contributes to the cumulative approval weight. A signer with weight 0 is considered inactive. See also _Threshold_.
+
+**Stellar XDR**
+Stellar's binary transaction format (eXtensible Data Representation). Soroban contract functions serialize arguments and return values using XDR. The Rust SDK handles encoding/decoding transparently; TypeScript SDK exposes `.toXDR()` and `Envelope.fromXDR()` methods.
+
+**Threshold Weight**
+An alternative phrasing for the treasury's `threshold` setting — the cumulative weight of signers required to execute a settlement or finalise a dispute resolution. Must be > 0; set at initialization and updatable via `update_threshold`. See also _Signer Weight_.
+
+**TTL (Time-To-Live)**
+In Soroban, the ledger entry lifecycle parameter controlling how long data persists before archival. Contracts must periodically call `.extend_ttl()` to refresh instance and persistent storage entries. Critical for long-lived contracts to avoid silent archival and state loss.
 
 ---
 

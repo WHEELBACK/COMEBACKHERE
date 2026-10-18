@@ -1,0 +1,105 @@
+name: CI Summary
+
+# This workflow is the single required status check for branch protection.
+# It depends on every other CI workflow via `needs:` so that a single check
+# (ci-summary / all-checks-passed) is all that must be listed in branch
+# protection rules. When a new workflow is added, add its job name here
+# rather than touching branch protection settings.
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Re-usable fans-in ──────────────────────────────────────────────────
+  # Each entry below mirrors a job from one of the ci-*.yml / lint-docs.yml
+  # workflows. GitHub requires that the jobs listed in `needs:` live in the
+  # *same* workflow file, so we use a lightweight call-workflow pattern:
+  # each leaf workflow exposes a reusable workflow_call trigger and this file
+  # calls them, then a single aggregator job depends on all of them.
+  #
+  # If the upstream workflows do not yet expose workflow_call, the aggregator
+  # is still useful as a single named check — the individual jobs below can
+  # be replaced with `uses:` calls once those workflows are updated.
+
+  ci-frontend:
+    name: ci / frontend build-and-lint
+    uses: ./.github/workflows/ci.yml
+
+  ci-contracts:
+    name: ci / contract tests
+    uses: ./.github/workflows/ci-contracts.yml
+
+  ci-legacy-contracts:
+    name: ci / legacy contract tests
+    uses: ./.github/workflows/ci-legacy-contracts.yml
+
+  ci-legacy-frontend:
+    name: ci / legacy frontend tests
+    uses: ./.github/workflows/ci-legacy-frontend.yml
+
+  ci-abi-metadata:
+    name: ci / abi metadata
+    uses: ./.github/workflows/ci-abi-metadata.yml
+
+  ci-abi-snapshots:
+    name: ci / abi snapshots
+    uses: ./.github/workflows/ci-abi-snapshots.yml
+
+  ci-coverage:
+    name: ci / contract coverage
+    uses: ./.github/workflows/ci-coverage.yml
+
+  ci-error-docs:
+    name: ci / error docs sync
+    uses: ./.github/workflows/ci-error-docs.yml
+
+  ci-backend-tests:
+    name: ci / backend tests
+    uses: ./.github/workflows/backend-tests.yml
+
+  ci-stack-smoke:
+    name: ci / stack smoke test
+    uses: ./.github/workflows/ci-stack-smoke.yml
+
+  ci-webhook-ratelimit-docs:
+    name: ci / webhook and rate-limit docs sync
+    uses: ./.github/workflows/ci-webhook-ratelimit-docs.yml
+
+  ci-lint-docs:
+    name: ci / lint docs
+    uses: ./.github/workflows/lint-docs.yml
+
+  ci-npm-audit:
+    name: ci / npm audit
+    uses: ./.github/workflows/npm-audit.yml
+
+  ci-playwright-e2e:
+    name: ci / playwright e2e
+    uses: ./.github/workflows/playwright-e2e.yml
+
+  # ── Aggregator ────────────────────────────────────────────────────────
+  # This is the *only* job that needs to be listed in branch protection
+  # required status checks.  Its name is intentionally stable — rename the
+  # leaf workflows above freely without touching branch protection settings.
+  all-checks-passed:
+    name: all-checks-passed
+    runs-on: ubuntu-latest
+    needs:
+      - ci-frontend
+      - ci-contracts
+      - ci-legacy-contracts
+      - ci-legacy-frontend
+      - ci-abi-metadata
+      - ci-abi-snapshots
+      - ci-coverage
+      - ci-error-docs
+      - ci-backend-tests
+      - ci-stack-smoke
+      - ci-webhook-ratelimit-docs
+      - ci-lint-docs
+      - ci-npm-audit
+      - ci-playwright-e2e
+    steps:
+      - name: All CI checks passed
+        run: echo "All required CI checks passed."

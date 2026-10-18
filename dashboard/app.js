@@ -9,6 +9,10 @@ const STATUS_COLORS = {
   Released: 'badge-released',
 };
 
+// Ordered list of statuses used for deterministic status-column sorting.
+// A status not in this list sorts after all known statuses.
+const STATUS_ORDER = Object.keys(STATUS_COLORS);
+
 let invoices = [];
 let sortField = 'id';
 let sortAsc = true;
@@ -43,7 +47,7 @@ function formatTimestamp(ts) {
 }
 
 function getStatusBadge(status) {
-  const cls = STATUS_COLORS[status] || 'badge-pending';
+  const cls = STATUS_COLORS[status] || DEFAULT_BADGE_CLASS;
   return `<span class="badge ${cls}">${status === 'RefundRequested' ? 'Refund Requested' : status}</span>`;
 }
 
@@ -68,6 +72,12 @@ function render() {
     if (sortField === 'id' || sortField === 'amount') {
       va = Number(va);
       vb = Number(vb);
+    } else if (sortField === 'status') {
+      // Sort by the defined STATUS_ORDER; unknown statuses sort to the end
+      const ia = STATUS_ORDER.indexOf(va);
+      const ib = STATUS_ORDER.indexOf(vb);
+      va = ia === -1 ? STATUS_ORDER.length : ia;
+      vb = ib === -1 ? STATUS_ORDER.length : ib;
     }
     if (va < vb) return sortAsc ? -1 : 1;
     if (va > vb) return sortAsc ? 1 : -1;
