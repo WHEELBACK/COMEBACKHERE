@@ -8,6 +8,8 @@ pub struct CachedResponse {
     pub status: u16,
     pub body: serde_json::Value,
     pub recorded_at: Instant,
+    /// Hash of the request payload to detect reuse with different payloads
+    pub payload_hash: String,
 }
 
 /// Shared in-memory idempotency store.
@@ -53,29 +55,46 @@ impl IdempotencyStore {
         format!("{endpoint}:{invoice_id}:{idempotency_key}")
     }
 
-    /// Return the cached response if the key exists and has not expired.
-    pub fn get(&self, key: &str) -> Option<CachedResponse> {
+    /// Return the cached response if the key exists, has not expired, and matches the payload hash.
+    /// Returns None if the key doesn't exist or has expired.
+    /// Panics if the key exists but payload doesn't match (idempotency violation).
+    pub fn get(&self, key: &str, payload_hash: &str) -> Result<Option<CachedResponse>, String> {
         if let Some(entry) = self.inner.get(key) {
             if entry.recorded_at.elapsed() < self.ttl {
-                return Some(entry.clone());
+                // Key exists and is fresh - validate payload matches
+                if entry.payload_hash != payload_hash {
+                    return Err("Idempotency-Key reused with different request payload".to_string());
+                }
+                return Ok(Some(entry.clone()));
             }
             // Expired — evict lazily.
             drop(entry);
             self.inner.remove(key);
         }
-        None
+        Ok(None)
     }
 
-    /// Insert a response into the store.
-    pub fn insert(&self, key: String, status: u16, body: serde_json::Value) {
+    /// Insert a response into the store with payload hash for idempotency validation.
+    pub fn insert(&self, key: String, status: u16, body: serde_json::Value, payload_hash: String) {
         self.inner.insert(
             key,
             CachedResponse {
                 status,
                 body,
                 recorded_at: Instant::now(),
+                payload_hash,
             },
         );
+    }
+
+    /// Compute a hash of the request payload for idempotency validation.
+    /// This ensures the same Idempotency-Key isn't reused with different payloads.
+    pub fn hash_payload(payload: &serde_json::Value) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        payload.to_string().hash(&mut hasher);
+        format!("{:x}", hasher.finish())
     }
 
     /// Remove every entry whose TTL has elapsed. Called both lazily on lookup

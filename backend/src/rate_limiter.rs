@@ -260,9 +260,11 @@ fn build_rate_limit_response(retry_after_secs: u64, limit: u64, reset: u64) -> R
         "error": "Too many requests. Please retry after the indicated number of seconds.",
         "retryAfter": retry_after_secs,
     });
+    // Retry-After header must be a non-negative integer (seconds) per RFC 7231
+    let retry_after_value = retry_after_secs.max(1).to_string();
     let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
-        [("retry-after", retry_after_secs.to_string())],
+        [("retry-after", retry_after_value)],
         Json(body),
     )
         .into_response();
