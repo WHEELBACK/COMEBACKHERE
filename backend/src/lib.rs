@@ -71,7 +71,7 @@ pub fn build_router(state: AppState) -> Router {
     let rl_config = RateLimitConfig::from_env();
     let rl_layer = RateLimiterLayer::new(new_store(), rl_config);
 
-    Router::new()
+    let api_router = Router::new()
         .route("/health/rpc", axum::routing::get(get_rpc_health))
         .route("/health/ready", axum::routing::get(readiness_probe))
         .route("/invoices", axum::routing::post(create_invoice))
@@ -80,7 +80,17 @@ pub fn build_router(state: AppState) -> Router {
         .route("/invoices/:id/cancel", axum::routing::post(cancel_invoice))
         .route("/invoices/:id/refund", axum::routing::post(refund_invoice))
         .layer(rl_layer)
-        .with_state(state)
+        .with_state(state);
+
+    // Support optional API_PREFIX for deployment behind reverse proxies
+    // e.g., API_PREFIX=/api/v1 routes become /api/v1/invoices instead of /invoices
+    let prefix = std::env::var("API_PREFIX").unwrap_or_else(|_| String::new());
+    if prefix.is_empty() {
+        api_router
+    } else {
+        Router::new()
+            .nest(&prefix, api_router)
+    }
 }
 
 #[derive(utoipa::OpenApi)]

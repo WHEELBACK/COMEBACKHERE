@@ -25,6 +25,41 @@ pub async fn create_invoice(
     State(state): State<AppState>,
     ValidatedBody(body): ValidatedBody<CreateInvoiceRequest>,
 ) -> impl IntoResponse {
+    // Validate that amounts are not zero
+    if body.amount_usdc == 0 {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: "Invoice amount must be greater than zero".to_string(),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
+    if body.gross_usdc == 0 {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: "Gross amount must be greater than zero".to_string(),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
+    // Validate that gross amount is >= net amount
+    if body.gross_usdc < body.amount_usdc {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: "Gross amount must be >= net amount".to_string(),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
     // The merchant, token, amounts and expiry are carried by the pre-signed
     // transaction; the backend just forwards it to Soroban.
     match state.client.create_invoice(&body.signed_xdr).await {

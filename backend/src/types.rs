@@ -41,15 +41,20 @@ pub struct InvoiceResponse {
 }
 
 /// Request body for POST /invoices (create)
+///
+/// Amounts are expressed as u64 to preserve precision for large token quantities.
+/// JSON parsers handle u64 safely without precision loss (u64 max ~18.4e18, safe in JSON).
+/// For amounts with decimal places, include all decimals in the integer representation
+/// (e.g., USDC amount of 100.50 USD is represented as 100_500_000 stroops for 6 decimals).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateInvoiceRequest {
     /// The Stellar public key of the merchant creating the invoice (G…).
     pub merchant: String,
     /// Token identifier (e.g. "USDC").
     pub token: String,
-    /// Invoice amount in stroops / smallest unit.
+    /// Invoice amount in stroops / smallest unit. Must be > 0.
     pub amount_usdc: u64,
-    /// Gross amount including fees, in stroops.
+    /// Gross amount including fees, in stroops. Must be > 0 and >= amount_usdc.
     pub gross_usdc: u64,
     /// Seconds from now until the invoice expires.
     pub expires_in_seconds: u64,
