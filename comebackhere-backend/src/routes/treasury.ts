@@ -57,6 +57,8 @@ router.get("/pending-settlements", async (_req: Request, res: Response) => {
         approval_weight: s.approval_weight,
         status: s.status,
         hold_reason: s.hold_reason,
+        proposed_tx_hash: s.proposed_tx_hash ?? null,
+        executed_tx_hash: s.executed_tx_hash ?? null,
       })),
     )
   } catch (err: unknown) {

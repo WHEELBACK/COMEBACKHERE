@@ -82,6 +82,13 @@
   color: #111827;
 }
 
+.settlement-detail__value--hash {
+  font-family: monospace;
+  font-size: 0.8125rem;
+  color: #1d4ed8;
+  word-break: break-all;
+}
+
 .settlement-detail__progress-section {
   margin-bottom: 1.5rem;
 }

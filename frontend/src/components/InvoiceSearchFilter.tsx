@@ -22,6 +22,15 @@ function formatDate(ts: number | null): string {
   return new Date(ts * 1000).toLocaleDateString();
 }
 
+/** Normalise an invoice status value to a plain lowercase string for comparison.
+ *  Handles TypeScript string-enums (whose .valueOf() is the string) and plain
+ *  string unions alike, so the filter works regardless of which type the caller
+ *  passes in. */
+function normaliseStatus(s: unknown): string {
+  if (s == null) return "";
+  return String(s).trim();
+}
+
 export default function InvoiceSearchFilter({ invoices }: Props) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<InvoiceStatus | "">("");
@@ -34,12 +43,13 @@ export default function InvoiceSearchFilter({ invoices }: Props) {
     const q = query.trim().toLowerCase();
     const fromTs = dateFrom ? new Date(dateFrom).getTime() / 1000 : null;
     const toTs = dateTo ? new Date(dateTo).getTime() / 1000 + 86400 : null;
+    const normalisedFilter = normaliseStatus(statusFilter);
 
     return invoices.filter((inv) => {
       if (q && !inv.id.toLowerCase().includes(q) && !inv.merchant.toLowerCase().includes(q)) {
         return false;
       }
-      if (statusFilter && inv.status !== statusFilter) return false;
+      if (normalisedFilter && normaliseStatus(inv.status) !== normalisedFilter) return false;
       if (fromTs && inv.created_at !== null && inv.created_at < fromTs) return false;
       if (toTs && inv.created_at !== null && inv.created_at > toTs) return false;
       return true;

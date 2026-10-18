@@ -184,6 +184,24 @@ describe("createInvoice — Soroban interaction", () => {
       .rejects.toMatchObject({ message: expect.stringMatching(/submission failed/), status: 422 })
   })
 
+  it("throws 422 with tx_hash when getTransaction returns FAILED", async () => {
+    const client = makeMockClient({
+      getAccount: vi.fn().mockResolvedValue(fakeAccount),
+      simulateTransaction: vi.fn().mockResolvedValue(PARSED_SIM_SUCCESS),
+      sendTransaction: vi.fn().mockResolvedValue({ status: "PENDING", hash: "txhash-failed" }),
+      getTransaction: vi.fn().mockResolvedValue({
+        status: SorobanRpc.Api.GetTransactionStatus.FAILED,
+        latestLedger: 1,
+        latestLedgerCloseTime: 0,
+        oldestLedger: 1,
+        oldestLedgerCloseTime: 0,
+      }),
+    })
+
+    await expect(createInvoice(VALID_BODY, client, CONTRACT_ID, SIGNER_SECRET, NETWORK))
+      .rejects.toMatchObject({ message: expect.stringMatching(/transaction failed/), status: 422, tx_hash: "txhash-failed" })
+  })
+
   it("throws 504 when confirmation times out", async () => {
     const client = makeMockClient({
       getAccount: vi.fn().mockResolvedValue(fakeAccount),
