@@ -53,19 +53,52 @@ function parseAddressStatus(scVal: xdr.ScVal): ComplianceStatusResult {
 
 export async function getAddressStatus(address: string): Promise<ComplianceStatusResult> {
   const server = getServer()
-  const result = await server.simulateTransaction(
-    new TransactionBuilder(await server.getAccount(COMPLIANCE_CONTRACT_ID), {
-      fee: BASE_FEE,
-      networkPassphrase: getNetworkPassphrase(),
-    })
-      .addOperation(new Contract(COMPLIANCE_CONTRACT_ID).call("get_address_status", nativeToScVal(address, { type: "address" })))
-      .setTimeout(30)
-      .build()
-  )
+  let result: Awaited<ReturnType<typeof server.simulateTransaction>>
+  try {
+    result = await server.simulateTransaction(
+      new TransactionBuilder(await server.getAccount(COMPLIANCE_CONTRACT_ID), {
+        fee: BASE_FEE,
+        networkPassphrase: getNetworkPassphrase(),
+      })
+        .addOperation(new Contract(COMPLIANCE_CONTRACT_ID).call("get_address_status", nativeToScVal(address, { type: "address" })))
+        .setTimeout(30)
+        .build()
+    )
+  } catch (err: unknown) {
+    // A network error or RPC failure must NOT be treated as an approval.
+    // Re-throw with a clear message so callers know this is a lookup error,
+    // not a "Cleared" or "Allowed" status.
+    throw new Error(
+      `Compliance lookup failed for ${address}: ${err instanceof Error ? err.message : String(err)}. ` +
+      "Address compliance status is unknown — do not treat this as an approval."
+    )
+  }
   if (SorobanRpc.isSimulationError(result) || !result.result?.retval) {
-    throw new Error("Unable to fetch address status")
+    // Simulation errors (contract panic, address not found, etc.) must also
+    // be treated as a hard failure, not as an implicit approval.
+    throw new Error(
+      `Compliance status unavailable for ${address}: simulation did not return a result. ` +
+      "Address compliance status is unknown — do not treat this as an approval."
+    )
   }
   return parseAddressStatus(result.result.retval)
+}
+
+/**
+ * Safe compliance check that fails CLOSED: returns `{ status: "Blocked" }` on
+ * any lookup error instead of throwing.  Use this in payment flows where a
+ * network hiccup must block the transaction rather than silently approve it.
+ *
+ * Only use `getAddressStatus` directly when you need to distinguish between a
+ * genuine "Cleared/Blocked" status and a lookup failure.
+ */
+export async function checkAddressAllowed(address: string): Promise<ComplianceStatusResult> {
+  try {
+    return await getAddressStatus(address)
+  } catch {
+    // Any failure defaults to Blocked so a lookup error can never grant access.
+    return { status: "Blocked" }
+  }
 }
 
 export async function getSignerAddress(): Promise<string> {

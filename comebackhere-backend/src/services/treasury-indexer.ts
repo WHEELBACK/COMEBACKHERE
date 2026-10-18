@@ -279,12 +279,20 @@ export async function processIndexerBatch(
     } else if (eventType === "settlement_executed") {
       await processSettlementExecuted(settlements, settlementId, txHash)
 
-      // Dispatch signed webhook for settlement_executed
+      // Dispatch signed webhook for settlement_executed.
+      // IMPORTANT: read the status from the DB record we just wrote so the
+      // webhook always reflects the current, authoritative status ("Executed")
+      // and never carries a stale in-memory value from before the DB update.
       const webhookUrl = process.env.WEBHOOK_URL
       if (webhookUrl) {
+        const updatedRecord = await settlements.findOne({ id: settlementId })
         dispatchWebhook(webhookUrl, {
           event: "settlement_executed",
           settlement_id: settlementId,
+          status: updatedRecord?.status ?? "Executed",
+          merchant_address: updatedRecord?.merchant_address ?? "",
+          amount: updatedRecord?.amount ?? "0",
+          token: updatedRecord?.token ?? "",
           tx_hash: txHash,
         }).catch((err: unknown) => {
           console.error(

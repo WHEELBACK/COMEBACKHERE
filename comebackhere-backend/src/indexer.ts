@@ -219,17 +219,35 @@ export async function pollOnce(
 ): Promise<void> {
   const cursor = await loadCursor()
 
-  const response = await (server as any).getEvents({
-    startLedger: cursor === "0" ? undefined : undefined,
-    cursor: cursor === "0" ? undefined : cursor,
-    filters: [
-      {
-        type: "contract",
-        contractIds: [contractId],
-      },
-    ],
-    limit: 100,
-  })
+  // When cursor is "0" (fresh start) we must provide startLedger so the RPC
+  // knows where to begin.  Using startLedger=1 ensures events at the very
+  // first ledger of the network are never skipped at the ledger boundary.
+  // Once we have a real paging token from a prior poll we use cursor-based
+  // pagination instead (startLedger is mutually exclusive with cursor).
+  const requestParams =
+    cursor === "0"
+      ? {
+          startLedger: 1,
+          filters: [
+            {
+              type: "contract",
+              contractIds: [contractId],
+            },
+          ],
+          limit: 100,
+        }
+      : {
+          cursor,
+          filters: [
+            {
+              type: "contract",
+              contractIds: [contractId],
+            },
+          ],
+          limit: 100,
+        }
+
+  const response = await (server as any).getEvents(requestParams)
 
   const events: any[] = response?.events ?? []
 
@@ -255,7 +273,8 @@ export async function pollOnce(
     persistTransition(transition)
   }
 
-  // Advance cursor to the last seen event's paging token for re-org safety.
+  // Always advance the cursor when events are returned so we do not replay
+  // the same ledger boundary on the next poll.
   if (events.length > 0) {
     await saveCursor(events[events.length - 1].pagingToken)
   }
