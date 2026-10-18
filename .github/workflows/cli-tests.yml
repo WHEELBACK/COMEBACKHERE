@@ -1,0 +1,49 @@
+name: CLI Tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "cli/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: cargo test (cli)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: cli
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cli/target
+          key: ${{ runner.os }}-cargo-cli-${{ hashFiles('cli/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cli-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Build
+        run: cargo build
+
+      - name: Run tests
+        run: cargo test

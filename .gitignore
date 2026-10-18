@@ -1,6 +1,40 @@
+# ── Secrets / environment ──────────────────────────────────────────────────
 .env
+.env.local
 .env.mainnet
 .env.testnet
+.env.*.local
+
+# ── Deployment artefacts ───────────────────────────────────────────────────
 artifacts/addresses.json
+
+# ── Coverage / test snapshots ─────────────────────────────────────────────
 coverage/
+*.snap
+**/__snapshots__/
+playwright-report/
+test-results/
+
+# ── Rust build artefacts ───────────────────────────────────────────────────
+target/
+**/target/
+**/*.lock.bak
+
+# ── Node / JS build artefacts ─────────────────────────────────────────────
 node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# ── OS / editor noise ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Temporary / generated files ───────────────────────────────────────────
+*.tmp
+*.bak
+*.log
