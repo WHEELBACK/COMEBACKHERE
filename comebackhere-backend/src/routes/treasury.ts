@@ -170,6 +170,22 @@ const defaultSettlementDeps: SettlementExecutionDeps = {
  * POST /api/treasury/execute-settlement
  * Validates treasury USDC balance before submitting execute_settlement.
  * Body: { settlement_id: number, token_contract?: string }
+ *
+ * #889 — idempotency guard: re-fetch the settlement status after the on-chain
+ *   call returns to detect duplicate submissions.  If the settlement is
+ *   already Executed we return the cached result rather than re-submitting.
+ *
+ * #889 — logger fix: the original code referenced `res.locals.logger` inside
+ *   this exported function, but `res` is not in scope here (it only exists in
+ *   the route handler).  Replaced with a plain `console.info` call so the log
+ *   line is preserved without crashing at runtime.
+ *
+ * #890 — escrow sync check: if `submitContractCall` throws we re-fetch the
+ *   on-chain settlement status and re-check the treasury balance.  When the
+ *   statuses diverge (e.g. the chain accepted the transaction but we received
+ *   a network error before the response arrived) we surface an
+ *   EscrowBalanceMismatch error so the caller knows to reconcile rather than
+ *   silently swallowing the failure.
  */
 export async function executeSettlementWithBalanceCheck(
   body: ExecuteSettlementBody,
@@ -196,6 +212,18 @@ export async function executeSettlementWithBalanceCheck(
     env.networkPassphrase,
   )
 
+  // #889 — idempotency guard: if the settlement is already executed, return
+  // immediately rather than submitting again and getting a NotPending error
+  // from the contract.
+  if (settlement.status === "Executed") {
+    return {
+      tx_hash: "",
+      settlement_id: body.settlement_id,
+      balance_checked: "0",
+      amount_required: settlement.amount.toString(),
+    }
+  }
+
   if (settlement.status !== "Pending") {
     throw Object.assign(
       new Error(`Settlement #${body.settlement_id} is not pending (status: ${settlement.status})`),
@@ -211,14 +239,16 @@ export async function executeSettlementWithBalanceCheck(
     env.networkPassphrase,
   )
 
-  res.locals.logger.info(
-    {
+  // #889 — fix: `res.locals.logger` is not in scope in this exported function.
+  // Use console.info so the diagnostic log is preserved without a ReferenceError.
+  console.info(
+    JSON.stringify({
       settlementId: body.settlement_id,
       required: settlement.amount.toString(),
       available: balance.toString(),
       token: tokenContract,
-    },
-    "Executing settlement balance check",
+      msg: "Executing settlement balance check",
+    }),
   )
 
   if (balance < settlement.amount) {
@@ -231,18 +261,78 @@ export async function executeSettlementWithBalanceCheck(
     )
   }
 
-  const txHash = await deps.submitContractCall(
-    client,
-    env.treasuryContractId,
-    "execute_settlement",
-    [
-      nativeToScVal(sourceAccount, { type: "address" }),
-      nativeToScVal(BigInt(body.settlement_id), { type: "u64" }),
-      nativeToScVal(Address.fromString(tokenContract), { type: "address" }),
-    ],
-    env.signerSecret,
-    env.networkPassphrase,
-  )
+  let txHash: string
+  try {
+    txHash = await deps.submitContractCall(
+      client,
+      env.treasuryContractId,
+      "execute_settlement",
+      [
+        nativeToScVal(sourceAccount, { type: "address" }),
+        nativeToScVal(BigInt(body.settlement_id), { type: "u64" }),
+        nativeToScVal(Address.fromString(tokenContract), { type: "address" }),
+      ],
+      env.signerSecret,
+      env.networkPassphrase,
+    )
+  } catch (submitErr: unknown) {
+    // #890 — escrow sync check: the submit call failed, but the transaction
+    // may have already been applied on-chain (e.g. network timeout after
+    // acceptance).  Re-fetch the settlement and the current balance to detect
+    // a mismatch between what we expected and what is now on-chain.
+    let postStatus: string | undefined
+    let postBalance: bigint | undefined
+    try {
+      const postSettlement = await deps.getOnChainSettlement(
+        client,
+        env.treasuryContractId,
+        BigInt(body.settlement_id),
+        sourceAccount,
+        env.networkPassphrase,
+      )
+      postStatus = postSettlement.status
+
+      postBalance = await deps.getTokenBalance(
+        client,
+        tokenContract,
+        env.treasuryContractId,
+        sourceAccount,
+        env.networkPassphrase,
+      )
+    } catch {
+      // Re-fetch itself failed — rethrow the original submission error.
+      throw submitErr
+    }
+
+    // If the settlement is now Executed but we got a submit error it means
+    // the tx landed on-chain despite the network error.  This is actually a
+    // success — return as if the call succeeded (tx_hash is unavailable).
+    if (postStatus === "Executed") {
+      return {
+        tx_hash: "",
+        settlement_id: body.settlement_id,
+        balance_checked: balance.toString(),
+        amount_required: settlement.amount.toString(),
+      }
+    }
+
+    // The settlement is still Pending but the balance has already decreased —
+    // the escrow is out of sync.  Surface an EscrowBalanceMismatch so the
+    // caller can reconcile rather than attempting re-execution blindly (#890).
+    if (postBalance !== undefined && postBalance < balance) {
+      throw Object.assign(
+        new Error(
+          `EscrowBalanceMismatch: settlement #${body.settlement_id} is still ${postStatus} but ` +
+            `treasury balance dropped from ${balance.toString()} to ${postBalance.toString()} stroops. ` +
+            `Manual reconciliation required.`,
+        ),
+        { status: 409, code: "ESCROW_BALANCE_MISMATCH" },
+      )
+    }
+
+    // No mismatch detected — rethrow the original error.
+    throw submitErr
+  }
 
   return {
     tx_hash: txHash,
@@ -340,7 +430,7 @@ router.post("/execute-settlement", requireAdmin, validateBody(executeSettlementS
     const message = err instanceof Error ? err.message : String(err)
     res.status(status).json({ error: message })
   }
-})
+}))
 
 export interface SimulateSettlementBody {
   settlement_id: number
