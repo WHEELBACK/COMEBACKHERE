@@ -19,6 +19,7 @@ import {
   escalateHoldSchema,
 } from "../schemas/index.js"
 import { getBalanceCache, setBalanceCache, invalidateBalanceCache } from "../lib/cache.js"
+import { logger } from "../lib/logger.js"
 
 const router = Router()
 
@@ -211,7 +212,7 @@ export async function executeSettlementWithBalanceCheck(
     env.networkPassphrase,
   )
 
-  res.locals.logger.info(
+  logger.info(
     {
       settlementId: body.settlement_id,
       required: settlement.amount.toString(),
@@ -327,20 +328,22 @@ router.post("/execute-settlement", requireAdmin, validateBody(executeSettlementS
 
   const { settlement_id: settlementId, token_contract } = req.body as { settlement_id: number; token_contract?: string }
 
-  try {
-    const result = await executeSettlementWithBalanceCheck(
-      { settlement_id: settlementId, token_contract },
-      env,
-    )
-    // #212 — balance changed; evict the cache so the next GET /balances is fresh
-    invalidateBalanceCache(`execute-settlement id=${settlementId}`)
-    res.json(result)
-  } catch (err: unknown) {
-    const status = (err as { status?: number })?.status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    res.status(status).json({ error: message })
-  }
-})
+  const result = await executeSettlementWithBalanceCheck(
+    { settlement_id: settlementId, token_contract },
+    env,
+  )
+
+  // #891 — mark the settlement as Executed now that the ledger has confirmed it
+  const database = await connectMongo()
+  await getSettlementsCollection(database).updateOne(
+    { id: settlementId },
+    { $set: { status: "Executed", executed_tx_hash: result.tx_hash, updated_at: new Date() } },
+  )
+
+  // #212 — balance changed; evict the cache so the next GET /balances is fresh
+  invalidateBalanceCache(`execute-settlement id=${settlementId}`)
+  res.json(result)
+}))
 
 export interface SimulateSettlementBody {
   settlement_id: number

@@ -13,6 +13,7 @@ import { asyncHandler } from "../lib/errors.js"
 import { requireAdmin } from "../middleware/adminAuth.js"
 import { allowBodySchema, blockBodySchema, complianceAuditQuerySchema } from "../schemas/index.js"
 import { connectMongo, getComplianceAuditCollection } from "../db/mongo.js"
+import { cacheDelete } from "../lib/cache.js"
 
 const router = Router()
 
@@ -206,6 +207,8 @@ router.post("/allow", requireAdmin, validateBody(allowBodySchema), asyncHandler(
     env.signerSecret,
     env.networkPassphrase
   )
+  // #893 — evict any stale compliance status cache entry for this address
+  await cacheDelete(`compliance:status:${address}`)
   res.status(200).json(result)
 }))
 
@@ -243,6 +246,8 @@ router.post("/block", requireAdmin, validateBody(blockBodySchema), asyncHandler(
     env.signerSecret,
     env.networkPassphrase
   )
+  // #893 — evict any stale compliance status cache entry for this address
+  await cacheDelete(`compliance:status:${address}`)
   res.status(200).json(result)
 }))
 

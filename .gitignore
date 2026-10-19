@@ -107,3 +107,19 @@ playwright/.auth/
 
 # Playwright screenshots (generated during e2e runs)
 **/e2e/screenshots/
+
+# Miscellaneous temporary / backup files
+*.orig
+*.bak
+*.rej
+.node_repl_history
+
+# OS-specific
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+
+# Python bytecode (scripts/)
+__pycache__/
+*.py[cod]
+*.pyo
