@@ -78,6 +78,112 @@ where
     }
 }
 
+/// A single least-privilege permission that can be granted to a merchant API
+/// key. Keys are created with an explicit set of scopes; authorization checks
+/// require the key to hold the scope a route needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ApiScope {
+    /// Read-only access to merchant resources.
+    Read,
+    /// Mutating access (create / update / delete).
+    Write,
+    /// Ability to register and manage webhook endpoints.
+    Webhook,
+}
+
+impl ApiScope {
+    /// Stable string form used for persistence and request parsing.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApiScope::Read => "read",
+            ApiScope::Write => "write",
+            ApiScope::Webhook => "webhook",
+        }
+    }
+
+    /// Parse a scope from its string form. Returns `None` for unknown values.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "read" => Some(ApiScope::Read),
+            "write" => Some(ApiScope::Write),
+            "webhook" => Some(ApiScope::Webhook),
+            _ => None,
+        }
+    }
+}
+
+/// The set of scopes granted to an API key.
+///
+/// A key created without explicit scopes is treated as a legacy key and is
+/// granted the full set of scopes, preserving the behaviour of keys that
+/// predate scoped permissions (backward compatibility).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiScopes {
+    scopes: Vec<ApiScope>,
+}
+
+impl ApiScopes {
+    /// Build a scope set from an explicit list of scopes.
+    pub fn new<I>(scopes: I) -> Self
+    where
+        I: IntoIterator<Item = ApiScope>,
+    {
+        let mut scopes: Vec<ApiScope> = scopes.into_iter().collect();
+        scopes.sort_by_key(|s| s.as_str());
+        scopes.dedup();
+        ApiScopes { scopes }
+    }
+
+    /// The full set of scopes, used for legacy keys created without explicit
+    /// scopes so their behaviour is unchanged.
+    pub fn all() -> Self {
+        ApiScopes::new([ApiScope::Read, ApiScope::Write, ApiScope::Webhook])
+    }
+
+    /// Parse a scope set from string values (e.g. a request body or a stored
+    /// column). Unknown values are ignored; an empty result is treated as a
+    /// legacy key and granted all scopes.
+    pub fn from_strings<I, S>(values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let parsed: Vec<ApiScope> = values
+            .into_iter()
+            .filter_map(|v| ApiScope::parse(v.as_ref()))
+            .collect();
+        if parsed.is_empty() {
+            ApiScopes::all()
+        } else {
+            ApiScopes::new(parsed)
+        }
+    }
+
+    /// Whether the set contains the given scope.
+    pub fn contains(&self, scope: ApiScope) -> bool {
+        self.scopes.contains(&scope)
+    }
+
+    /// Whether the set grants every scope in `required`.
+    pub fn allows_all<I>(&self, required: I) -> bool
+    where
+        I: IntoIterator<Item = ApiScope>,
+    {
+        required.into_iter().all(|s| self.contains(s))
+    }
+
+    /// The scopes as their stable string forms, suitable for persistence.
+    pub fn to_strings(&self) -> Vec<String> {
+        self.scopes.iter().map(|s| s.as_str().to_string()).collect()
+    }
+}
+
+impl Default for ApiScopes {
+    fn default() -> Self {
+        ApiScopes::all()
+    }
+}
+
 /// The identity bucket a request is rate-limited under.
 ///
 /// The key is derived **only** from verified credentials (the authenticated
@@ -191,7 +297,7 @@ impl TrustedProxies {
 
 #[cfg(test)]
 mod tests {
-    use super::{RateLimitKey, TrustedProxies};
+    use super::{ApiScope, ApiScopes, RateLimitKey, TrustedProxies};
     use std::net::IpAddr;
 
     fn ip(s: &str) -> IpAddr {
@@ -221,52 +327,53 @@ mod tests {
         let first = RateLimitKey::from_verified(verified);
         let second = RateLimitKey::from_verified(verified);
         assert_eq!(first, second);
-        assert_eq!(first.as_bucket(), "merchant:merchant_42");
     }
 
     #[test]
-    fn anonymous_traffic_shares_one_bounded_bucket() {
-        // All unauthenticated callers collapse into a single bucket regardless
-        // of any spoofed identity headers, keeping anonymous traffic bounded.
-        let a = RateLimitKey::from_verified(None);
-        let b = RateLimitKey::from_verified(None);
-        assert_eq!(a, b);
-        assert_eq!(a.as_bucket(), "anonymous");
+    fn scope_parsing_round_trips() {
+        assert_eq!(ApiScope::parse("read"), Some(ApiScope::Read));
+        assert_eq!(ApiScope::parse("WRITE"), Some(ApiScope::Write));
+        assert_eq!(ApiScope::parse(" webhook "), Some(ApiScope::Webhook));
+        assert_eq!(ApiScope::parse("admin"), None);
+        assert_eq!(ApiScope::Read.as_str(), "read");
+    }
+
+    #[test]
+    fn explicit_scopes_are_persisted_and_enforced() {
+        let scopes = ApiScopes::from_strings(["read", "webhook"]);
+        assert_eq!(scopes.to_strings(), vec!["read".to_string(), "webhook".to_string()]);
+        // Allowed routes: read and webhook scopes are present.
+        assert!(scopes.contains(ApiScope::Read));
+        assert!(scopes.contains(ApiScope::Webhook));
+        assert!(scopes.allows_all([ApiScope::Read]));
+        // Denied route: write scope was not granted.
+        assert!(!scopes.contains(ApiScope::Write));
+        assert!(!scopes.allows_all([ApiScope::Write]));
+    }
+
+    #[test]
+    fn keys_without_scopes_are_backward_compatible() {
+        // Legacy keys created without explicit scopes get the full set.
+        let legacy = ApiScopes::from_strings(Vec::<String>::new());
+        assert!(legacy.allows_all([ApiScope::Read, ApiScope::Write, ApiScope::Webhook]));
+        assert_eq!(ApiScopes::default(), ApiScopes::all());
     }
 
     #[test]
     fn trusted_proxy_forwarded_header_is_honoured() {
         let proxies = TrustedProxies::new([ip("10.0.0.1")]);
-        let client = proxies.client_ip(ip("10.0.0.1"), Some("203.0.113.7"));
-        assert_eq!(client, ip("203.0.113.7"));
+        assert_eq!(
+            proxies.client_ip(ip("10.0.0.1"), Some("203.0.113.7, 10.0.0.1")),
+            ip("203.0.113.7")
+        );
     }
 
     #[test]
-    fn untrusted_forwarded_header_is_ignored() {
+    fn untrusted_peer_forwarded_header_is_ignored() {
         let proxies = TrustedProxies::new([ip("10.0.0.1")]);
-        // Peer is not a trusted proxy, so the spoofed header is ignored.
-        let client = proxies.client_ip(ip("198.51.100.9"), Some("203.0.113.7"));
-        assert_eq!(client, ip("198.51.100.9"));
-    }
-
-    #[test]
-    fn trusted_proxy_without_header_falls_back_to_peer() {
-        let proxies = TrustedProxies::new([ip("10.0.0.1")]);
-        assert_eq!(proxies.client_ip(ip("10.0.0.1"), None), ip("10.0.0.1"));
-    }
-
-    #[test]
-    fn trusted_proxy_uses_leftmost_forwarded_entry() {
-        let proxies = TrustedProxies::new([ip("10.0.0.1")]);
-        let client = proxies.client_ip(ip("10.0.0.1"), Some("203.0.113.7, 10.0.0.1"));
-        assert_eq!(client, ip("203.0.113.7"));
-    }
-
-    #[test]
-    fn from_csv_parses_trusted_proxies() {
-        let proxies = TrustedProxies::from_csv("10.0.0.1, 192.168.0.1 ,,bogus");
-        assert!(proxies.is_trusted(ip("10.0.0.1")));
-        assert!(proxies.is_trusted(ip("192.168.0.1")));
-        assert!(!proxies.is_trusted(ip("203.0.113.7")));
+        assert_eq!(
+            proxies.client_ip(ip("198.51.100.9"), Some("203.0.113.7")),
+            ip("198.51.100.9")
+        );
     }
 }

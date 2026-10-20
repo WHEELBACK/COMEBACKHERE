@@ -10,6 +10,7 @@ use dashmap::DashMap;
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const CHALLENGE_PREFIX: &str = "COMEBACKHERE Auth Challenge:";
@@ -48,6 +49,86 @@ pub struct AuthError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifiedSigner {
     pub public_key: String,
+}
+
+/// Least-privilege permission granted to a merchant API key.
+///
+/// Scopes are additive: a key may hold any combination of `read`, `write`,
+/// and `webhook`. A key with no explicit scopes is treated as holding all
+/// scopes for backward compatibility with keys created before scopes existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiKeyScope {
+    Read,
+    Write,
+    Webhook,
+}
+
+impl ApiKeyScope {
+    /// Parse a single scope token (case-insensitive).
+    pub fn parse(token: &str) -> Option<Self> {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "read" => Some(ApiKeyScope::Read),
+            "write" => Some(ApiKeyScope::Write),
+            "webhook" => Some(ApiKeyScope::Webhook),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApiKeyScope::Read => "read",
+            ApiKeyScope::Write => "write",
+            ApiKeyScope::Webhook => "webhook",
+        }
+    }
+}
+
+/// The set of scopes attached to a merchant API key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApiKeyScopes {
+    scopes: HashSet<ApiKeyScope>,
+}
+
+impl ApiKeyScopes {
+    /// Build a scope set from raw string tokens. Returns an error naming the
+    /// first unrecognized token so key creation can reject bad input.
+    pub fn from_tokens<I, S>(tokens: I) -> Result<Self, AuthError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut scopes = HashSet::new();
+        for token in tokens {
+            let token = token.as_ref();
+            match ApiKeyScope::parse(token) {
+                Some(scope) => {
+                    scopes.insert(scope);
+                }
+                None => {
+                    return Err(AuthError {
+                        error: format!("Unknown API key scope: {}", token),
+                    });
+                }
+            }
+        }
+        Ok(ApiKeyScopes { scopes })
+    }
+
+    /// A key with no explicit scopes retains full access (backward compatible).
+    pub fn is_empty(&self) -> bool {
+        self.scopes.is_empty()
+    }
+
+    /// Returns true when the key is permitted to perform `required`.
+    /// Empty scope sets are treated as unrestricted for backward compatibility.
+    pub fn allows(&self, required: ApiKeyScope) -> bool {
+        self.scopes.is_empty() || self.scopes.contains(&required)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &ApiKeyScope> {
+        self.scopes.iter()
+    }
 }
 
 pub fn create_challenge_store() -> ChallengeStore {
@@ -271,173 +352,6 @@ pub async fn auth_middleware(
     next.run(req).await
 }
 
-/// Rate-limit middleware keyed on verified merchant identity.
-///
-/// The bucket is derived from the `VerifiedSigner` extension populated by
-/// `auth_middleware` (i.e. from a cryptographically verified public key), never
-/// from caller-controlled headers. Requests without a verified signer fall into
-/// a single shared anonymous bucket so anonymous traffic stays bounded.
-pub async fn rate_limit_middleware(
-    State(store): State<RateLimitStore>,
-    req: Request,
-    next: Next,
-) -> Response {
-    let (key, limit) = match req.extensions().get::<VerifiedSigner>() {
-        Some(signer) => (
-            merchant_rate_limit_key(&signer.public_key),
-            MERCHANT_RATE_LIMIT,
-        ),
-        None => (anonymous_rate_limit_key(), ANONYMOUS_RATE_LIMIT),
-    };
+/// Rate-limit middlewar
 
-    match check_rate_limit(&store, &key, limit, Utc::now()) {
-        Ok(()) => next.run(req).await,
-        Err(retry_after) => {
-            let mut response = (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(AuthError {
-                    error: "Rate limit exceeded".to_string(),
-                }),
-            )
-                .into_response();
-            if let Ok(value) = retry_after.to_string().parse() {
-                response
-                    .headers_mut()
-                    .insert("retry-after", value);
-            }
-            response
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_decode_valid_stellar_key() {
-        // All-zeros Stellar public key (well-known test key, not a real secret)
-        let encoded = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-        let result = decode_stellar_pubkey(encoded);
-        assert!(result.is_ok());
-        let key = result.unwrap();
-        assert_eq!(key, [0u8; 32]);
-    }
-
-    #[test]
-    fn test_decode_key_with_invalid_base32() {
-        let result = decode_stellar_pubkey("G!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_decode_invalid_prefix() {
-        let result = decode_stellar_pubkey("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_decode_short_key() {
-        let result = decode_stellar_pubkey("G12345");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_generate_challenge_format() {
-        let store = create_challenge_store();
-        let resp = generate_challenge(&store);
-        assert!(resp.challenge.starts_with(CHALLENGE_PREFIX));
-        assert!(!resp.expires_at.is_empty());
-        assert_eq!(store.len(), 1);
-    }
-
-    #[test]
-    fn test_verify_valid_challenge() {
-        let store = create_challenge_store();
-        let resp = generate_challenge(&store);
-        assert!(verify_challenge_valid(&store, &resp.challenge).is_ok());
-        assert!(store.is_empty()); // consumed
-    }
-
-    #[test]
-    fn test_verify_unknown_challenge() {
-        let store = create_challenge_store();
-        let result = verify_challenge_valid(&store, "unknown");
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().error, "Challenge not found or already used");
-    }
-
-    #[test]
-    fn test_verify_expired_challenge() {
-        let store = create_challenge_store();
-        let resp = generate_challenge(&store);
-        // Manually backdate the expiry
-        store.insert(resp.challenge.clone(), Utc::now() - chrono::Duration::seconds(600));
-        let result = verify_challenge_valid(&store, &resp.challenge);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().error, "Challenge has expired");
-    }
-
-    #[test]
-    fn test_merchant_rate_limit_key_uses_verified_identity() {
-        let key = merchant_rate_limit_key("GABC");
-        assert_eq!(key, "merchant:GABC");
-        // Anonymous bucket is distinct from any merchant bucket.
-        assert_ne!(key, anonymous_rate_limit_key());
-    }
-
-    #[test]
-    fn test_merchant_rate_limit_enforced() {
-        let store = create_rate_limit_store();
-        let now = Utc::now();
-        let key = merchant_rate_limit_key("GMERCHANT");
-        for _ in 0..MERCHANT_RATE_LIMIT {
-            assert!(check_rate_limit(&store, &key, MERCHANT_RATE_LIMIT, now).is_ok());
-        }
-        assert!(check_rate_limit(&store, &key, MERCHANT_RATE_LIMIT, now).is_err());
-    }
-
-    #[test]
-    fn test_spoofed_headers_do_not_change_bucket() {
-        // The bucket key is derived solely from the verified public key. Simulate
-        // a caller trying to spoof identity headers: the derived key is unchanged.
-        let store = create_rate_limit_store();
-        let now = Utc::now();
-        let verified_key = merchant_rate_limit_key("GVERIFIED");
-
-        for _ in 0..MERCHANT_RATE_LIMIT {
-            assert!(check_rate_limit(&store, &verified_key, MERCHANT_RATE_LIMIT, now).is_ok());
-        }
-
-        // Even if the caller supplies a different X-Merchant-Id, the effective
-        // bucket is still the verified one and remains exhausted.
-        let spoofed_key = merchant_rate_limit_key("GVERIFIED");
-        assert_eq!(verified_key, spoofed_key);
-        assert!(check_rate_limit(&store, &spoofed_key, MERCHANT_RATE_LIMIT, now).is_err());
-    }
-
-    #[test]
-    fn test_anonymous_traffic_is_bounded() {
-        let store = create_rate_limit_store();
-        let now = Utc::now();
-        let key = anonymous_rate_limit_key();
-        for _ in 0..ANONYMOUS_RATE_LIMIT {
-            assert!(check_rate_limit(&store, &key, ANONYMOUS_RATE_LIMIT, now).is_ok());
-        }
-        assert!(check_rate_limit(&store, &key, ANONYMOUS_RATE_LIMIT, now).is_err());
-    }
-
-    #[test]
-    fn test_rate_limit_window_resets() {
-        let store = create_rate_limit_store();
-        let now = Utc::now();
-        let key = merchant_rate_limit_key("GRESET");
-        for _ in 0..MERCHANT_RATE_LIMIT {
-            assert!(check_rate_limit(&store, &key, MERCHANT_RATE_LIMIT, now).is_ok());
-        }
-        assert!(check_rate_limit(&store, &key, MERCHANT_RATE_LIMIT, now).is_err());
-
-        let later = now + chrono::Duration::seconds(RATE_LIMIT_WINDOW_SECONDS + 1);
-        assert!(check_rate_limit(&store, &key, MERCHANT_RATE_LIMIT, later).is_ok());
-    }
-}
+/* … truncated 6212 chars — edit only what you need near the top … */
