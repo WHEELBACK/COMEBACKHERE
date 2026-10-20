@@ -43,6 +43,22 @@ pub async fn create_merchant_invoice() -> impl IntoResponse {
     )
 }
 
+// ─── Merchant webhook delivery history (protected) ───────────────────────
+
+pub async fn merchant_webhook_deliveries() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "deliveries": [],
+        "replayable": false
+    }))
+}
+
+pub async fn replay_webhook_delivery() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "message": "Webhook delivery replay requested",
+        "replay_state": "pending"
+    }))
+}
+
 // ─── Signer routes (protected) ───────────────────────────────────────────
 
 pub async fn get_pending_settlements() -> impl IntoResponse {
