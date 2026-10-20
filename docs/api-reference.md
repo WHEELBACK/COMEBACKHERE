@@ -939,14 +939,19 @@ can verify payload authenticity before processing it.
 | `X-COMEBACKHERE-Signature`  | HMAC-SHA256 of `timestamp.rawBody`, lowercase hex |
 | `X-COMEBACKHERE-Timestamp`  | Unix timestamp in seconds                |
 | `X-COMEBACKHERE-Legacy-Signature` | Temporary body-only HMAC for one release |
+| `X-COMEBACKHERE-Previous-Signature` | Prior-key HMAC during secret rotation |
+| `X-COMEBACKHERE-Event-Id` | Stable indexed chain event ID |
+| `X-COMEBACKHERE-Delivery-Id` | Stable delivery ID |
 
-The digest is computed over the **raw JSON request body** (exactly as sent over
-the wire) using the `WEBHOOK_SIGNING_SECRET` environment variable as the key. It
-is a bare 64-character lowercase hex digest — there is no `t=…,v1=…` envelope
-and no timestamp, so the signature alone provides no replay window. Deduplicate
-on your own key.
+The digest is computed over the Unix timestamp, a period, and the **raw JSON
+request body** (exactly as sent over the wire), using `WEBHOOK_SIGNING_SECRET`
+as the key. The timestamp is sent separately in `X-COMEBACKHERE-Timestamp` and
+must be within five minutes. During rotation,
+`X-COMEBACKHERE-Previous-Signature` carries the same input signed with the prior
+key.
 
-> There is no `WEBHOOK_SECRET`: the backend reads `WEBHOOK_SIGNING_SECRET` only.
+> There is no `WEBHOOK_SECRET`: the backend reads `WEBHOOK_SIGNING_SECRET` and
+> the optional `WEBHOOK_SIGNING_SECRET_PREVIOUS` only.
 
 ### Verification (Node.js example)
 
@@ -1014,6 +1019,7 @@ top level — there is no `data` envelope and no `event_type` key:
 | ----------------------- | ------------------------------------------------------------------ |
 | `WEBHOOK_URL`           | Merchant endpoint that receives webhook POSTs                      |
 | `WEBHOOK_SIGNING_SECRET`| HMAC-SHA256 signing secret (minimum 32 characters recommended). **Required at startup.** |
+| `WEBHOOK_SIGNING_SECRET_PREVIOUS` | Optional previous key during rotation; remove after receivers accept the current key. |
 
 Set both variables in your deployment environment. If `WEBHOOK_URL` is not set,
 webhook delivery is skipped silently (no error). If `WEBHOOK_SIGNING_SECRET` is

@@ -1,4 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
+
+vi.mock("node:dns/promises", () => ({
+  lookup: vi.fn().mockResolvedValue([{ address: "8.8.8.8", family: 4 }]),
+}))
+
 import { stopTreasuryIndexer } from "../services/treasury-indexer.js"
 import { stopIndexer } from "../indexer.js"
 import { closeMongo } from "../db/mongo.js"

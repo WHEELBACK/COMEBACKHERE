@@ -4,12 +4,14 @@ COMEBACKHERE can send signed HTTP POST requests to your configured endpoint when
 settlement events occur on-chain. This page documents the events, their exact
 payload shapes, and how to verify the HMAC-SHA256 signature.
 
-> **Security note:** Treat your `WEBHOOK_SIGNING_SECRET` with the same care as a
-> private key. Anyone who holds it can forge valid webhook signatures. Rotate it
-> immediately if it is ever exposed.
+> **Security note:** Treat both signing secrets with the same care as a private
+> key. Anyone who holds one can forge valid webhook signatures. Rotate a
+> compromised secret immediately.
 
-> **There is no `WEBHOOK_SECRET`.** The backend reads `WEBHOOK_SIGNING_SECRET`
-> and nothing else — see [Configuration](#configuration).
+> **There is no `WEBHOOK_SECRET`.** The backend requires
+> `WEBHOOK_SIGNING_SECRET` and optionally reads
+> `WEBHOOK_SIGNING_SECRET_PREVIOUS` during rotation — see
+> [Configuration](#configuration).
 
 See also: [`## Webhooks` in the API Reference](./api-reference.md#webhooks) for
 the configuration environment variables.
@@ -27,6 +29,7 @@ are **not** equivalent. Read this section before writing a receiver.
 | Signed | **Yes** — `X-COMEBACKHERE-Signature` | **No** |
 | `X-Idempotency-Key` | Not sent | Sent |
 | `X-Request-Id` | Not sent | Sent when a correlation id is supplied |
+| Event and delivery IDs | Stable chain event ID and delivery ID in payload and headers | Stable `event_id` and `delivery_id` fields and headers |
 | Retries / dead letters | None — single attempt, failures are logged | Yes, with backoff and dead-letter persistence |
 | Used by | `treasury-indexer` for `settlement_proposed`, `settlement_approved`, `settlement_executed` | Nothing in production code; the queue is never enqueued to |
 
@@ -45,6 +48,7 @@ responsible for deduplication** — see [Deduplicating deliveries](#deduplicatin
 | ------------------------ | ---------------------------------------------------------------------- |
 | `WEBHOOK_URL`            | Your endpoint that receives `POST` requests from the backend. If unset, no webhooks are sent. |
 | `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 signing secret (minimum 32 characters recommended). **Required at startup** — the backend refuses to boot without it. |
+| `WEBHOOK_SIGNING_SECRET_PREVIOUS` | Optional prior HMAC key. During rotation, the backend emits signatures for both keys until this variable is removed. |
 | `WEBHOOK_MAX_ATTEMPTS`   | Maximum delivery attempts (default `5`) — retry queue only            |
 | `WEBHOOK_BASE_DELAY_MS`  | Initial retry delay in milliseconds (default `1000`) — retry queue only |
 | `WEBHOOK_MAX_DELAY_MS`   | Maximum exponential backoff delay in milliseconds (default `60000`) — retry queue only |
@@ -57,14 +61,37 @@ If `WEBHOOK_SIGNING_SECRET` is missing, `validateEnv()` in `src/lib/env.ts`
 fails the process at startup with a message naming the variable. It is never a
 runtime warning.
 
+### Destination restrictions
+
+Webhook destinations must use HTTPS and resolve only to public IP addresses.
+Loopback, private, link-local, reserved, and local-only targets are rejected.
+The dispatcher pins the validated DNS answer to the connection, so a DNS change
+between validation and connection cannot redirect a request to an internal
+address. HTTP redirects are not followed; configure the final HTTPS destination
+directly.
+
+### Signing-secret rotation
+
+1. Set `WEBHOOK_SIGNING_SECRET` to the new key and
+  `WEBHOOK_SIGNING_SECRET_PREVIOUS` to the current key.
+2. Restart the backend. Requests carry the current signature in
+  `X-COMEBACKHERE-Signature` and an overlap signature in
+  `X-COMEBACKHERE-Previous-Signature`.
+3. Update receivers to accept either key for the overlap window. Both signatures
+  cover the timestamp and exact raw body; the previous key is never returned by
+  the API.
+4. Remove `WEBHOOK_SIGNING_SECRET_PREVIOUS` and restart after receivers have
+  switched to the new key.
+
 ---
 
 ## Signature verification
 
 Every webhook sent by the live dispatch path includes an
 `X-COMEBACKHERE-Signature` header containing a lowercase hex-encoded
-HMAC-SHA256 digest of the **raw request body** (the exact bytes sent over the
-wire), keyed by your `WEBHOOK_SIGNING_SECRET`.
+HMAC-SHA256 digest of `timestamp.rawBody`, keyed by `WEBHOOK_SIGNING_SECRET`.
+During rotation, a second digest using the prior key is sent in
+`X-COMEBACKHERE-Previous-Signature`.
 
 ### Signature format
 
@@ -73,14 +100,14 @@ wire), keyed by your `WEBHOOK_SIGNING_SECRET`.
 | Header name | `X-COMEBACKHERE-Signature` |
 | Algorithm | HMAC-SHA256 |
 | Encoding | lowercase hex, 64 characters |
-| Signed input | the exact request body bytes, UTF-8 |
-| Envelope | **none** — a bare digest, not a `t=…,v1=…` string |
+| Signed input | Unix timestamp, `.`, then exact request body bytes |
+| Timestamp header | `X-COMEBACKHERE-Timestamp`, Unix seconds |
+| Envelope | **none** — each signature is a bare digest, not a `t=…,v1=…` string |
 
-There is no `t=` timestamp prefix and no version field. Consequently **there is
-no signature timestamp and no replay window**: a captured request body and its
-signature stay valid forever. Replay defence has to come from your own
-deduplication (see
-[Deduplicating deliveries](#deduplicating-deliveries)), not from the signature.
+The timestamp is a separate header and is included in the signed input. Reject
+requests more than five minutes from the current time to limit replay. Use the
+stable `event_id` to deduplicate chain events and `delivery_id` to correlate an
+individual send.
 
 ### Algorithm summary
 
@@ -100,6 +127,10 @@ Headers sent on a **live dispatch** request:
 | Header                     | Value                                    |
 | -------------------------- | ---------------------------------------- |
 | `X-COMEBACKHERE-Signature` | Lowercase hex-encoded HMAC-SHA256 digest |
+| `X-COMEBACKHERE-Previous-Signature` | Prior-key digest during rotation |
+| `X-COMEBACKHERE-Timestamp` | Unix timestamp in seconds |
+| `X-COMEBACKHERE-Event-Id` | Stable identifier for the indexed chain event |
+| `X-COMEBACKHERE-Delivery-Id` | Stable identifier for this delivery |
 | `Content-Type`             | `application/json`                       |
 
 Additional headers sent by the **retry queue** path (not used today):
@@ -107,6 +138,8 @@ Additional headers sent by the **retry queue** path (not used today):
 | Header                 | Value                                                        |
 | ---------------------- | ------------------------------------------------------------ |
 | `X-Idempotency-Key`    | Stable per-event key (see [Deduplicating deliveries](#deduplicating-deliveries)) |
+| `X-COMEBACKHERE-Event-Id` | Stable event identifier, preserved across retries |
+| `X-COMEBACKHERE-Delivery-Id` | Stable delivery identifier, preserved across retries |
 | `X-Request-Id`         | Correlation ID forwarded from the originating request, when available |
 
 If you need a `X-COMEBACKHERE-Signature` on every delivery, verify it
@@ -183,34 +216,49 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+  "encoding/json"
 	"io"
+  "math"
 	"net/http"
+  "os"
+  "strconv"
+  "time"
 )
 
 // VerifyWebhookSignature returns true if the signature header is a valid
-// HMAC-SHA256 of the raw request body under the given secret.
-func VerifyWebhookSignature(rawBody []byte, signature, secret string) bool {
+// HMAC-SHA256 of timestamp + "." + rawBody under the given secret.
+func VerifyWebhookSignature(rawBody []byte, signature, timestamp, secret string) bool {
+  seconds, err := strconv.ParseInt(timestamp, 10, 64)
+  if err != nil || math.Abs(float64(time.Now().Unix()-seconds)) > 300 {
+    return false
+  }
+
 	expected := hmac.New(sha256.New, []byte(secret))
+  expected.Write([]byte(timestamp + "."))
 	expected.Write(rawBody)
-	expectedHex := hex.EncodeToString(expected.Sum(nil))
+  actual, err := hex.DecodeString(signature)
+  if err != nil {
+    return false
+  }
 
 	// Use constant-time comparison to prevent timing attacks
-	return hmac.Equal([]byte(expectedHex), []byte(signature))
+  return hmac.Equal(expected.Sum(nil), actual)
 }
 
 // Example: verify webhook in an HTTP handler
 func HandleWebhook(w http.ResponseWriter, r *http.Request) {
-	// Read raw body before parsing JSON
+  // Read raw body before parsing JSON
 	rawBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
 
-	signature := r.Header.Get("X-COMEBACKHERE-Signature")
+  signature := r.Header.Get("X-COMEBACKHERE-Signature")
+  timestamp := r.Header.Get("X-COMEBACKHERE-Timestamp")
 	secret := os.Getenv("WEBHOOK_SIGNING_SECRET")
 
-	if !VerifyWebhookSignature(rawBody, signature, secret) {
+  if !VerifyWebhookSignature(rawBody, signature, timestamp, secret) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -236,32 +284,27 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 ## Deduplicating deliveries
 
-The live dispatch path sends **no** `X-Idempotency-Key` header and includes no
-`idempotency_key` field in the body. There is no stable per-event key to dedupe
-on out of the box.
+The live dispatch path does not send `X-Idempotency-Key`. Instead, the payload
+includes stable `event_id` and `delivery_id` fields, also sent in
+`X-COMEBACKHERE-Event-Id` and `X-COMEBACKHERE-Delivery-Id` headers. `event_id`
+is derived from the indexed chain event and remains stable when that event is
+reprocessed; `delivery_id` remains stable across retries of that delivery.
 
-Deduplicate on a tuple you build yourself from the body. For settlement events
-`(event, settlement_id, tx_hash)` is stable across redeliveries of the same
-chain event, and `settlement_approved` can legitimately repeat with different
-signers, so include the signer when you need to distinguish approvals:
+Deduplicate on `event_id` before applying side effects. If a receiver needs to
+track retries or delivery attempts, use `delivery_id`.
 
-```
-dedupe_key = "<event>:<settlement_id>:<tx_hash>"
-            # settlement_approved: "<event>:<settlement_id>:<signer>:<tx_hash>"
-
-Examples:
-  settlement_proposed:15:9f2c...
-  settlement_executed:15:41ab...
-  settlement_approved:15:GDR7...:41ab...
+```typescript
+if (await alreadyProcessed(payload.event_id)) return
+await recordProcessed(payload.event_id)
+await applyEvent(payload)
 ```
 
-Store the key and reject duplicates before applying side effects. This is the
-only replay protection available, because the signature carries no timestamp.
+Store the event ID and reject duplicates before applying side effects. Also
+enforce the signature timestamp tolerance described above.
 
-The retry queue path, when it is wired up, additionally sends an
-`X-Idempotency-Key` header and an `idempotency_key` body field derived as
-`<event_type>:<resource_id>`. Do not build a receiver that depends on that
-header today.
+The dormant retry queue path uses an `X-Idempotency-Key` header and an
+`idempotency_key` field. Live receivers should use `event_id` and `delivery_id`
+as described above.
 
 ---
 
@@ -280,6 +323,8 @@ arrive as **strings** and never lose precision. Account addresses and
 | Field           | Type   | Present on                    | Description                          |
 | --------------- | ------ | ----------------------------- | ------------------------------------ |
 | `event`         | string | all                           | One of the event names below         |
+| `event_id`      | string | all                           | Stable indexed chain event ID        |
+| `delivery_id`  | string | all                           | Stable delivery ID                   |
 | `settlement_id` | number | all                           | Numeric settlement ID               |
 | `tx_hash`       | string | all                           | Stellar transaction hash             |
 | `merchant_address` | string | `settlement_proposed`      | Stellar public key of the merchant   |
@@ -408,13 +453,37 @@ replay one with `POST /webhooks/dead-letters/:id/replay`; both require the
 > These two routes are live today, but nothing populates the collection while the
 > retry queue is dormant.
 
+### Delivery metrics and alerts
+
+The `/metrics` endpoint exposes `webhook_delivery_total` by final status,
+`webhook_delivery_attempts_total`, `webhook_delivery_retries_total`,
+`webhook_delivery_duration_seconds`, and `webhook_dead_letter_volume`.
+Scrape the endpoint with Prometheus and tune alert windows and thresholds for
+your traffic. For example:
+
+```yaml
+groups:
+  - name: webhook-delivery
+    rules:
+      - alert: WebhookDeliveryFailureRateHigh
+        expr: rate(webhook_delivery_total{status="failed"}[10m]) > 0.1
+        for: 5m
+      - alert: WebhookDeadLettersAccumulating
+        expr: webhook_dead_letter_volume > 10
+        for: 10m
+      - alert: WebhookDeliveryLatencyHigh
+        expr: histogram_quantile(0.95, rate(webhook_delivery_duration_seconds_bucket[10m])) > 5
+        for: 10m
+```
+
 ### Delivery record fields
 
 The backend maintains an internal delivery record for every webhook event:
 
 | Field               | Type             | Description                                       |
 | ------------------- | ---------------- | ------------------------------------------------- |
-| `idempotency_key`   | string           | Stable key identifying this event                 |
+| `event_id`          | string           | Stable indexed event identifier                    |
+| `delivery_id`       | string           | Stable identifier for this delivery                |
 | `endpoint`          | string           | Merchant URL the POST was sent to                 |
 | `status`            | `delivered` \| `failed` \| `pending` | Final delivery outcome      |
 | `attempts`          | number           | Total number of delivery attempts made            |
@@ -447,11 +516,11 @@ Your endpoint should:
 | -------------------------------------- | ---------------------------------------------------------------------------- |
 | Signature verification fails           | Body was parsed before reading the raw bytes, or wrong `WEBHOOK_SIGNING_SECRET` |
 | `timingSafeEqual` throws               | The signature header was not 64 hex characters; compare lengths first          |
-| Duplicate events processed             | Dedupe key not checked; no idempotency key is sent on the live path           |
+| Duplicate events processed             | Receiver does not persist and deduplicate the stable `event_id`               |
 | Deliveries time out                    | Endpoint performs synchronous work before responding; move work off the request path |
 | No webhooks received                   | `WEBHOOK_URL` not set, or set to an unreachable address                      |
 | Occasional missing events             | Expected: the live path is single-attempt with no retry                        |
-| A replayed body still verifies         | Expected: the signature has no timestamp; dedupe on your own key              |
+| A replayed body still verifies         | Enforce the five-minute timestamp window and deduplicate on `event_id`        |
 | Backend refuses to start               | `WEBHOOK_SIGNING_SECRET` is unset — `validateEnv()` fails fast                 |
 
 ---

@@ -24,14 +24,23 @@
 
 import { createHmac, randomUUID, timingSafeEqual } from "crypto"
 import { connectMongo, type WebhookDeliveryHistoryRecord, type WebhookReplayRecord } from "../db/mongo.js"
+import {
+  webhookDeliveryAttempts,
+  webhookDeliveryDuration,
+  webhookDeliveryOutcomes,
+} from "../lib/metrics.js"
+import { sendWebhookRequest } from "./webhook-http.js"
 
 /** The header name sent on every outbound webhook request. */
 export const WEBHOOK_SIGNATURE_HEADER = "X-COMEBACKHERE-Signature"
 export const WEBHOOK_TIMESTAMP_HEADER = "X-COMEBACKHERE-Timestamp"
 export const WEBHOOK_LEGACY_SIGNATURE_HEADER = "X-COMEBACKHERE-Legacy-Signature"
+export const WEBHOOK_PREVIOUS_SIGNATURE_HEADER = "X-COMEBACKHERE-Previous-Signature"
 
 export interface WebhookPayload {
   event: string
+  event_id?: string
+  delivery_id?: string
   [key: string]: unknown
 }
 
@@ -49,6 +58,8 @@ export interface DispatchWebhookOptions {
   merchantAddress?: string
   correlationId?: string
   replayOf?: string
+  eventId?: string
+  deliveryId?: string
 }
 
 /**
@@ -86,17 +97,21 @@ export function signPayload(secret: string, rawBody: string | Buffer | Uint8Arra
  * @returns `true` if the signature is valid, `false` otherwise.
  */
 export function verifySignature(
-  secret: string,
+  secret: string | string[],
   rawBody: string | Buffer | Uint8Array,
   signature: string,
 ): boolean {
   try {
-    const expected = signPayload(secret, rawBody)
-    // Both buffers must have the same length for timingSafeEqual
-    const expectedBuf = Buffer.from(expected, "hex")
+    if (!/^[0-9a-f]{64}$/i.test(signature)) return false
     const actualBuf = Buffer.from(signature, "hex")
-    if (expectedBuf.length !== actualBuf.length) return false
-    return timingSafeEqual(expectedBuf, actualBuf)
+    const candidates = Array.isArray(secret) ? secret : [secret]
+    let valid = false
+    for (const candidate of candidates) {
+      const expectedBuf = Buffer.from(signPayload(candidate, rawBody), "hex")
+      const matches = expectedBuf.length === actualBuf.length && timingSafeEqual(expectedBuf, actualBuf)
+      valid = matches || valid
+    }
+    return valid
   } catch {
     return false
   }
@@ -129,13 +144,21 @@ export async function dispatchWebhook(
     )
   }
 
-  const rawBody = JSON.stringify(payload)
+  const eventId = options.eventId ?? payload.event_id ?? randomUUID()
+  const deliveryId = options.deliveryId ?? (options.replayOf ? randomUUID() : payload.delivery_id ?? eventId)
+  const deliveredPayload: WebhookPayload = { ...payload, event_id: eventId, delivery_id: deliveryId }
+  const rawBody = JSON.stringify(deliveredPayload)
   const timestamp = Math.floor(Date.now() / 1000).toString()
   const signature = signPayload(secret, `${timestamp}.${rawBody}`)
   const legacySignature = signPayload(secret, rawBody)
-  const deliveryId = randomUUID()
+  const previousSecret = process.env.WEBHOOK_SIGNING_SECRET_PREVIOUS
+  const previousSignature = previousSecret && previousSecret !== secret
+    ? signPayload(previousSecret, `${timestamp}.${rawBody}`)
+    : undefined
+  if (options.replayOf) webhookDeliveryRetries.inc()
   let status: number | null = null
   let failure: string | null = null
+  const startedAt = Date.now()
 
   try {
     const headers: Record<string, string> = {
@@ -143,19 +166,18 @@ export async function dispatchWebhook(
       [WEBHOOK_SIGNATURE_HEADER]: signature,
       [WEBHOOK_TIMESTAMP_HEADER]: timestamp,
       [WEBHOOK_LEGACY_SIGNATURE_HEADER]: legacySignature,
+      "X-COMEBACKHERE-Event-Id": eventId,
+      "X-COMEBACKHERE-Delivery-Id": deliveryId,
     }
+    if (previousSignature) headers[WEBHOOK_PREVIOUS_SIGNATURE_HEADER] = previousSignature
     if (options.correlationId) headers["X-Request-Id"] = options.correlationId
-    const response = await fetchImpl(url, {
-      method: "POST",
-      headers,
-      body: rawBody,
-    })
-    status = response.status
-    if (!response.ok) failure = `HTTP ${response.status}`
+    webhookDeliveryAttempts.inc()
+    status = await sendWebhookRequest(url, headers, rawBody, fetchImpl)
+    if (status < 200 || status >= 300) failure = `HTTP ${status}`
     return {
       url,
-      status: response.status,
-      ok: response.ok,
+      status,
+      ok: failure === null,
       signature,
       legacySignature,
       timestamp,
@@ -165,6 +187,9 @@ export async function dispatchWebhook(
     failure = err instanceof Error ? err.message : String(err)
     throw err
   } finally {
+    const delivered = status !== null && status >= 200 && status < 300
+    webhookDeliveryOutcomes.inc({ status: delivered ? "delivered" : "failed" })
+    webhookDeliveryDuration.observe({ status: delivered ? "delivered" : "failed" }, (Date.now() - startedAt) / 1_000)
     await persistWebhookAttempt({
       deliveryId,
       merchantAddress: options.merchantAddress,
@@ -213,7 +238,7 @@ async function persistWebhookAttempt(attempt: {
       delivery_id: attempt.deliveryId,
       merchant_address: attempt.merchantAddress,
       endpoint: attempt.endpoint,
-      payload: attempt.payload,
+      payload: deliveredPayload,
       status: replay.status,
       attempts: 1,
       last_status_code: attempt.status,
