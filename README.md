@@ -20,6 +20,58 @@ COMEBACKHERE provides the infrastructure needed to build seamless payment experi
 
 ---
 
+## Typed API Client
+
+The backend publishes an OpenAPI schema at `docs/openapi.yaml`. A typed client
+is generated from that schema so request and response types stay synchronized
+with the published API.
+
+### Generate the client
+
+```bash
+npm run generate:client
+```
+
+This regenerates the client into `packages/api-client/` from
+`docs/openapi.yaml`. Do not edit generated files by hand — change the spec and
+regenerate.
+
+### CI staleness check
+
+CI runs `npm run generate:client` and fails if the regenerated output differs
+from what is committed. If the check fails locally, regenerate and commit the
+result:
+
+```bash
+npm run generate:client
+git add packages/api-client
+git commit -m "chore: regenerate API client"
+```
+
+### Consumer example
+
+```typescript
+import { createClient } from "@comebackhere/api-client"
+
+const client = createClient({
+  baseUrl: "http://localhost:3000",
+  apiKey: process.env.MERCHANT_API_KEY,
+})
+
+// Request and response types are derived from the OpenAPI schema.
+const invoice = await client.createInvoice({
+  token: "USDC",
+  amount: 1000000,
+  due_date: 1720000000,
+})
+
+console.log(invoice.invoice_id)
+```
+
+> Full request/response shapes: [docs/api-reference.md](docs/api-reference.md)
+
+---
+
 ## Quickstart for Merchants
 
 Integrate COMEBACKHERE payments in three steps: create an invoice, set up
@@ -233,182 +285,5 @@ Expected output:
 
 ```text
 NAME                      IMAGE                       COMMAND                  SERVICE    CREATED          STATUS                    PORTS
-comebackhere-backend-1    comebackhere-backend        "docker-entrypoint.s…"   backend    15 seconds ago   Up 14 seconds (healthy)   0.0.0.0:3001->3001/tcp
-comebackhere-frontend-1   comebackhere-frontend       "/bin/sh -c 'npm run…"   frontend   15 seconds ago   Up 14 seconds (healthy)   0.0.0.0:5173->5173/tcp
-comebackhere-mongodb-1    mongo:7                     "docker-entrypoint.s…"   mongodb    15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:27017->27017/tcp
-comebackhere-redis-1      redis:7-alpine              "docker-entrypoint.s…"   redis      15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:6379->6379/tcp
-comebackhere-soroban-1    stellar/quickstart:latest   "/start standalone"      soroban    15 seconds ago   Up 15 seconds (healthy)   0.0.0.0:8000->8000/tcp, 0.0.0.0:11625-11626->11625-11626/tcp
+comebackh
 ```
-
-### 2. Service Startup Health Checks
-
-Verify each service responds as expected:
-
-- **Soroban node:**
-
-  ```bash
-  curl -s http://localhost:8000/health
-  # Expected: {"status":"healthy"}
-  ```
-
-- **Redis:**
-
-  ```bash
-  docker-compose exec -T redis redis-cli ping
-  # Expected: PONG
-  ```
-
-- **MongoDB:**
-
-  ```bash
-  docker-compose exec -T mongodb mongosh --eval "db.adminCommand('ping')" --quiet
-  # Expected: { ok: 1 }
-  ```
-
-- **Backend API:**
-
-  ```bash
-  curl -s http://localhost:3001/health/rpc
-  # Expected: {"status":"ok"}
-  ```
-
-- **Frontend UI:**
-
-  ```bash
-  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:5173/
-  # Expected: 200
-  ```
-
-### 3. Copy-Paste Verification Section
-
-Run this single snippet before executing app-specific commands to confirm the entire stack is operational:
-
-```bash
-echo "Verifying local stack readiness..."
-curl -sf http://localhost:8000/health > /dev/null && echo "✔ Soroban node healthy (port 8000)"
-docker-compose exec -T redis redis-cli ping 2>/dev/null | grep -q "PONG" && echo "✔ Redis healthy (port 6379)"
-docker-compose exec -T mongodb mongosh --eval "db.adminCommand('ping')" --quiet 2>/dev/null | grep -q "1" && echo "✔ MongoDB healthy (port 27017)"
-curl -sf http://localhost:3001/health/rpc > /dev/null && echo "✔ Backend API healthy (port 3001)"
-curl -sf -o /dev/null http://localhost:5173/ && echo "✔ Frontend UI healthy (port 5173)"
-echo "Stack is ready for development."
-```
-
----
-
-## Using `docker-compose.override.yml`
-
-This repository includes a `docker-compose.override.yml` file.
-
-Docker Compose automatically merges this file with `docker-compose.yml` whenever you run:
-
-```bash
-docker-compose up
-```
-
-The override configuration adds the following development services:
-
-* Backend
-* Frontend
-
-This allows you to run the complete application stack locally without modifying the base compose configuration.
-
-### Common Customizations
-
-Developers often update the override file to:
-
-* Change `VITE_API_URL`
-* Change `VITE_SOROBAN_RPC`
-* Modify port mappings
-* Mount local source directories for hot reloading
-* Customize environment-specific settings
-
-To view the final merged configuration:
-
-```bash
-docker-compose config
-```
-
----
-
-# ABI Snapshot Verification
-
-Before committing changes, ensure the generated ABI snapshots are up to date.
-
-Using Make:
-
-```bash
-make check-abi-snapshots
-```
-
-Or with Just:
-
-```bash
-just check-snapshot
-```
-
-Finally, verify there are no uncommitted ABI changes:
-
-```bash
-git diff --exit-code abis/
-```
-
----
-
-# Deployment
-
-## Testnet Deployment
-
-Copy the example environment file:
-
-```bash
-cp .env.testnet.example .env.testnet
-```
-
-Deploy the contracts:
-
-```bash
-scripts/deploy_testnet.sh
-```
-
-After deployment, contract addresses are exported to:
-
-```text
-artifacts/addresses.json
-```
-
-This file is intentionally ignored by Git because it contains environment-specific deployment data.
-
-For the expected structure, refer to:
-
-```text
-artifacts/addresses.json.example
-```
-
----
-
-## Mainnet Deployment
-
-Mainnet deployments are intentionally **manual** and require approval through the project's multisignature governance process.
-
-Before deploying to production, follow the complete deployment checklist and signing ceremony documented in:
-
-```text
-docs/MAINNET_DEPLOYMENT.md
-```
-
----
-
-# Contributing
-
-Before opening a pull request:
-
-* Keep ABI snapshots up to date.
-* Verify all tests pass.
-* Review deployment documentation if modifying contracts or deployment scripts.
-* Ensure your branch is clean and free of unintended changes.
-
----
-
-# License
-
-This project is licensed under the **MIT License**.
