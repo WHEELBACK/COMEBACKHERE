@@ -8,6 +8,7 @@
 pub mod extractors;
 pub mod handlers_readiness;
 pub mod idempotency;
+pub mod indexer_backfill;
 pub mod rate_limiter;
 pub mod routes;
 pub mod soroban;
