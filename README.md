@@ -351,3 +351,8 @@ Before starting the stack, ensure your local `.env` (or service-specific `.env` 
 | `VITE_API_URL` | Yes | `http://localhost:3000` | Backend API base URL |
 | `VITE_SOROBAN_RPC` | Yes | `http://localhost:8000/soroban/rpc` | Soroban RPC endpoint for wallet interactions |
 | `VITE_HORIZON_URL` | No | `http://localhost:8000` | Horizon endpoint for account queries |
+
+## Handsoff notes
+
+<!-- handsoff-issue-982 -->
+- #982: Add merchant API-key management to the frontend
