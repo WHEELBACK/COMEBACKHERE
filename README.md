@@ -27,3 +27,8 @@ Migration checklist for open PRs:
 4. Confirm the PR diff no longer references the legacy trees, then merge.
 
 Acceptance: no open PR targets a tree scheduled for removal.
+
+## Handsoff notes
+
+<!-- handsoff-issue-954 -->
+- #954: Version contract storage schemas and test migrations
