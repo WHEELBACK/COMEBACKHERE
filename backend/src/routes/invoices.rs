@@ -4,6 +4,9 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::extractors::ValidatedBody;
 use crate::AppState;
@@ -30,6 +33,22 @@ impl InvoiceEvent {
             InvoiceEvent::Expired => "invoice.expired",
         }
     }
+
+    /// All event names a merchant may subscribe to.
+    pub fn all() -> &'static [&'static str] {
+        &[
+            "invoice.created",
+            "invoice.paid",
+            "invoice.cancelled",
+            "invoice.refunded",
+            "invoice.expired",
+        ]
+    }
+
+    /// Whether `name` is a recognised invoice event name.
+    pub fn is_valid(name: &str) -> bool {
+        Self::all().contains(&name)
+    }
 }
 
 /// Build the webhook payload for an invoice lifecycle event. The payload
@@ -44,6 +63,69 @@ pub fn invoice_event_payload(
         "invoice_id": invoice_id,
         "data": data,
     })
+}
+
+/// Merchant-scoped webhook configuration: a callback URL plus the set of
+/// invoice events the merchant wants delivered to it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MerchantWebhookConfig {
+    pub callback_url: String,
+    pub events: Vec<String>,
+}
+
+/// Request body for creating/updating a merchant's webhook configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateMerchantWebhookRequest {
+    pub callback_url: String,
+    pub events: Vec<String>,
+}
+
+/// In-memory store for merchant-scoped webhook configuration, keyed by
+/// merchant address. Kept distinct from the global webhook configuration.
+#[derive(Default)]
+pub struct MerchantWebhookStore {
+    configs: Mutex<HashMap<String, MerchantWebhookConfig>>,
+}
+
+impl MerchantWebhookStore {
+    pub fn get(&self, merchant: &str) -> Option<MerchantWebhookConfig> {
+        self.configs
+            .lock()
+            .ok()
+            .and_then(|map| map.get(merchant).cloned())
+    }
+
+    pub fn set(&self, merchant: &str, config: MerchantWebhookConfig) {
+        if let Ok(mut map) = self.configs.lock() {
+            map.insert(merchant.to_string(), config);
+        }
+    }
+}
+
+/// Validate a merchant webhook configuration, returning an error message on
+/// the first problem found.
+fn validate_merchant_webhook(
+    req: &UpdateMerchantWebhookRequest,
+) -> Result<(), String> {
+    let url = req.callback_url.trim();
+    if url.is_empty() {
+        return Err("callback_url must not be empty".to_string());
+    }
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("callback_url must be an http(s) URL".to_string());
+    }
+    if url.len() > 2048 {
+        return Err("callback_url is too long".to_string());
+    }
+    if req.events.is_empty() {
+        return Err("events must contain at least one event".to_string());
+    }
+    for event in &req.events {
+        if !InvoiceEvent::is_valid(event) {
+            return Err(format!("unknown event: {}", event));
+        }
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -129,6 +211,72 @@ pub async fn get_invoice(
             Json(ErrorResponse {
                 error: e.to_string(),
                 code: None,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/merchants/{merchant}/webhook",
+    params(
+        ("merchant" = String, Path, description = "Merchant address")
+    ),
+    request_body = UpdateMerchantWebhookRequest,
+    responses(
+        (status = 200, description = "Webhook configuration saved", body = MerchantWebhookConfig),
+        (status = 422, description = "Invalid webhook configuration", body = ErrorResponse)
+    ),
+    tag = "invoices"
+)]
+pub async fn update_merchant_webhook(
+    State(state): State<AppState>,
+    Path(merchant): Path<String>,
+    ValidatedBody(body): ValidatedBody<UpdateMerchantWebhookRequest>,
+) -> impl IntoResponse {
+    if let Err(msg) = validate_merchant_webhook(&body) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: msg,
+                code: Some(7),
+            }),
+        )
+            .into_response();
+    }
+
+    let config = MerchantWebhookConfig {
+        callback_url: body.callback_url.trim().to_string(),
+        events: body.events,
+    };
+    state.merchant_webhooks.set(&merchant, config.clone());
+    (StatusCode::OK, Json(config)).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/merchants/{merchant}/webhook",
+    params(
+        ("merchant" = String, Path, description = "Merchant address")
+    ),
+    responses(
+        (status = 200, description = "Webhook configuration found", body = MerchantWebhookConfig),
+        (status = 404, description = "No webhook configuration for merchant", body = ErrorResponse)
+    ),
+    tag = "invoices"
+)]
+pub async fn get_merchant_webhook(
+    State(state): State<AppState>,
+    Path(merchant): Path<String>,
+) -> impl IntoResponse {
+    match state.merchant_webhooks.get(&merchant) {
+        Some(config) => (StatusCode::OK, Json(config)).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("No webhook configuration for merchant {}", merchant),
+                code: Some(6),
             }),
         )
             .into_response(),
