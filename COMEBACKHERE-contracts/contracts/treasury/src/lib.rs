@@ -1126,7 +1126,7 @@ impl TreasuryContract {
     /// * `e` - Soroban environment handle.
     /// * `admin` - Admin address (must authenticate).
     /// * `token` - Token being withdrawn; used to look up the daily cap.
-    /// * `_to` - Target recipient address.
+    /// * `to` - Target recipient address that receives the withdrawn funds.
     /// * `amount` - Amount to withdraw.
     ///
     /// # Errors
@@ -1139,7 +1139,7 @@ impl TreasuryContract {
         e: Env,
         admin: Address,
         token: Address,
-        _to: Address,
+        to: Address,
         amount: u64,
     ) -> Result<(), TreasuryError> {
         check_not_paused(&e)?;
@@ -1180,6 +1180,12 @@ impl TreasuryContract {
                 },
             );
         }
+
+        token::Client::new(&e, &token).transfer(
+            &e.current_contract_address(),
+            &to,
+            &(amount as i128),
+        );
 
         Ok(())
     }
