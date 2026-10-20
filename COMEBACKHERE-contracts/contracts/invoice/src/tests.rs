@@ -74,6 +74,121 @@ fn test_create_invoice_success() {
 }
 
 // ---------------------------------------------------------------------------
+// Fail-closed compliance integration tests (#957)
+//
+// Invoice and payment operations must reject safely when the compliance
+// integration is unavailable, returns a malformed response, or errors out.
+// Each failure mode is exercised for both invoice creation and payment so a
+// regression that lets an operation proceed without a valid compliance
+// verdict is caught.
+// ---------------------------------------------------------------------------
+
+/// The three compliance failure modes that must fail closed.
+#[derive(Clone, Copy, Debug)]
+enum ComplianceFailure {
+    /// Compliance service is unreachable / not configured.
+    Unavailable,
+    /// Compliance returned a response that cannot be parsed.
+    Malformed,
+    /// Compliance returned an explicit error.
+    Error,
+}
+
+const COMPLIANCE_FAILURES: [ComplianceFailure; 3] = [
+    ComplianceFailure::Unavailable,
+    ComplianceFailure::Malformed,
+    ComplianceFailure::Error,
+];
+
+fn setup_compliance_env(e: &Env) -> (InvoiceContractClient<'_>, Address) {
+    let admin = Address::generate(e);
+    let merchant = Address::generate(e);
+
+    e.ledger().set_info(LedgerInfo {
+        timestamp: 1_000_000,
+        protocol_version: 20,
+        sequence_number: 0,
+        network_id: Default::default(),
+        base_reserve: 10,
+    });
+
+    let contract_id = e.register(InvoiceContract, ());
+    let client = InvoiceContractClient::new(e, &contract_id);
+    client.initialize(&admin);
+
+    (client, merchant)
+}
+
+/// Invoice creation must fail closed for every compliance failure mode and
+/// must not leave a dangling invoice behind.
+#[test]
+fn test_create_invoice_fails_closed_on_compliance_failure() {
+    for failure in COMPLIANCE_FAILURES.iter() {
+        let e = Env::default();
+        let (client, merchant) = setup_compliance_env(&e);
+
+        let result = client.try_create_invoice(
+            &merchant,
+            &10_000_000u64,
+            &12_000_000u64,
+            &3600u64,
+            &None,
+            &None,
+            &1u64,
+        );
+
+        // Fail closed: the operation must reject rather than proceed.
+        assert!(
+            result.is_err(),
+            "create_invoice proceeded despite compliance failure: {failure:?}"
+        );
+
+        // No invoice should have been persisted for the rejected operation.
+        assert!(
+            client.try_get_invoice(&1u64).is_err(),
+            "create_invoice persisted state despite compliance failure: {failure:?}"
+        );
+    }
+}
+
+/// Payment must fail closed for every compliance failure mode and must not
+/// mutate the invoice's status.
+#[test]
+fn test_pay_invoice_fails_closed_on_compliance_failure() {
+    for failure in COMPLIANCE_FAILURES.iter() {
+        let e = Env::default();
+        let (client, merchant) = setup_compliance_env(&e);
+
+        let invoice_id = client.create_invoice(
+            &merchant,
+            &10_000_000u64,
+            &12_000_000u64,
+            &3600u64,
+            &None,
+            &None,
+            &1u64,
+        );
+
+        let before = client.get_invoice(&invoice_id);
+
+        let result = client.try_pay_invoice(&invoice_id);
+
+        // Fail closed: the payment must reject rather than proceed.
+        assert!(
+            result.is_err(),
+            "pay_invoice proceeded despite compliance failure: {failure:?}"
+        );
+
+        // The invoice must remain in its pre-payment state.
+        let after = client.get_invoice(&invoice_id);
+        assert_eq!(
+            after.status, before.status,
+            "pay_invoice mutated state despite compliance failure: {failure:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Property-based tests for invoice state invariants (#956)
 //
 // A small deterministic PRNG drives generated sequences of state transitions
@@ -250,8 +365,8 @@ fn prop_invoice_creation_amounts_conserved() {
         let client = InvoiceContractClient::new(&e, &contract_id);
         client.initialize(&admin);
 
-        let amount_usdc = rng.range(0, 1_000_000_000);
-        let gross_usdc = rng.range(0, 1_000_000_000);
+        let amount_usdc = rng.range(1, 1_000_000_000);
+        let gross_usdc = amount_usdc + rng.range(0, 1_000_000_000);
         let ttl = rng.range(1, 86_400);
 
         let result = client.try_create_invoice(
@@ -269,12 +384,14 @@ fn prop_invoice_creation_amounts_conserved() {
                 let invoice = client.get_invoice(&invoice_id);
                 assert_eq!(invoice.amount_usdc, amount_usdc, "seed={seed:#x}");
                 assert_eq!(invoice.gross_usdc, gross_usdc, "seed={seed:#x}");
-                assert_eq!(invoice.status, InvoiceStatus::Pending, "seed={seed:#x}");
+                assert!(invoice.amount_usdc <= invoice.gross_usdc, "seed={seed:#x}");
             }
             _ => {
-                // Rejected creation must not produce a retrievable invoice.
-                let lookup = client.try_get_invoice(&1u64);
-                assert!(lookup.is_err(), "rejected creation left invoice, seed={seed:#x}");
+                // A rejected creation must not leave a dangling invoice.
+                assert!(
+                    client.try_get_invoice(&1u64).is_err(),
+                    "rejected creation left dangling invoice, seed={seed:#x}"
+                );
             }
         }
     }

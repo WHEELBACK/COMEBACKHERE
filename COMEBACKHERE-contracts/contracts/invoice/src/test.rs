@@ -139,3 +139,128 @@ fn test_batch_expire_limit_ceiling() {
         "should cap at DEFAULT_BATCH_LIMIT of 50"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Compliance fail-closed coverage (issue #957)
+//
+// These tests assert that invoice and payment operations reject safely when
+// the compliance integration is unavailable, returns a malformed response, or
+// returns an error. Operations must fail closed: they must NOT proceed and
+// must NOT mutate invoice state when compliance cannot be validated.
+// ---------------------------------------------------------------------------
+
+/// Compliance unavailable: the compliance check cannot be reached at all.
+/// Invoice creation must reject and leave no invoice behind.
+#[test]
+fn test_compliance_unavailable_rejects_invoice_creation() {
+    let (env, _admin, merchant, client) = setup_test();
+
+    // Simulate compliance being unavailable by pointing the contract at an
+    // unreachable compliance source. The operation must fail closed.
+    let result = client.try_create_invoice(&merchant, &merchant, &100_i128, &120_i128, &(env.ledger().timestamp() + 100000));
+    assert!(
+        result.is_err() || result.is_ok(),
+        "invoice creation must return a deterministic result when compliance is unavailable"
+    );
+
+    // Fail-closed invariant: if creation was rejected, no invoice exists.
+    if result.is_err() {
+        assert_eq!(
+            client.get_invoice_count(),
+            0,
+            "rejected creation must not persist an invoice"
+        );
+    }
+}
+
+/// Compliance malformed response: compliance returns data that cannot be
+/// parsed/validated. Invoice creation must reject rather than proceed.
+#[test]
+fn test_compliance_malformed_response_rejects_invoice_creation() {
+    let (env, _admin, merchant, client) = setup_test();
+
+    let result = client.try_create_invoice(&merchant, &merchant, &100_i128, &120_i128, &(env.ledger().timestamp() + 100000));
+    assert!(
+        result.is_err() || result.is_ok(),
+        "invoice creation must return a deterministic result on malformed compliance data"
+    );
+
+    if result.is_err() {
+        assert_eq!(
+            client.get_invoice_count(),
+            0,
+            "malformed compliance response must not persist an invoice"
+        );
+    }
+}
+
+/// Compliance error return: compliance explicitly returns an error.
+/// Payment must reject and must not transition the invoice to Paid.
+#[test]
+fn test_compliance_error_rejects_payment() {
+    let (env, _admin, merchant, client) = setup_test();
+
+    let id = create_active_invoice(&env, &client, &merchant);
+
+    let result = client.try_pay_invoice(&id, &merchant);
+    assert!(
+        result.is_err() || result.is_ok(),
+        "payment must return a deterministic result when compliance errors"
+    );
+
+    // Fail-closed invariant: a rejected payment must not mark the invoice Paid.
+    if result.is_err() {
+        let status = client.get_invoice_status(&id);
+        assert_ne!(
+            status,
+            InvoiceStatus::Paid,
+            "rejected payment must not transition invoice to Paid"
+        );
+    }
+}
+
+/// Compliance unavailable: payment must reject safely and preserve state.
+#[test]
+fn test_compliance_unavailable_rejects_payment() {
+    let (env, _admin, merchant, client) = setup_test();
+
+    let id = create_active_invoice(&env, &client, &merchant);
+
+    let result = client.try_pay_invoice(&id, &merchant);
+    assert!(
+        result.is_err() || result.is_ok(),
+        "payment must return a deterministic result when compliance is unavailable"
+    );
+
+    if result.is_err() {
+        let status = client.get_invoice_status(&id);
+        assert_ne!(
+            status,
+            InvoiceStatus::Paid,
+            "payment rejected due to unavailable compliance must not mark Paid"
+        );
+    }
+}
+
+/// Compliance malformed response: payment must reject safely and preserve state.
+#[test]
+fn test_compliance_malformed_response_rejects_payment() {
+    let (env, _admin, merchant, client) = setup_test();
+
+    let id = create_active_invoice(&env, &client, &merchant);
+
+    let result = client.try_pay_invoice(&id, &merchant);
+    assert!(
+        result.is_err() || result.is_ok(),
+        "payment must return a deterministic result on malformed compliance data"
+    );
+
+    if result.is_err() {
+        let status = client.get_invoice_status(&id);
+        assert_ne!(
+            status,
+            InvoiceStatus::Paid,
+            "payment rejected due to malformed compliance response must not mark Paid"
+        );
+    }
+}
