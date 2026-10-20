@@ -6,26 +6,32 @@ import { TokenAllowlist } from "./components/TokenAllowlist"
 import { BatchExpireInvoices } from "./components/BatchExpireInvoices"
 import { TreasuryManager } from "./components/TreasuryManager"
 import SignerManagement from "./components/SignerManagement/SignerManagement"
+import { CreateInvoice } from "./components/CreateInvoice"
+import { InvoiceList } from "./components/InvoiceList"
+import { ApiKeyManagement } from "./components/ApiKeyManagement"
 import { useInvoice } from "./hooks/useInvoice"
 import { useTheme } from "./hooks/useTheme"
 import { useWallet } from "./hooks/useWallet"
-import { useHashTab, TABS, type Tab } from "./hooks/useHashTab"
+import { useHashTab, type Tab } from "./hooks/useHashTab"
 import { CopyableText } from "./components/CopyableText"
 import { formatAmount, USDC_DECIMALS } from "./utils/format"
 import NetworkMismatchBanner from "./components/NetworkMismatchBanner"
 import OnboardingWizard, { useOnboarding } from "./components/OnboardingWizard"
+import { useT } from "./i18n"
 import "./App.css"
 import "./components/ErrorBoundary.css"
 
-type Tab = "payment" | "refund" | "compliance" | "tokens" | "batch-expire" | "treasury" | "signers"
-
-const TABS: { id: Tab; label: string }[] = [
+const TABS_CONFIG: { id: Tab; label: string }[] = [
   { id: "payment", label: "Pay Invoice" },
+  { id: "create", label: "Create Invoice" },
+  { id: "invoices", label: "Invoices" },
   { id: "refund", label: "Request Refund" },
   { id: "compliance", label: "Compliance" },
   { id: "tokens", label: "Token Allowlist" },
   { id: "batch-expire", label: "Batch Expire" },
   { id: "treasury", label: "Treasury" },
+  { id: "signers", label: "Signers" },
+  { id: "api-keys", label: "API Keys" },
 ]
 
 function RefundTab() {
@@ -103,49 +109,13 @@ function RefundTab() {
   )
 }
 
-interface TabContext {
-  address: string | null
-  notReadyReason: string | null
-  setTab: (tab: Tab) => void
-  openInvoice: (invoiceId: string) => void
-}
-
-function renderTab(tab: Tab, { address, notReadyReason, setTab, openInvoice }: TabContext) {
-  switch (tab) {
-    case "payment":
-      return <InvoicePayment />
-    case "create":
-      return <CreateInvoice merchantAddress={address} />
-    case "invoices":
-      return (
-        <InvoiceList
-          merchantAddress={address}
-          onOpenInvoice={openInvoice}
-          onCreateInvoice={() => setTab("create")}
-        />
-      )
-    case "refund":
-      return <RefundTab />
-    case "tokens":
-      return <TokenAllowlist />
-    case "compliance":
-      return <ComplianceManager />
-    case "batch-expire":
-      return <BatchExpireInvoices walletAddress={address} walletNotReadyReason={notReadyReason} />
-    case "treasury":
-      return <TreasuryManager />
-    default: {
-      const unreachable: never = tab
-      return unreachable
-    }
-  }
-}
-
 export default function App() {
   const { address, network, connected, connect, connecting, disconnect, error: walletError } = useWallet()
   const { showWizard, openWizard, closeWizard } = useOnboarding()
   useTheme()
   const [tab, setTab] = useHashTab()
+  const tabRefs = useRef<Map<Tab, HTMLButtonElement | null>>(new Map())
+  const t = useT()
 
   const handleDisconnect = useCallback(() => {
     disconnect()
@@ -164,41 +134,40 @@ export default function App() {
   // Activate a tab and move focus to it.
   const activateTab = useCallback((id: Tab) => {
     setTab(id)
-    // Focus the button on the next tick so the DOM has updated tabIndex.
     requestAnimationFrame(() => {
       tabRefs.current.get(id)?.focus()
     })
-  }, [])
+  }, [setTab])
 
   // Keyboard handler for WAI-ARIA roving tabindex pattern.
   const handleTabKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLButtonElement>) => {
-      const currentIndex = TABS.findIndex((t) => t.id === tab)
+      const currentIndex = TABS_CONFIG.findIndex((item) => item.id === tab)
+      if (currentIndex === -1) return
 
       switch (event.key) {
         case "ArrowRight": {
           event.preventDefault()
-          const next = TABS[(currentIndex + 1) % TABS.length]
+          const next = TABS_CONFIG[(currentIndex + 1) % TABS_CONFIG.length]
           activateTab(next.id)
           break
         }
         case "ArrowLeft": {
           event.preventDefault()
-          const prev = TABS[(currentIndex - 1 + TABS.length) % TABS.length]
+          const prev = TABS_CONFIG[(currentIndex - 1 + TABS_CONFIG.length) % TABS_CONFIG.length]
           activateTab(prev.id)
           break
         }
         case "Home": {
           event.preventDefault()
-          activateTab(TABS[0].id)
+          activateTab(TABS_CONFIG[0].id)
           break
         }
         case "End": {
           event.preventDefault()
-          activateTab(TABS[TABS.length - 1].id)
+          activateTab(TABS_CONFIG[TABS_CONFIG.length - 1].id)
           break
         }
-        // Space and Enter are handled by the default button behaviour (onClick).
         default:
           break
       }
@@ -206,13 +175,12 @@ export default function App() {
     [tab, activateTab],
   )
 
-  // Sync URL hash with active tab so bookmarks and back-button work.
   useEffect(() => {
     const hash = window.location.hash.slice(1) as Tab
-    if (TABS.some((t) => t.id === hash)) {
+    if (TABS_CONFIG.some((item) => item.id === hash)) {
       setTab(hash)
     }
-  }, [])
+  }, [setTab])
 
   useEffect(() => {
     window.history.replaceState(null, "", `#${tab}`)
@@ -236,15 +204,23 @@ export default function App() {
                 Connected: {address?.slice(0, 6)}...{address?.slice(-4)}
               </span>
               <button
-                className="btn btn--primary btn--sm"
-                onClick={connect}
-                disabled={connecting}
-                aria-label={t("wallet.connectAriaLabel")}
+                className="btn btn--secondary btn--sm"
+                onClick={handleDisconnect}
+                aria-label="Disconnect wallet"
               >
-                {connecting ? t("wallet.connecting") : t("wallet.connect")}
+                Disconnect
               </button>
-            )}
-          </div>
+            </>
+          ) : (
+            <button
+              className="btn btn--primary btn--sm"
+              onClick={connect}
+              disabled={connecting}
+              aria-label={t("wallet.connectAriaLabel")}
+            >
+              {connecting ? t("wallet.connecting") : t("wallet.connect")}
+            </button>
+          )}
         </div>
       </header>
 
@@ -256,95 +232,106 @@ export default function App() {
 
       <nav className="tabs" role="tablist" aria-label="Main navigation">
         <button
+          ref={(el) => { tabRefs.current.set("payment", el) }}
           role="tab"
           aria-selected={tab === "payment"}
           aria-controls="tabpanel-payment"
           id="tab-payment"
           className={`tab ${tab === "payment" ? "tab--active" : ""}`}
           onClick={() => setTab("payment")}
+          onKeyDown={handleTabKeyDown}
         >
           {t("nav.payInvoice")}
         </button>
         <button
+          ref={(el) => { tabRefs.current.set("refund", el) }}
           role="tab"
           aria-selected={tab === "refund"}
           aria-controls="tabpanel-refund"
           id="tab-refund"
           className={`tab ${tab === "refund" ? "tab--active" : ""}`}
           onClick={() => setTab("refund")}
+          onKeyDown={handleTabKeyDown}
         >
           {t("nav.requestRefund")}
         </button>
         <button
-          role="tab"
-          aria-selected={tab === "dispute"}
-          aria-controls="tabpanel-dispute"
-          id="tab-dispute"
-          className={`tab ${tab === "dispute" ? "tab--active" : ""}`}
-          onClick={() => setTab("dispute")}
-        >
-          Raise Dispute
-        </button>
-        <button
+          ref={(el) => { tabRefs.current.set("compliance", el) }}
           role="tab"
           aria-selected={tab === "compliance"}
           aria-controls="tabpanel-compliance"
           id="tab-compliance"
           className={`tab ${tab === "compliance" ? "tab--active" : ""}`}
           onClick={() => setTab("compliance")}
+          onKeyDown={handleTabKeyDown}
         >
           {t("nav.compliance")}
         </button>
         <button
+          ref={(el) => { tabRefs.current.set("tokens", el) }}
           role="tab"
           aria-selected={tab === "tokens"}
           aria-controls="tabpanel-tokens"
           id="tab-tokens"
           className={`tab ${tab === "tokens" ? "tab--active" : ""}`}
           onClick={() => setTab("tokens")}
+          onKeyDown={handleTabKeyDown}
         >
           {t("nav.tokenAllowlist")}
         </button>
         <button
+          ref={(el) => { tabRefs.current.set("batch-expire", el) }}
           role="tab"
           aria-selected={tab === "batch-expire"}
           aria-controls="tabpanel-batch-expire"
           id="tab-batch-expire"
           className={`tab ${tab === "batch-expire" ? "tab--active" : ""}`}
           onClick={() => setTab("batch-expire")}
+          onKeyDown={handleTabKeyDown}
         >
           {t("nav.batchExpire")}
         </button>
         <button
+          ref={(el) => { tabRefs.current.set("treasury", el) }}
           role="tab"
           aria-selected={tab === "treasury"}
           aria-controls="tabpanel-treasury"
           id="tab-treasury"
           className={`tab ${tab === "treasury" ? "tab--active" : ""}`}
           onClick={() => setTab("treasury")}
+          onKeyDown={handleTabKeyDown}
         >
           {t("nav.treasury")}
         </button>
         {connected && (
           <button
+            ref={(el) => { tabRefs.current.set("signers", el) }}
             role="tab"
             aria-selected={tab === "signers"}
             aria-controls="tabpanel-signers"
             id="tab-signers"
             className={`tab ${tab === "signers" ? "tab--active" : ""}`}
             onClick={() => setTab("signers")}
+            onKeyDown={handleTabKeyDown}
           >
             Signers
           </button>
         )}
+        <button
+          ref={(el) => { tabRefs.current.set("api-keys", el) }}
+          role="tab"
+          aria-selected={tab === "api-keys"}
+          aria-controls="tabpanel-api-keys"
+          id="tab-api-keys"
+          className={`tab ${tab === "api-keys" ? "tab--active" : ""}`}
+          onClick={() => setTab("api-keys")}
+          onKeyDown={handleTabKeyDown}
+        >
+          API Keys
+        </button>
       </nav>
 
       <main className="app-main">
-        {/*
-          Each panel uses role="tabpanel" + aria-labelledby pointing back to
-          its controlling tab button, and tabIndex={0} so the panel itself is
-          reachable after Tab leaves the tablist.
-        */}
         <div
           role="tabpanel"
           id="tabpanel-payment"
@@ -398,9 +385,27 @@ export default function App() {
           hidden={tab !== "treasury"}
         >
           <TreasuryManager />
-        ) : tab === "signers" && connected ? (
-          <SignerManagement />
-        ) : null}
+        </div>
+        {connected && (
+          <div
+            role="tabpanel"
+            id="tabpanel-signers"
+            aria-labelledby="tab-signers"
+            tabIndex={0}
+            hidden={tab !== "signers"}
+          >
+            <SignerManagement />
+          </div>
+        )}
+        <div
+          role="tabpanel"
+          id="tabpanel-api-keys"
+          aria-labelledby="tab-api-keys"
+          tabIndex={0}
+          hidden={tab !== "api-keys"}
+        >
+          <ApiKeyManagement merchantAddress={address} />
+        </div>
       </main>
 
       {showWizard && (

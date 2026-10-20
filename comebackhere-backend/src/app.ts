@@ -11,6 +11,7 @@ import thresholdRouter from "./routes/threshold.js"
 import disputesRouter from "./routes/disputes.js"
 import analyticsRouter from "./routes/analytics.js"
 import webhookDeadLettersRouter from "./routes/webhook-dead-letters.js"
+import merchantKeysRouter from "./routes/api-keys.js"
 import { startComplianceIndexer } from "./services/compliance-indexer.js"
 import { rateLimitMiddleware } from "./middleware/rateLimiter.js"
 import { idempotencyMiddleware } from "./middleware/idempotency.js"
@@ -171,6 +172,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use("/disputes", disputesRouter)
   app.use("/api/analytics", analyticsRouter)
   app.use("/webhooks/dead-letters", webhookDeadLettersRouter)
+  app.use("/api/merchant-keys", merchantKeysRouter)
 
   // ── Errors ──────────────────────────────────────────────────────────────────
   // Everything below produces { error: { code, message, details, correlationId } }

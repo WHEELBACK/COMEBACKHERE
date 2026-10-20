@@ -98,24 +98,81 @@ Checks Soroban RPC reachability and current ledger.
 
 ## Merchant authentication
 
-Invoice creation and webhook replay require a merchant API key. An admin
-creates or rotates a key with `POST /api/merchant-keys`, sending `x-admin-key`
-and a JSON body containing the merchant's Stellar address. The returned
-`api_key` is shown only once; MongoDB stores only its SHA-256 hash. Creating a
-new key revokes the merchant's prior active keys. Revoke a key with
-`DELETE /api/merchant-keys/{keyId}` and the admin header.
+Invoice creation and webhook replay require a merchant API key. Authorized merchants
+or admins can create, rotate, and revoke keys, and inspect last-used metadata.
+Requests are authorized via `X-Merchant-Address` (with the merchant's Stellar public key),
+an existing active key via `Authorization: Bearer <api_key>`, or `X-Admin-Key`.
+
+The returned plaintext `api_key` secret is shown **only once at creation or rotation**;
+MongoDB stores only its SHA-256 hash. Revoke a key with `DELETE /api/merchant-keys/{keyId}`.
+
+### `GET /api/merchant-keys`
+
+List API key metadata for an authorized merchant. Secret keys and hashes are omitted.
+
+#### Headers / Query
+
+- `X-Merchant-Address`: Merchant Stellar public key (`G...`)
+- `X-Admin-Key`: Optional admin key (allows specifying any `?merchant_address=G...`)
+
+**Response `200`**
+
+```json
+[
+  {
+    "key_id": "c1f721d2-7fb2-47b2-841f-889ad4db1a7f",
+    "merchant_address": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+    "created_at": "2026-10-21T00:00:00.000Z",
+    "revoked_at": null,
+    "last_used_at": "2026-10-21T00:15:30.000Z",
+    "is_active": true
+  }
+]
+```
+
+### `POST /api/merchant-keys`
+
+Create a new API key for the merchant.
 
 ```http
 POST /api/merchant-keys
-X-Admin-Key: <admin-key>
+X-Merchant-Address: <merchant-address>
 Content-Type: application/json
 
 {"merchant_address":"G..."}
 ```
 
-The `201` response contains `key_id`, `merchant_address`, `api_key`, and
-`created_at`. The key is returned only at creation time; store it securely.
-Revocation returns `204 No Content`.
+The `201` response contains `key_id`, `merchant_address`, `api_key` (plaintext secret returned only once),
+`created_at`, and `is_active: true`. Store the key securely.
+
+### `POST /api/merchant-keys/rotate`
+
+Rotate a merchant's API key. Revokes existing active keys for the merchant and returns a new plaintext secret.
+
+```http
+POST /api/merchant-keys/rotate
+X-Merchant-Address: <merchant-address>
+Content-Type: application/json
+
+{"merchant_address":"G..."}
+```
+
+**Response `201`**
+
+```json
+{
+  "key_id": "96b6d57a-9a94-4d22-8cc6-4eb13e00be92",
+  "merchant_address": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+  "api_key": "ch_5f...",
+  "created_at": "2026-10-21T00:30:00.000Z",
+  "rotated_at": "2026-10-21T00:30:00.000Z",
+  "is_active": true
+}
+```
+
+### `DELETE /api/merchant-keys/:keyId`
+
+Revoke an active merchant API key. Revocation returns `204 No Content`.
 
 Use `Authorization: Bearer <api_key>` on merchant requests. Missing, invalid,
 or revoked keys return `401 UNAUTHORIZED` in the standard error envelope.

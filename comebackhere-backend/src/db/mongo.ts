@@ -32,6 +32,7 @@ export interface MerchantApiKeyRecord {
   key_hash: string
   created_at: Date
   revoked_at?: Date
+  last_used_at?: Date
 }
 
 export interface WebhookReplayRecord {
@@ -162,6 +163,9 @@ export function ensureIndexes(database: Db): Promise<void> {
     { collection: "compliance_audit", keys: { address: 1, ledger: -1 } },
     { collection: "compliance_audit", keys: { event_type: 1, ledger: -1 } },
     { collection: "compliance_audit", keys: { ledger: -1 } },
+    { collection: "merchant_api_keys", keys: { key_id: 1 }, unique: true },
+    { collection: "merchant_api_keys", keys: { merchant_address: 1 } },
+    { collection: "merchant_api_keys", keys: { key_hash: 1 } },
   ]
 
   const creating = Promise.all(

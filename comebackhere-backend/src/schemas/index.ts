@@ -44,7 +44,10 @@ export const createInvoiceSchema = z.object({
     .optional(),
 })
 
-export const merchantApiKeySchema = z.object({ merchant_address: stellarAddress })
+export const merchantApiKeySchema = z.object({
+  merchant_address: stellarAddress,
+  rotate: z.boolean().optional(),
+})
 export const merchantApiKeyIdSchema = z.object({ keyId: z.string().uuid("keyId must be a UUID") })
 export const webhookDeliveryIdSchema = z.object({ deliveryId: z.string().uuid("deliveryId must be a UUID") })
 
