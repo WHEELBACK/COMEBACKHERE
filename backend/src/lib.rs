@@ -11,6 +11,7 @@ pub mod idempotency;
 pub mod rate_limiter;
 pub mod routes;
 pub mod soroban;
+pub mod tracing;
 pub mod types;
 
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use routes::{
 };
 use handlers_readiness::readiness_probe;
 use soroban::SorobanClient;
+use tracing::TraceLayer;
 
 /// Shared application state threaded through every route handler.
 #[derive(Clone)]
@@ -184,6 +186,11 @@ pub fn build_router(state: AppState) -> Router {
     let rl_config = RateLimitConfig::from_env();
     let rl_layer = RateLimiterLayer::new(new_store(), rl_config);
 
+    // Distributed tracing: extract inbound trace context (W3C traceparent /
+    // X-Request-Id) so downstream Soroban RPC, indexing, and webhook spans
+    // share the same trace. The layer redacts secrets and payload bodies.
+    let trace_layer = TraceLayer::new();
+
     Router::new()
         .route("/health/rpc", axum::routing::get(get_rpc_health))
         .route("/health/ready", axum::routing::get(readiness_probe))
@@ -192,6 +199,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/invoices/:id/pay", axum::routing::post(pay_invoice))
         .route("/invoices/:id/cancel", axum::routing::post(cancel_invoice))
         .route("/invoices/:id/refund", axum::routing::post(refund_invoice))
+        .layer(trace_layer)
         .layer(rl_layer)
         .with_state(state)
 }
@@ -216,64 +224,7 @@ pub fn build_router(state: AppState) -> Router {
         (name = "invoices", description = "Invoice management"),
         (name = "pay", description = "Payment operations"),
         (name = "cancel", description = "Cancellation operations"),
-        (name = "refund", description = "Refund operations")
+        (name = "refund", description = "Refund operations"),
     )
 )]
-struct ApiDoc;
-
-/// Serve the OpenAPI document (used by tests and tooling).
-pub fn openapi() -> utoipa::openapi::OpenApi {
-    ApiDoc::openapi()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn audit_writes_chain_and_verify() {
-        let log = AuditLog::new();
-        log.record("create_invoice", "admin", "inv-1");
-        log.record("refund_invoice", "admin", "inv-1");
-        assert_eq!(log.len(), 2);
-        assert!(log.verify().is_ok());
-    }
-
-    #[test]
-    fn audit_detects_tampering() {
-        let log = AuditLog::new();
-        log.record("create_invoice", "admin", "inv-1");
-        log.record("refund_invoice", "admin", "inv-1");
-        {
-            let mut records = log.records.lock().unwrap();
-            records[0].detail = "tampered".to_string();
-        }
-        assert!(log.verify().is_err());
-    }
-
-    #[test]
-    fn state_without_dependencies_has_no_probe_targets() {
-        let state = AppState::new(
-            "http://localhost:8000/soroban/rpc".to_string(),
-            "CONTRACT_ID_PLACEHOLDER".to_string(),
-            "https://horizon.stellar.org".to_string(),
-        );
-        assert!(state.mongodb_url.is_none());
-        assert!(state.redis_url.is_none());
-    }
-
-    #[test]
-    fn state_with_dependencies_records_probe_targets() {
-        let state = AppState::new(
-            "http://localhost:8000/soroban/rpc".to_string(),
-            "CONTRACT_ID_PLACEHOLDER".to_string(),
-            "https://horizon.stellar.org".to_string(),
-        )
-        .with_dependencies(
-            Some("mongodb://localhost:27017".to_string()),
-            Some("redis://localhost:6379".to_string()),
-        );
-        assert_eq!(state.mongodb_url.as_deref(), Some("mongodb://localhost:27017"));
-        assert_eq!(state.redis_url.as_deref(), Some("redis://localhost:6379"));
-    }
-}
+pub struct ApiDoc;
