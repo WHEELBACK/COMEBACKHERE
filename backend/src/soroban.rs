@@ -204,6 +204,18 @@ impl SorobanClient {
         }
 
         let result = resp.result.ok_or_else(|| anyhow!("Empty RPC result"))?;
+
+        // `simulateTransaction` reports simulation-level failures (e.g. the
+        // transaction's ledger footprint has expired) inside `result.error`,
+        // not as a top-level JSON-RPC error, so `resp.error` above never sees
+        // them. Surface that message directly instead of silently falling
+        // through to `parse_invoice_result`, which would otherwise read a
+        // missing "map" field as an all-defaulted invoice.
+        if let Some(sim_error) = result.get("error").and_then(|e| e.as_str()) {
+            tracing::warn!(error = sim_error, "simulateTransaction reported a simulation error");
+            return Err(anyhow!("simulation failed: {sim_error}"));
+        }
+
         let invoice = parse_invoice_result(&result, invoice_id)?;
 
         tracing::debug!(status = ?invoice.status, "get_invoice RPC call succeeded");
