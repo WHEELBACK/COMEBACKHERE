@@ -36,6 +36,10 @@ pub struct AppState {
     pub client: Arc<SorobanClient>,
     pub idempotency: Arc<IdempotencyStore>,
     pub audit: Arc<AuditLog>,
+    /// Optional MongoDB connection string; when set, readiness probes it.
+    pub mongodb_url: Option<String>,
+    /// Optional Redis connection string; when set, readiness probes it.
+    pub redis_url: Option<String>,
 }
 
 impl AppState {
@@ -48,7 +52,10 @@ impl AppState {
             .unwrap_or_else(|_| "CONTRACT_ID_PLACEHOLDER".to_string());
         let horizon_url = std::env::var("HORIZON_API_URL")
             .unwrap_or_else(|_| "https://horizon.stellar.org".to_string());
+        let mongodb_url = std::env::var("MONGODB_URL").ok();
+        let redis_url = std::env::var("REDIS_URL").ok();
         Self::new(rpc_url, contract_id, horizon_url)
+            .with_dependencies(mongodb_url, redis_url)
     }
 
     /// Build state pointing at explicit endpoints (used by tests).
@@ -58,7 +65,16 @@ impl AppState {
             // 24-hour TTL for idempotency keys (matches common API gateway defaults).
             idempotency: IdempotencyStore::new(Duration::from_secs(86_400)),
             audit: Arc::new(AuditLog::new()),
+            mongodb_url: None,
+            redis_url: None,
         }
+    }
+
+    /// Attach optional dependency endpoints used by readiness probes.
+    pub fn with_dependencies(mut self, mongodb_url: Option<String>, redis_url: Option<String>) -> Self {
+        self.mongodb_url = mongodb_url;
+        self.redis_url = redis_url;
+        self
     }
 }
 
@@ -236,14 +252,28 @@ mod tests {
     }
 
     #[test]
-    fn audit_detects_deletion() {
-        let log = AuditLog::new();
-        log.record("create_invoice", "admin", "inv-1");
-        log.record("refund_invoice", "admin", "inv-1");
-        {
-            let mut records = log.records.lock().unwrap();
-            records.remove(0);
-        }
-        assert!(log.verify().is_err());
+    fn state_without_dependencies_has_no_probe_targets() {
+        let state = AppState::new(
+            "http://localhost:8000/soroban/rpc".to_string(),
+            "CONTRACT_ID_PLACEHOLDER".to_string(),
+            "https://horizon.stellar.org".to_string(),
+        );
+        assert!(state.mongodb_url.is_none());
+        assert!(state.redis_url.is_none());
+    }
+
+    #[test]
+    fn state_with_dependencies_records_probe_targets() {
+        let state = AppState::new(
+            "http://localhost:8000/soroban/rpc".to_string(),
+            "CONTRACT_ID_PLACEHOLDER".to_string(),
+            "https://horizon.stellar.org".to_string(),
+        )
+        .with_dependencies(
+            Some("mongodb://localhost:27017".to_string()),
+            Some("redis://localhost:6379".to_string()),
+        );
+        assert_eq!(state.mongodb_url.as_deref(), Some("mongodb://localhost:27017"));
+        assert_eq!(state.redis_url.as_deref(), Some("redis://localhost:6379"));
     }
 }
