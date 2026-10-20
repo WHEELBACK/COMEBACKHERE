@@ -34,6 +34,17 @@ async fn main() {
         state.run_indexer_backfill(from, to);
     }
 
+    // Reconciliation path against ledger checkpoints (issue #969).
+    //
+    // Setting `RECONCILE_ON_STARTUP=1` runs a one-shot reconciliation that
+    // compares backend indexed records against on-chain ledger checkpoint
+    // state, reports discrepancies, and safely updates or flags affected
+    // records without destructive data loss.
+    if std::env::var("RECONCILE_ON_STARTUP").as_deref() == Ok("1") {
+        tracing::info!("reconciliation against ledger checkpoints requested");
+        state.run_reconciliation();
+    }
+
     let app = build_router(state);
 
     let addr = "0.0.0.0:3001";

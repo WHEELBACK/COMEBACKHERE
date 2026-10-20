@@ -10,6 +10,7 @@ pub mod handlers_readiness;
 pub mod idempotency;
 pub mod indexer_backfill;
 pub mod rate_limiter;
+pub mod reconciliation;
 pub mod routes;
 pub mod soroban;
 pub mod types;
@@ -26,6 +27,7 @@ use routes::{
     health::get_rpc_health,
     invoices::{create_invoice, get_invoice},
     pay::pay_invoice,
+    reconciliation::run_reconciliation,
     refund::refund_invoice,
 };
 use handlers_readiness::readiness_probe;
@@ -80,6 +82,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/invoices/:id/pay", axum::routing::post(pay_invoice))
         .route("/invoices/:id/cancel", axum::routing::post(cancel_invoice))
         .route("/invoices/:id/refund", axum::routing::post(refund_invoice))
+        .route("/admin/reconcile", axum::routing::post(run_reconciliation))
         .layer(rl_layer)
         .with_state(state)
 }
@@ -98,13 +101,15 @@ pub fn build_router(state: AppState) -> Router {
         routes::pay::pay_invoice,
         routes::cancel::cancel_invoice,
         routes::refund::refund_invoice,
+        routes::reconciliation::run_reconciliation,
     ),
     tags(
         (name = "health", description = "Health check endpoints"),
         (name = "invoices", description = "Invoice management"),
         (name = "pay", description = "Payment operations"),
         (name = "cancel", description = "Cancellation operations"),
-        (name = "refund", description = "Refund operations")
+        (name = "refund", description = "Refund operations"),
+        (name = "admin", description = "Administrative operations")
     )
 )]
 struct ApiDoc;
