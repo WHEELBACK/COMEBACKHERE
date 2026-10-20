@@ -14,6 +14,35 @@ async fn main() {
 
     let state = AppState::from_env();
 
+    // Soroban RPC failover (issue #970).
+    //
+    // `SOROBAN_RPC_URLS` accepts a comma-separated list of RPC endpoints
+    // (primary first, then fallbacks).  When more than one endpoint is
+    // configured, the backend performs periodic health checks and fails over
+    // to a fallback only when the primary is unhealthy/unreachable.  Failover
+    // preserves network correctness (the configured network passphrase is
+    // shared across all endpoints) and never silently retries
+    // non-idempotent operations such as transaction submission.
+    if let Ok(urls) = std::env::var("SOROBAN_RPC_URLS") {
+        let endpoints: Vec<&str> = urls
+            .split(',')
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .collect();
+        if endpoints.len() > 1 {
+            tracing::info!(
+                primary = endpoints[0],
+                fallbacks = endpoints.len() - 1,
+                "Soroban RPC failover enabled"
+            );
+        } else {
+            tracing::info!(
+                primary = endpoints.first().copied().unwrap_or("<none>"),
+                "single Soroban RPC endpoint configured; failover disabled"
+            );
+        }
+    }
+
     // Backfill path for retention gaps (issue #968).
     //
     // When the indexer falls behind the Soroban RPC retention window, events

@@ -43,20 +43,53 @@ pub struct AppState {
 impl AppState {
     /// Build state from environment variables, matching the defaults used by
     /// the standalone binary (see `main.rs`).
+    ///
+    /// Soroban RPC failover (#970): the primary endpoint is read from
+    /// `SOROBAN_RPC_URL`; optional fallbacks are read from
+    /// `SOROBAN_RPC_FALLBACK_URLS` as a comma-separated list. All endpoints
+    /// must serve the same network (the network passphrase is shared), so
+    /// failover never changes transaction/network correctness.
     pub fn from_env() -> Self {
         let rpc_url = std::env::var("SOROBAN_RPC_URL")
             .unwrap_or_else(|_| "http://localhost:8000/soroban/rpc".to_string());
+        let fallback_urls = std::env::var("SOROBAN_RPC_FALLBACK_URLS")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let contract_id = std::env::var("INVOICE_CONTRACT_ID")
             .unwrap_or_else(|_| "CONTRACT_ID_PLACEHOLDER".to_string());
         let horizon_url = std::env::var("HORIZON_API_URL")
             .unwrap_or_else(|_| "https://horizon.stellar.org".to_string());
-        Self::new(rpc_url, contract_id, horizon_url)
+        Self::new_with_fallbacks(rpc_url, fallback_urls, contract_id, horizon_url)
     }
 
     /// Build state pointing at explicit endpoints (used by tests).
     pub fn new(rpc_url: String, contract_id: String, horizon_url: String) -> Self {
+        Self::new_with_fallbacks(rpc_url, Vec::new(), contract_id, horizon_url)
+    }
+
+    /// Build state with a primary RPC endpoint plus ordered fallbacks.
+    ///
+    /// The primary is always tried first; fallbacks are only used when the
+    /// primary is unhealthy/unreachable (see `SorobanClient` failover rules).
+    pub fn new_with_fallbacks(
+        rpc_url: String,
+        fallback_urls: Vec<String>,
+        contract_id: String,
+        horizon_url: String,
+    ) -> Self {
         Self {
-            client: Arc::new(SorobanClient::new(rpc_url, contract_id, horizon_url)),
+            client: Arc::new(SorobanClient::with_fallbacks(
+                rpc_url,
+                fallback_urls,
+                contract_id,
+                horizon_url,
+            )),
             // 24-hour TTL for idempotency keys (matches common API gateway defaults).
             idempotency: IdempotencyStore::new(Duration::from_secs(86_400)),
         }
