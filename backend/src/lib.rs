@@ -12,6 +12,7 @@ pub mod rate_limiter;
 pub mod routes;
 pub mod soroban;
 pub mod types;
+pub mod webhooks;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,12 +30,15 @@ use routes::{
 };
 use handlers_readiness::readiness_probe;
 use soroban::SorobanClient;
+use webhooks::{RetryConfig, WebhookDispatcher};
 
 /// Shared application state threaded through every route handler.
 #[derive(Clone)]
 pub struct AppState {
     pub client: Arc<SorobanClient>,
     pub idempotency: Arc<IdempotencyStore>,
+    /// Retry/dead-letter dispatcher used for every production webhook event.
+    pub webhooks: Arc<WebhookDispatcher>,
 }
 
 impl AppState {
@@ -56,6 +60,9 @@ impl AppState {
             client: Arc::new(SorobanClient::new(rpc_url, contract_id, horizon_url)),
             // 24-hour TTL for idempotency keys (matches common API gateway defaults).
             idempotency: IdempotencyStore::new(Duration::from_secs(86_400)),
+            // Production webhook events flow through the retry + dead-letter
+            // queue rather than a single best-effort attempt.
+            webhooks: Arc::new(WebhookDispatcher::new(RetryConfig::from_env())),
         }
     }
 }
