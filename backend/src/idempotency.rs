@@ -78,6 +78,34 @@ impl IdempotencyStore {
         );
     }
 
+    /// Atomically claim a key for processing.
+    ///
+    /// Returns `true` if the caller now owns the key and should process the
+    /// delivery, or `false` if the key is already present (a duplicate or a
+    /// retried delivery) and the caller should skip processing. This is the
+    /// primitive webhook receivers use to dedupe by delivery/event id so that
+    /// retries do not double-process a payload.
+    pub fn try_claim(&self, key: String) -> bool {
+        // Evict a stale entry first so an expired key can be reclaimed.
+        if let Some(entry) = self.inner.get(&key) {
+            if entry.recorded_at.elapsed() >= self.ttl {
+                drop(entry);
+                self.inner.remove(&key);
+            }
+        }
+        self.inner
+            .entry(key)
+            .or_insert_with(|| CachedResponse {
+                status: 0,
+                body: serde_json::Value::Null,
+                recorded_at: Instant::now(),
+            })
+            .recorded_at
+            .elapsed()
+            < self.ttl
+            && self.inner.get(&key).map(|e| e.status == 0).unwrap_or(false)
+    }
+
     /// Remove every entry whose TTL has elapsed. Called both lazily on lookup
     /// (via [`Self::get`]) and periodically by the background sweeper so that
     /// entries are evicted even when they are never looked up again.
@@ -148,5 +176,45 @@ mod tests {
         }
         store.purge_expired();
         assert_eq!(store.inner.len(), 0);
+    }
+
+    /// A first delivery claims the key; a retried delivery is rejected.
+    #[tokio::test]
+    async fn test_try_claim_dedupes_retried_delivery() {
+        let store = IdempotencyStore::new_with_sweep_interval(
+            Duration::from_secs(60),
+            Duration::from_secs(3600),
+        );
+        let key = IdempotencyStore::make_key("webhook", 0, "evt_123");
+
+        assert!(store.try_claim(key.clone()), "first delivery should be claimed");
+        assert!(!store.try_claim(key.clone()), "retried delivery must be deduped");
+        assert!(!store.try_claim(key), "further retries must also be deduped");
+    }
+
+    /// Distinct delivery ids are each claimed exactly once.
+    #[tokio::test]
+    async fn test_try_claim_distinct_ids() {
+        let store = IdempotencyStore::new_with_sweep_interval(
+            Duration::from_secs(60),
+            Duration::from_secs(3600),
+        );
+        assert!(store.try_claim(IdempotencyStore::make_key("webhook", 0, "evt_a")));
+        assert!(store.try_claim(IdempotencyStore::make_key("webhook", 0, "evt_b")));
+    }
+
+    /// An expired claim can be reclaimed, so a late retry after TTL is processed.
+    #[tokio::test]
+    async fn test_try_claim_reclaims_after_ttl() {
+        let ttl = Duration::from_millis(20);
+        let store = IdempotencyStore::new_with_sweep_interval(ttl, Duration::from_secs(3600));
+        let key = IdempotencyStore::make_key("webhook", 0, "evt_exp");
+
+        assert!(store.try_claim(key.clone()));
+        {
+            let mut entry = store.inner.get_mut(&key).unwrap();
+            entry.recorded_at = Instant::now() - ttl - Duration::from_millis(10);
+        }
+        assert!(store.try_claim(key), "expired claim should be reclaimable");
     }
 }
