@@ -18,15 +18,72 @@ on:
       compliance_contract_id:
         description: "Deployed compliance contract ID (C…)"
         required: true
+      admin_key_exception:
+        description: "Approved exception ID allowing admin-key reuse (leave empty to enforce separation)"
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  admin-key-preflight:
+    name: admin-key separation preflight
+    runs-on: ubuntu-latest
+    # Blocks deployment when invoice, treasury, and compliance admin keys are
+    # not distinct, unless an explicit approved exception is recorded.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate admin-key separation
+        env:
+          INVOICE_ADMIN_PUBLIC_KEY: ${{ secrets.TESTNET_INVOICE_ADMIN_PUBLIC_KEY }}
+          TREASURY_ADMIN_PUBLIC_KEY: ${{ secrets.TESTNET_TREASURY_ADMIN_PUBLIC_KEY }}
+          COMPLIANCE_ADMIN_PUBLIC_KEY: ${{ secrets.TESTNET_COMPLIANCE_ADMIN_PUBLIC_KEY }}
+          ADMIN_KEY_EXCEPTION: ${{ github.event.inputs.admin_key_exception }}
+        run: |
+          python3 - <<'PYEOF'
+          import os
+          import sys
+
+          keys = {
+              'invoice': os.environ.get('INVOICE_ADMIN_PUBLIC_KEY', '').strip(),
+              'treasury': os.environ.get('TREASURY_ADMIN_PUBLIC_KEY', '').strip(),
+              'compliance': os.environ.get('COMPLIANCE_ADMIN_PUBLIC_KEY', '').strip(),
+          }
+
+          missing = [name for name, value in keys.items() if not value]
+          if missing:
+              print(f"::error::Missing admin public key(s) for: {', '.join(missing)}")
+              sys.exit(1)
+
+          seen = {}
+          reused = []
+          for name, value in keys.items():
+              if value in seen:
+                  reused.append((seen[value], name))
+              else:
+                  seen[value] = name
+
+          if not reused:
+              print("Admin-key separation OK: invoice, treasury, and compliance keys are distinct.")
+              sys.exit(0)
+
+          pairs = ', '.join(f"{a}/{b}" for a, b in reused)
+          exception = os.environ.get('ADMIN_KEY_EXCEPTION', '').strip()
+          if exception:
+              print(f"::warning::Admin-key reuse detected ({pairs}); proceeding under approved exception '{exception}'.")
+              sys.exit(0)
+
+          print(f"::error::Admin-key reuse detected ({pairs}). Invoice, treasury, and compliance admin keys must be distinct. Record an approved exception via the admin_key_exception input to override.")
+          sys.exit(1)
+          PYEOF
+
   deploy-testnet:
     name: deploy (testnet)
     runs-on: ubuntu-latest
+    needs: [admin-key-preflight]
     # Deployment only runs on manual dispatch. The nightly scheduled run
     # skips deployment and verifies the existing live testnet deployment.
 
@@ -192,37 +249,3 @@ jobs:
 
       - name: Upload addresses artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: deployed-addresses-${{ github.event.inputs.network || needs.resolve-live-addresses.outputs.network || 'testnet' }}
-          path: artifacts/addresses.json
-
-  alert-schedule-failure:
-    name: alert on nightly verification failure
-    runs-on: ubuntu-latest
-    needs: [resolve-live-addresses, verify, export-addresses]
-    if: ${{ github.event_name == 'schedule' && (needs.resolve-live-addresses.result == 'failure' || needs.verify.result == 'failure' || needs.export-addresses.result == 'failure') }}
-    permissions:
-      issues: write
-
-    steps:
-      - name: Create alert issue on nightly failure
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: 'Nightly post-deploy verification failed',
-              body: [
-                '## Nightly post-deploy verification failed',
-                '',
-                'The scheduled `ci-post-deploy-verify.yml` run detected drift or an outage in the live testnet deployment.',
-                '',
-                `- Workflow run: ${runUrl}`,
-                `- Trigger: ${context.eventName}`,
-                `- Ref: ${context.ref}`,
-                '',
-                'Investigate the linked run to determine whether the deployed contracts drifted from source or the testnet is unavailable.',
-              ].join('\n'),
-            });

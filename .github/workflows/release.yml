@@ -9,7 +9,67 @@ permissions:
   contents: write
 
 jobs:
+  admin-key-separation-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.1.1
+        with:
+          fetch-depth: 0
+
+      - name: Validate contract admin-key separation
+        env:
+          INVOICE_ADMIN_KEY: ${{ secrets.INVOICE_ADMIN_KEY }}
+          TREASURY_ADMIN_KEY: ${{ secrets.TREASURY_ADMIN_KEY }}
+          COMPLIANCE_ADMIN_KEY: ${{ secrets.COMPLIANCE_ADMIN_KEY }}
+          ADMIN_KEY_SEPARATION_EXCEPTION: ${{ vars.ADMIN_KEY_SEPARATION_EXCEPTION }}
+        run: |
+          set -euo pipefail
+
+          # Documented separation: invoice, treasury, and compliance admin keys
+          # must be distinct. Reuse is blocked unless an explicit, recorded
+          # exception is approved via the ADMIN_KEY_SEPARATION_EXCEPTION variable.
+          missing=0
+          for name in INVOICE_ADMIN_KEY TREASURY_ADMIN_KEY COMPLIANCE_ADMIN_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required secret ${name}"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Admin-key separation preflight failed: required admin keys are not configured."
+            exit 1
+          fi
+
+          reuse=0
+          if [ "$INVOICE_ADMIN_KEY" = "$TREASURY_ADMIN_KEY" ]; then
+            echo "::error::invoice and treasury admin keys are identical"
+            reuse=1
+          fi
+          if [ "$INVOICE_ADMIN_KEY" = "$COMPLIANCE_ADMIN_KEY" ]; then
+            echo "::error::invoice and compliance admin keys are identical"
+            reuse=1
+          fi
+          if [ "$TREASURY_ADMIN_KEY" = "$COMPLIANCE_ADMIN_KEY" ]; then
+            echo "::error::treasury and compliance admin keys are identical"
+            reuse=1
+          fi
+
+          if [ "$reuse" -ne 0 ]; then
+            if [ -n "${ADMIN_KEY_SEPARATION_EXCEPTION:-}" ]; then
+              echo "::warning::Admin-key separation exception recorded: ${ADMIN_KEY_SEPARATION_EXCEPTION}"
+              echo "Proceeding despite key reuse due to approved exception."
+              exit 0
+            fi
+            echo "Admin-key separation preflight failed: admin keys must be distinct."
+            echo "Record an approved exception in the ADMIN_KEY_SEPARATION_EXCEPTION repository variable to override."
+            exit 1
+          fi
+
+          echo "Admin-key separation preflight passed: invoice, treasury, and compliance admin keys are distinct."
+
   release:
+    needs: admin-key-separation-preflight
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
