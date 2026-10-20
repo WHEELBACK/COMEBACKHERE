@@ -9,6 +9,43 @@ use crate::extractors::ValidatedBody;
 use crate::AppState;
 use crate::types::{CreateInvoiceRequest, ErrorResponse};
 
+/// Lifecycle events emitted for invoices. Merchants subscribe to these via
+/// their configured webhook endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceEvent {
+    Created,
+    Paid,
+    Cancelled,
+    Refunded,
+    Expired,
+}
+
+impl InvoiceEvent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InvoiceEvent::Created => "invoice.created",
+            InvoiceEvent::Paid => "invoice.paid",
+            InvoiceEvent::Cancelled => "invoice.cancelled",
+            InvoiceEvent::Refunded => "invoice.refunded",
+            InvoiceEvent::Expired => "invoice.expired",
+        }
+    }
+}
+
+/// Build the webhook payload for an invoice lifecycle event. The payload
+/// schema is stable across events: `event`, `invoice_id`, `data`.
+pub fn invoice_event_payload(
+    event: InvoiceEvent,
+    invoice_id: u64,
+    data: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "event": event.as_str(),
+        "invoice_id": invoice_id,
+        "data": data,
+    })
+}
+
 #[utoipa::path(
     post,
     path = "/invoices",
@@ -28,7 +65,19 @@ pub async fn create_invoice(
     // The merchant, token, amounts and expiry are carried by the pre-signed
     // transaction; the backend just forwards it to Soroban.
     match state.client.create_invoice(&body.signed_xdr).await {
-        Ok(resp) => (StatusCode::CREATED, Json(serde_json::json!(resp))).into_response(),
+        Ok(resp) => {
+            let invoice_id = resp.id;
+            let payload = invoice_event_payload(
+                InvoiceEvent::Created,
+                invoice_id,
+                serde_json::json!(resp),
+            );
+            state
+                .client
+                .emit_webhook_event(InvoiceEvent::Created.as_str(), payload)
+                .await;
+            (StatusCode::CREATED, Json(serde_json::json!(resp))).into_response()
+        }
         Err(e) if e.to_string().contains("UNAUTHORIZED") => (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {

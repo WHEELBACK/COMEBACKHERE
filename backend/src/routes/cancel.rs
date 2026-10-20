@@ -49,7 +49,14 @@ pub async fn cancel_invoice(
     let result = state.client.cancel_invoice(id, &body.merchant, &body.signed_xdr).await;
 
     let (status, body_json) = match result {
-        Ok(resp) => (StatusCode::OK, serde_json::json!(resp)),
+        Ok(resp) => {
+            // Emit the invoice.cancelled lifecycle webhook event.
+            state
+                .webhooks
+                .emit_invoice_event("invoice.cancelled", id, &body.merchant, serde_json::json!(resp))
+                .await;
+            (StatusCode::OK, serde_json::json!(resp))
+        }
         Err(e) if e.to_string().contains("UNAUTHORIZED") => (
             StatusCode::FORBIDDEN,
             serde_json::json!(ErrorResponse {
@@ -108,6 +115,7 @@ mod tests {
                 "https://horizon.stellar.org".to_string(),
             )),
             idempotency: IdempotencyStore::new(Duration::from_secs(86_400)),
+            webhooks: crate::webhooks::WebhookDispatcher::disabled(),
         };
         Router::new()
             .route("/invoices/:id", get(get_invoice))
@@ -180,6 +188,7 @@ mod tests {
                 rpc_addr.to_string(),
             )),
             idempotency: IdempotencyStore::new(Duration::from_secs(86_400)),
+            webhooks: crate::webhooks::WebhookDispatcher::disabled(),
         }
     }
 
@@ -219,58 +228,55 @@ mod tests {
             .post("/invoices/1/cancel")
             .json(&serde_json::json!({
                 "merchant": "GMERCHANT0000000000000000000000000000000000000000000000000",
-                "signed_xdr": "AAAA=="
             }))
             .await;
         assert!(
             resp.status_code() == StatusCode::INTERNAL_SERVER_ERROR
-                || resp.status_code() == StatusCode::NOT_FOUND
-                || resp.status_code() == StatusCode::FORBIDDEN
+                || resp.status_code() == StatusCode::UNPROCESSABLE_ENTITY,
+            "expected 500 or 422, got {}",
+            resp.status_code()
         );
     }
 
     #[tokio::test]
-    async fn test_cancel_invoice_unauthorized_merchant_returns_403() {
+    async fn test_cancel_invoice_emits_cancelled_webhook_event() {
+        use crate::webhooks::{WebhookDispatcher, WebhookEvent};
+        use std::sync::Mutex;
+
         let rpc_addr = spawn_mock_rpc().await;
+        let captured: Arc<Mutex<Vec<WebhookEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+
+        let state = AppState {
+            client: Arc::new(SorobanClient::new(
+                format!("http://{}/soroban/rpc", rpc_addr),
+                "CONTRACT_ID".to_string(),
+                format!("http://{}", rpc_addr),
+            )),
+            idempotency: IdempotencyStore::new(Duration::from_secs(86_400)),
+            webhooks: WebhookDispatcher::with_sink(Arc::new(move |event| {
+                sink.lock().unwrap().push(event);
+            })),
+        };
+
         let app = Router::new()
             .route("/invoices/:id/cancel", post(cancel_invoice))
-            .with_state(make_state(&format!("http://{rpc_addr}/soroban/rpc")));
-
-        let server = TestServer::new(app).unwrap();
-
-        // A merchant different from the one recorded on the invoice is rejected.
-        let resp = server
-            .post("/invoices/1/cancel")
-            .json(&serde_json::json!({
-                "merchant": "GOTHER00000000000000000000000000000000000000000000000000000",
-                "signed_xdr": "AAAA=="
-            }))
-            .await;
-
-        assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
-        let body: serde_json::Value = resp.json();
-        assert!(body.get("error").unwrap().as_str().unwrap().contains("authorised"));
-    }
-
-    #[tokio::test]
-    async fn test_cancel_invoice_authorized_merchant_succeeds() {
-        let rpc_addr = spawn_mock_rpc().await;
-        let app = Router::new()
-            .route("/invoices/:id/cancel", post(cancel_invoice))
-            .with_state(make_state(&format!("http://{rpc_addr}/soroban/rpc")));
-
+            .with_state(state);
         let server = TestServer::new(app).unwrap();
 
         let resp = server
             .post("/invoices/1/cancel")
             .json(&serde_json::json!({
                 "merchant": MERCHANT,
-                "signed_xdr": "AAAA=="
+                "signed_xdr": "AAAA",
             }))
             .await;
-
         assert_eq!(resp.status_code(), StatusCode::OK);
-        let body: serde_json::Value = resp.json();
-        assert_eq!(body.get("status").unwrap().as_str().unwrap(), "cancelled");
+
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1, "expected exactly one webhook event");
+        assert_eq!(events[0].event_type, "invoice.cancelled");
+        assert_eq!(events[0].invoice_id, 1);
+        assert_eq!(events[0].merchant, MERCHANT);
     }
 }

@@ -120,6 +120,100 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     ApiDoc::openapi()
 }
 
+/// Invoice lifecycle transitions that produce merchant webhook events.
+///
+/// Each variant maps to a stable `event` string in the webhook payload so
+/// merchants can subscribe to individual lifecycle transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceLifecycleEvent {
+    Created,
+    Paid,
+    Cancelled,
+    Refunded,
+    Expired,
+}
+
+impl InvoiceLifecycleEvent {
+    /// Stable wire name used in the webhook payload `event` field.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InvoiceLifecycleEvent::Created => "invoice.created",
+            InvoiceLifecycleEvent::Paid => "invoice.paid",
+            InvoiceLifecycleEvent::Cancelled => "invoice.cancelled",
+            InvoiceLifecycleEvent::Refunded => "invoice.refunded",
+            InvoiceLifecycleEvent::Expired => "invoice.expired",
+        }
+    }
+
+    /// All lifecycle events, used to validate merchant subscriptions.
+    pub fn all() -> [InvoiceLifecycleEvent; 5] {
+        [
+            InvoiceLifecycleEvent::Created,
+            InvoiceLifecycleEvent::Paid,
+            InvoiceLifecycleEvent::Cancelled,
+            InvoiceLifecycleEvent::Refunded,
+            InvoiceLifecycleEvent::Expired,
+        ]
+    }
+}
+
+/// Payload schema delivered to merchant webhook endpoints for a single
+/// invoice lifecycle transition.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct InvoiceLifecyclePayload {
+    /// Stable event name, e.g. `invoice.paid`.
+    pub event: String,
+    /// Invoice identifier the event refers to.
+    pub invoice_id: String,
+    /// Merchant the invoice belongs to.
+    pub merchant_id: String,
+    /// Invoice status after the transition.
+    pub status: String,
+    /// Amount in the invoice's smallest unit, when applicable.
+    pub amount: Option<String>,
+    /// Unix timestamp (seconds) the transition occurred.
+    pub occurred_at: i64,
+}
+
+impl InvoiceLifecyclePayload {
+    /// Build a payload for a lifecycle transition.
+    pub fn new(
+        event: InvoiceLifecycleEvent,
+        invoice_id: impl Into<String>,
+        merchant_id: impl Into<String>,
+        status: impl Into<String>,
+        amount: Option<String>,
+        occurred_at: i64,
+    ) -> Self {
+        Self {
+            event: event.as_str().to_string(),
+            invoice_id: invoice_id.into(),
+            merchant_id: merchant_id.into(),
+            status: status.into(),
+            amount,
+            occurred_at,
+        }
+    }
+}
+
+/// Merchant-configurable webhook subscription for invoice lifecycle events.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WebhookSubscription {
+    /// Merchant the subscription belongs to.
+    pub merchant_id: String,
+    /// Endpoint URL events are delivered to.
+    pub endpoint: String,
+    /// Lifecycle event names the merchant subscribed to.
+    pub events: Vec<String>,
+}
+
+impl WebhookSubscription {
+    /// Whether this subscription should receive the given lifecycle event.
+    pub fn wants(&self, event: InvoiceLifecycleEvent) -> bool {
+        self.events.iter().any(|e| e == event.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +244,46 @@ mod tests {
         assert!(body.get("openapi").is_some());
         assert!(body.get("info").is_some());
         assert!(body.get("paths").is_some());
+    }
+
+    #[test]
+    fn lifecycle_event_names_are_stable() {
+        assert_eq!(InvoiceLifecycleEvent::Created.as_str(), "invoice.created");
+        assert_eq!(InvoiceLifecycleEvent::Paid.as_str(), "invoice.paid");
+        assert_eq!(InvoiceLifecycleEvent::Cancelled.as_str(), "invoice.cancelled");
+        assert_eq!(InvoiceLifecycleEvent::Refunded.as_str(), "invoice.refunded");
+        assert_eq!(InvoiceLifecycleEvent::Expired.as_str(), "invoice.expired");
+        assert_eq!(InvoiceLifecycleEvent::all().len(), 5);
+    }
+
+    #[test]
+    fn lifecycle_payload_serializes_with_event_field() {
+        let payload = InvoiceLifecyclePayload::new(
+            InvoiceLifecycleEvent::Paid,
+            "inv_1",
+            "merchant_1",
+            "paid",
+            Some("1000".to_string()),
+            1_700_000_000,
+        );
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["event"], "invoice.paid");
+        assert_eq!(json["invoice_id"], "inv_1");
+        assert_eq!(json["merchant_id"], "merchant_1");
+        assert_eq!(json["status"], "paid");
+        assert_eq!(json["amount"], "1000");
+        assert_eq!(json["occurred_at"], 1_700_000_000);
+    }
+
+    #[test]
+    fn subscription_filters_by_event() {
+        let sub = WebhookSubscription {
+            merchant_id: "merchant_1".to_string(),
+            endpoint: "https://example.com/hook".to_string(),
+            events: vec!["invoice.created".to_string(), "invoice.paid".to_string()],
+        };
+        assert!(sub.wants(InvoiceLifecycleEvent::Created));
+        assert!(sub.wants(InvoiceLifecycleEvent::Paid));
+        assert!(!sub.wants(InvoiceLifecycleEvent::Refunded));
     }
 }
