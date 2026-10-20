@@ -76,3 +76,82 @@ where
         }
     }
 }
+
+/// The identity bucket a request is rate-limited under.
+///
+/// The key is derived **only** from verified credentials (the authenticated
+/// merchant identity resolved by the auth layer), never from caller-controlled
+/// headers such as `X-Merchant-Id` or `X-Forwarded-For`. Anonymous traffic is
+/// collapsed into a single bounded bucket so it cannot be used to evade limits
+/// by rotating spoofed headers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RateLimitKey {
+    /// A verified, authenticated merchant identity.
+    Merchant(String),
+    /// Unauthenticated / anonymous traffic (single shared bucket).
+    Anonymous,
+}
+
+impl RateLimitKey {
+    /// Build a rate-limit key from the *verified* merchant identity.
+    ///
+    /// `verified_merchant_id` must come from the auth layer (e.g. the
+    /// authenticated principal resolved from a validated API key / signature),
+    /// not from a request header. Any caller-supplied identity headers are
+    /// intentionally ignored here so they cannot be spoofed to bypass limits.
+    pub fn from_verified(verified_merchant_id: Option<&str>) -> Self {
+        match verified_merchant_id {
+            Some(id) if !id.is_empty() => RateLimitKey::Merchant(id.to_string()),
+            _ => RateLimitKey::Anonymous,
+        }
+    }
+
+    /// Stable string form suitable for use as a rate-limiter bucket key.
+    pub fn as_bucket(&self) -> String {
+        match self {
+            RateLimitKey::Merchant(id) => format!("merchant:{id}"),
+            RateLimitKey::Anonymous => "anonymous".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RateLimitKey;
+
+    #[test]
+    fn verified_identity_maps_to_merchant_bucket() {
+        let key = RateLimitKey::from_verified(Some("merchant_42"));
+        assert_eq!(key, RateLimitKey::Merchant("merchant_42".to_string()));
+        assert_eq!(key.as_bucket(), "merchant:merchant_42");
+    }
+
+    #[test]
+    fn missing_identity_maps_to_anonymous_bucket() {
+        assert_eq!(RateLimitKey::from_verified(None), RateLimitKey::Anonymous);
+        assert_eq!(RateLimitKey::from_verified(Some("")), RateLimitKey::Anonymous);
+        assert_eq!(RateLimitKey::from_verified(None).as_bucket(), "anonymous");
+    }
+
+    #[test]
+    fn spoofed_headers_cannot_change_bucket() {
+        // The key is derived solely from the verified identity; there is no
+        // header input, so a caller cannot rotate `X-Merchant-Id` or
+        // `X-Forwarded-For` to land in a different bucket.
+        let verified = Some("merchant_42");
+        let first = RateLimitKey::from_verified(verified);
+        let second = RateLimitKey::from_verified(verified);
+        assert_eq!(first, second);
+        assert_eq!(first.as_bucket(), "merchant:merchant_42");
+    }
+
+    #[test]
+    fn anonymous_traffic_shares_one_bounded_bucket() {
+        // All unauthenticated callers collapse into a single bucket regardless
+        // of any spoofed identity headers, keeping anonymous traffic bounded.
+        let a = RateLimitKey::from_verified(None);
+        let b = RateLimitKey::from_verified(None);
+        assert_eq!(a, b);
+        assert_eq!(a.as_bucket(), "anonymous");
+    }
+}

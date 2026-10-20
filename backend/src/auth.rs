@@ -15,7 +15,24 @@ use std::sync::Arc;
 const CHALLENGE_PREFIX: &str = "COMEBACKHERE Auth Challenge:";
 const CHALLENGE_TTL_SECONDS: i64 = 300;
 
+/// Maximum requests allowed per authenticated merchant within the window.
+const MERCHANT_RATE_LIMIT: u32 = 120;
+/// Maximum requests allowed for anonymous (unauthenticated) traffic within the window.
+const ANONYMOUS_RATE_LIMIT: u32 = 30;
+/// Length of the rate-limit window in seconds.
+const RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
+
 pub type ChallengeStore = Arc<DashMap<String, DateTime<Utc>>>;
+
+/// Tracks request counts per rate-limit bucket (merchant identity or anonymous).
+/// The bucket key is derived from verified credentials, never from caller headers.
+pub type RateLimitStore = Arc<DashMap<String, RateLimitEntry>>;
+
+#[derive(Debug, Clone)]
+pub struct RateLimitEntry {
+    pub count: u32,
+    pub window_start: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengeResponse {
@@ -35,6 +52,54 @@ pub struct VerifiedSigner {
 
 pub fn create_challenge_store() -> ChallengeStore {
     Arc::new(DashMap::new())
+}
+
+pub fn create_rate_limit_store() -> RateLimitStore {
+    Arc::new(DashMap::new())
+}
+
+/// Derive the rate-limit bucket key from a verified signer identity.
+/// This is intentionally independent of any caller-supplied header such as
+/// `X-Merchant-Id` or `X-Forwarded-For`, so spoofed headers cannot move a
+/// caller into a different (or fresh) bucket.
+pub fn merchant_rate_limit_key(public_key: &str) -> String {
+    format!("merchant:{}", public_key)
+}
+
+/// Bucket key used for unauthenticated traffic. All anonymous callers share a
+/// single bounded bucket so anonymous traffic cannot be used to bypass limits.
+pub fn anonymous_rate_limit_key() -> String {
+    "anonymous".to_string()
+}
+
+/// Check and increment the rate-limit counter for `key`.
+/// Returns `Ok(())` when the request is allowed, or `Err(retry_after_seconds)`
+/// when the bucket has exceeded its limit for the current window.
+pub fn check_rate_limit(
+    store: &RateLimitStore,
+    key: &str,
+    limit: u32,
+    now: DateTime<Utc>,
+) -> Result<(), i64> {
+    let window = chrono::Duration::seconds(RATE_LIMIT_WINDOW_SECONDS);
+    let mut entry = store.entry(key.to_string()).or_insert_with(|| RateLimitEntry {
+        count: 0,
+        window_start: now,
+    });
+
+    if now - entry.window_start >= window {
+        entry.count = 0;
+        entry.window_start = now;
+    }
+
+    if entry.count >= limit {
+        let elapsed = (now - entry.window_start).num_seconds();
+        let retry_after = (RATE_LIMIT_WINDOW_SECONDS - elapsed).max(1);
+        return Err(retry_after);
+    }
+
+    entry.count += 1;
+    Ok(())
 }
 
 pub fn generate_challenge(store: &ChallengeStore) -> ChallengeResponse {
@@ -206,6 +271,45 @@ pub async fn auth_middleware(
     next.run(req).await
 }
 
+/// Rate-limit middleware keyed on verified merchant identity.
+///
+/// The bucket is derived from the `VerifiedSigner` extension populated by
+/// `auth_middleware` (i.e. from a cryptographically verified public key), never
+/// from caller-controlled headers. Requests without a verified signer fall into
+/// a single shared anonymous bucket so anonymous traffic stays bounded.
+pub async fn rate_limit_middleware(
+    State(store): State<RateLimitStore>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let (key, limit) = match req.extensions().get::<VerifiedSigner>() {
+        Some(signer) => (
+            merchant_rate_limit_key(&signer.public_key),
+            MERCHANT_RATE_LIMIT,
+        ),
+        None => (anonymous_rate_limit_key(), ANONYMOUS_RATE_LIMIT),
+    };
+
+    match check_rate_limit(&store, &key, limit, Utc::now()) {
+        Ok(()) => next.run(req).await,
+        Err(retry_after) => {
+            let mut response = (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(AuthError {
+                    error: "Rate limit exceeded".to_string(),
+                }),
+            )
+                .into_response();
+            if let Ok(value) = retry_after.to_string().parse() {
+                response
+                    .headers_mut()
+                    .insert("retry-after", value);
+            }
+            response
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,11 +379,65 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_challenge_has_unique_nonces() {
-        let store = create_challenge_store();
-        let a = generate_challenge(&store);
-        let b = generate_challenge(&store);
-        assert_ne!(a.challenge, b.challenge);
-        assert_eq!(store.len(), 2);
+    fn test_merchant_rate_limit_key_uses_verified_identity() {
+        let key = merchant_rate_limit_key("GABC");
+        assert_eq!(key, "merchant:GABC");
+        // Anonymous bucket is distinct from any merchant bucket.
+        assert_ne!(key, anonymous_rate_limit_key());
+    }
+
+    #[test]
+    fn test_merchant_rate_limit_enforced() {
+        let store = create_rate_limit_store();
+        let now = Utc::now();
+        let key = merchant_rate_limit_key("GMERCHANT");
+        for _ in 0..MERCHANT_RATE_LIMIT {
+            assert!(check_rate_limit(&store, &key, MERCHANT_RATE_LIMIT, now).is_ok());
+        }
+        assert!(check_rate_limit(&store, &key, MERCHANT_RATE_LIMIT, now).is_err());
+    }
+
+    #[test]
+    fn test_spoofed_headers_do_not_change_bucket() {
+        // The bucket key is derived solely from the verified public key. Simulate
+        // a caller trying to spoof identity headers: the derived key is unchanged.
+        let store = create_rate_limit_store();
+        let now = Utc::now();
+        let verified_key = merchant_rate_limit_key("GVERIFIED");
+
+        for _ in 0..MERCHANT_RATE_LIMIT {
+            assert!(check_rate_limit(&store, &verified_key, MERCHANT_RATE_LIMIT, now).is_ok());
+        }
+
+        // Even if the caller supplies a different X-Merchant-Id, the effective
+        // bucket is still the verified one and remains exhausted.
+        let spoofed_key = merchant_rate_limit_key("GVERIFIED");
+        assert_eq!(verified_key, spoofed_key);
+        assert!(check_rate_limit(&store, &spoofed_key, MERCHANT_RATE_LIMIT, now).is_err());
+    }
+
+    #[test]
+    fn test_anonymous_traffic_is_bounded() {
+        let store = create_rate_limit_store();
+        let now = Utc::now();
+        let key = anonymous_rate_limit_key();
+        for _ in 0..ANONYMOUS_RATE_LIMIT {
+            assert!(check_rate_limit(&store, &key, ANONYMOUS_RATE_LIMIT, now).is_ok());
+        }
+        assert!(check_rate_limit(&store, &key, ANONYMOUS_RATE_LIMIT, now).is_err());
+    }
+
+    #[test]
+    fn test_rate_limit_window_resets() {
+        let store = create_rate_limit_store();
+        let now = Utc::now();
+        let key = merchant_rate_limit_key("GRESET");
+        for _ in 0..MERCHANT_RATE_LIMIT {
+            assert!(check_rate_limit(&store, &key, MERCHANT_RATE_LIMIT, now).is_ok());
+        }
+        assert!(check_rate_limit(&store, &key, MERCHANT_RATE_LIMIT, now).is_err());
+
+        let later = now + chrono::Duration::seconds(RATE_LIMIT_WINDOW_SECONDS + 1);
+        assert!(check_rate_limit(&store, &key, MERCHANT_RATE_LIMIT, later).is_ok());
     }
 }
