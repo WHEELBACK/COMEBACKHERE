@@ -13,6 +13,7 @@ pub mod routes;
 pub mod soroban;
 pub mod types;
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,11 +31,49 @@ use routes::{
 use handlers_readiness::readiness_probe;
 use soroban::SorobanClient;
 
+/// Explicit set of proxy peers whose `X-Forwarded-For` header is trusted.
+///
+/// Forwarded headers are only honored when the direct connection peer is one
+/// of these addresses; otherwise the header is ignored and the direct peer IP
+/// is used for client-IP and rate-limit decisions.
+#[derive(Clone, Debug, Default)]
+pub struct TrustedProxies {
+    addrs: Arc<Vec<IpAddr>>,
+}
+
+impl TrustedProxies {
+    /// Build from an explicit list of trusted proxy addresses.
+    pub fn new(addrs: Vec<IpAddr>) -> Self {
+        Self {
+            addrs: Arc::new(addrs),
+        }
+    }
+
+    /// Read the trusted proxy list from `TRUSTED_PROXIES` (comma-separated
+    /// IP addresses). Unset or empty means no proxies are trusted.
+    pub fn from_env() -> Self {
+        let raw = std::env::var("TRUSTED_PROXIES").unwrap_or_default();
+        let addrs = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<IpAddr>().ok())
+            .collect();
+        Self::new(addrs)
+    }
+
+    /// Returns `true` when `peer` is a configured trusted proxy.
+    pub fn is_trusted(&self, peer: IpAddr) -> bool {
+        self.addrs.iter().any(|addr| *addr == peer)
+    }
+}
+
 /// Shared application state threaded through every route handler.
 #[derive(Clone)]
 pub struct AppState {
     pub client: Arc<SorobanClient>,
     pub idempotency: Arc<IdempotencyStore>,
+    pub trusted_proxies: TrustedProxies,
 }
 
 impl AppState {
@@ -56,7 +95,14 @@ impl AppState {
             client: Arc::new(SorobanClient::new(rpc_url, contract_id, horizon_url)),
             // 24-hour TTL for idempotency keys (matches common API gateway defaults).
             idempotency: IdempotencyStore::new(Duration::from_secs(86_400)),
+            trusted_proxies: TrustedProxies::from_env(),
         }
+    }
+
+    /// Override the trusted proxy set (used by tests and explicit wiring).
+    pub fn with_trusted_proxies(mut self, trusted_proxies: TrustedProxies) -> Self {
+        self.trusted_proxies = trusted_proxies;
+        self
     }
 }
 
@@ -68,8 +114,10 @@ impl AppState {
 pub fn build_router(state: AppState) -> Router {
     // Rate-limiter layer: config is read from RATE_LIMIT_POINTS /
     // RATE_LIMIT_DURATION (defaults: 60 requests per 60-second window, per IP).
+    // Forwarded headers are only honored for peers in `state.trusted_proxies`.
     let rl_config = RateLimitConfig::from_env();
-    let rl_layer = RateLimiterLayer::new(new_store(), rl_config);
+    let rl_layer = RateLimiterLayer::new(new_store(), rl_config)
+        .with_trusted_proxies(state.trusted_proxies.clone());
 
     Router::new()
         .route("/health/rpc", axum::routing::get(get_rpc_health))
@@ -143,5 +191,18 @@ mod tests {
         assert!(body.get("openapi").is_some());
         assert!(body.get("info").is_some());
         assert!(body.get("paths").is_some());
+    }
+
+    #[test]
+    fn trusted_proxies_honor_configured_peer() {
+        let trusted = TrustedProxies::new(vec!["10.0.0.1".parse().unwrap()]);
+        assert!(trusted.is_trusted("10.0.0.1".parse().unwrap()));
+        assert!(!trusted.is_trusted("10.0.0.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxies_default_to_none() {
+        let trusted = TrustedProxies::default();
+        assert!(!trusted.is_trusted("127.0.0.1".parse().unwrap()));
     }
 }
