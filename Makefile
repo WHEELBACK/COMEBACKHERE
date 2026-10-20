@@ -1,5 +1,5 @@
 .PHONY: update-abi-snapshots check-abi-snapshots dev test lint deploy-testnet abi-snapshot \
-        smoke smoke-up check-docs-sync
+        smoke smoke-up check-docs-sync walkthrough
 
 # Regenerate committed ABI metadata under abis/ (deterministic; LC_ALL=C).
 # Assumes COMEBACKHERE-contracts/ is a sibling directory.
@@ -26,6 +26,11 @@ smoke-up:
 check-docs-sync:
 	@./scripts/check_webhook_docs_sync.sh
 	@./scripts/check_ratelimit_docs_sync.sh
+
+# Seeded local testnet merchant walkthrough: seeds a merchant + invoice,
+# pays it, and verifies on-chain and backend state. Run from a clean env.
+walkthrough:
+	@./scripts/testnet_walkthrough.sh
 
 test:
 	cargo test --manifest-path COMEBACKHERE-contracts/Cargo.toml

@@ -146,6 +146,110 @@ contracts, paying with USDC, and executing a settlement), see
 
 ---
 
+## Seeded Local Testnet Merchant Walkthrough
+
+This walkthrough seeds a repeatable merchant scenario (merchant, invoice, and
+settlement) against a local testnet so a clean environment can verify both the
+on-chain and backend state end to end.
+
+### Prerequisites
+
+* Docker and Docker Compose
+* Node.js 20+ and `npm`
+* A clean checkout (no prior local state)
+
+### 1. Start a clean stack
+
+```bash
+# Tear down any previous state so the walkthrough is repeatable.
+docker compose down -v
+
+# Bring up the local testnet, backend, and dependencies.
+docker compose up -d
+```
+
+Wait for the backend health check to pass:
+
+```bash
+curl -fsS http://localhost:3000/health
+```
+
+### 2. Seed the merchant scenario
+
+The seed script provisions a deterministic merchant, funds its account, and
+creates a known invoice. It is idempotent — re-running it resets the scenario
+to the same known state.
+
+```bash
+npm run seed:testnet
+```
+
+This writes the seeded identifiers to `.env.testnet` (merchant API key,
+`MERCHANT_ID`, `INVOICE_ID`, and contract IDs). Source it for the steps below:
+
+```bash
+set -a && . ./.env.testnet && set +a
+```
+
+### 3. Create and pay the invoice
+
+```bash
+# Create the invoice (or reuse the seeded INVOICE_ID).
+curl -X POST http://localhost:3000/invoices \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MERCHANT_API_KEY" \
+  -d '{"token":"USDC","amount":1000000,"due_date":1720000000}'
+
+# Pay the invoice from the seeded payer account.
+curl -X POST http://localhost:3000/invoices/$INVOICE_ID/pay \
+  -H "Authorization: Bearer $MERCHANT_API_KEY"
+```
+
+### 4. Observe settlement
+
+```bash
+curl -fsS http://localhost:3000/invoices/$INVOICE_ID \
+  -H "Authorization: Bearer $MERCHANT_API_KEY"
+```
+
+Expect `status: "settled"` and a populated `settlement_tx_hash`.
+
+### 5. Verify expected state
+
+**Backend state (API/DB):**
+
+```bash
+# Invoice is settled and linked to the seeded merchant.
+curl -fsS http://localhost:3000/invoices/$INVOICE_ID \
+  -H "Authorization: Bearer $MERCHANT_API_KEY" | jq '.status, .merchant_id'
+
+# Confirm the settlement record exists in MongoDB.
+docker compose exec mongo mongosh --quiet --eval \
+  'db.settlements.findOne({invoice_id: "'"$INVOICE_ID"'"})'
+```
+
+**On-chain state (contract/ledger):**
+
+```bash
+# Confirm the invoice is marked paid on the invoice contract.
+stellar contract invoke \
+  --id "$INVOICE_CONTRACT_ID" \
+  --network local \
+  -- get_invoice --invoice_id "$INVOICE_ID"
+
+# Confirm the treasury released funds to the merchant.
+stellar contract invoke \
+  --id "$TREASURY_CONTRACT_ID" \
+  --network local \
+  -- balance --account "$MERCHANT_ID"
+```
+
+A successful walkthrough shows the invoice `paid` on-chain, the merchant
+treasury balance increased by the invoice amount, and a matching settlement
+record in the backend.
+
+---
+
 ## Architecture
 
 The diagram below illustrates the primary payment flow through the COMEBACKHERE Protocol.
@@ -246,44 +350,4 @@ Before starting the stack, ensure your local `.env` (or service-specific `.env` 
 | --- | --- | --- | --- |
 | `VITE_API_URL` | Yes | `http://localhost:3000` | Backend API base URL |
 | `VITE_SOROBAN_RPC` | Yes | `http://localhost:8000/soroban/rpc` | Soroban RPC endpoint for wallet interactions |
-| `VITE_HORIZON_URL` | No | `http://localhost:8000` | Horizon API URL |
-| `VITE_NETWORK_PASSPHRASE` | No | `Standalone Network ; February 2025` | Stellar network passphrase |
-
----
-
-## Start the Development Environment
-
-Launch all required services:
-
-```bash
-docker-compose up -d
-```
-
-This starts the following services:
-
-| Service | Description | Default Port | Health Check |
-| --- | --- | --- | --- |
-| `soroban` | Stellar Quickstart standalone node + RPC + Horizon | `8000`, `11625`, `11626` | `curl -f http://localhost:8000/health` |
-| `redis` | Redis 7 cache and event queue | `6379` | `redis-cli ping` |
-| `mongodb` | MongoDB 7 persistence for indexer state | `27017` | `mongosh --eval "db.adminCommand('ping')"` |
-| `backend` | Protocol backend API | `3001` | `curl -f http://localhost:3001/health/rpc` |
-| `frontend` | Protocol web dashboard / UI | `5173` | `curl -f http://localhost:5173/` |
-
----
-
-## Verify the Services
-
-### 1. Check Container Health with `docker-compose ps`
-
-Check that all containers are running and in a `(healthy)` status:
-
-```bash
-docker-compose ps
-```
-
-Expected output:
-
-```text
-NAME                      IMAGE                       COMMAND                  SERVICE    CREATED          STATUS                    PORTS
-comebackh
-```
+| `VITE_HORIZON_URL` | No | `http://localhost:8000` | Horizon endpoint for account queries |
