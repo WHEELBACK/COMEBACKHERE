@@ -1,6 +1,6 @@
 {
   "contract": "compliance",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "functions": [
     "upgrade",
     "initialize",
@@ -14,15 +14,28 @@
     "accept_admin",
     "clear_address",
     "pause",
-    "unpause"
+    "unpause",
+    "register_provider",
+    "revoke_provider",
+    "get_provider_status",
+    "is_attestation_valid"
   ],
-  "events": ["upgraded", "address_allowed", "address_blocked", "address_allowed_until", "compliance_batch_processed", "accept_admin", "address_cleared", "contract_paused", "contract_unpaused"],
+  "events": ["upgraded", "address_allowed", "address_blocked", "address_allowed_until", "compliance_batch_processed", "accept_admin", "address_cleared", "contract_paused", "contract_unpaused", "provider_registered", "provider_expired", "provider_revoked", "attestation_invalidated"],
   "errors": {
     "1": "Unauthorized",
     "2": "ContractPaused",
     "3": "AlreadyInitialized",
     "4": "AddressNotFound",
     "5": "PastExpiry",
-    "6": "BatchTooLarge"
+    "6": "BatchTooLarge",
+    "7": "ProviderNotFound",
+    "8": "ProviderExpired",
+    "9": "ProviderRevoked",
+    "10": "AttestationInvalid"
+  },
+  "provider_semantics": {
+    "expiry": "A provider credential with expires_at <= now is treated as expired. Attestations issued by an expired provider are no longer valid: is_attestation_valid returns false and is_allowed treats the attested address as not allowed. Expiration is detected lazily on read and emits provider_expired (once per provider) plus attestation_invalidated for each affected attestation.",
+    "revocation": "revoke_provider marks a provider as withdrawn immediately. All attestations issued by a revoked provider become invalid regardless of their own expiry: is_attestation_valid returns false and is_allowed treats the attested address as not allowed. Revocation emits provider_revoked plus attestation_invalidated for each affected attestation and is irreversible.",
+    "precedence": "Revocation takes precedence over expiry; a revoked provider is never reported as merely expired."
   }
 }
