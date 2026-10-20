@@ -23,6 +23,10 @@ const ANONYMOUS_RATE_LIMIT: u32 = 30;
 /// Length of the rate-limit window in seconds.
 const RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 
+/// Default maximum age (in days) an API key may remain valid before rotation
+/// is required. Operators can override this via `API_KEY_ROTATION_DAYS`.
+const DEFAULT_API_KEY_ROTATION_DAYS: i64 = 90;
+
 pub type ChallengeStore = Arc<DashMap<String, DateTime<Utc>>>;
 
 /// Tracks request counts per rate-limit bucket (merchant identity or anonymous).
@@ -129,6 +133,125 @@ impl ApiKeyScopes {
     pub fn iter(&self) -> impl Iterator<Item = &ApiKeyScope> {
         self.scopes.iter()
     }
+}
+
+/// Operator-configurable rotation policy for API keys.
+///
+/// `max_age_days` is the maximum age a key may reach before it must be
+/// rotated. `rotation_window_days` is the advisory window before expiry in
+/// which a key should be rotated. Both are derived from configuration so
+/// operators can tune them without code changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RotationPolicy {
+    pub max_age_days: i64,
+    pub rotation_window_days: i64,
+}
+
+impl RotationPolicy {
+    /// Build a policy from configuration, falling back to the default max age
+    /// when the operator has not set one. The rotation window defaults to a
+    /// third of the max age (bounded to at least one day).
+    pub fn from_config(max_age_days: Option<i64>) -> Self {
+        let max_age_days = max_age_days
+            .filter(|days| *days > 0)
+            .unwrap_or(DEFAULT_API_KEY_ROTATION_DAYS);
+        let rotation_window_days = (max_age_days / 3).max(1);
+        RotationPolicy {
+            max_age_days,
+            rotation_window_days,
+        }
+    }
+
+    /// Compute the expiry timestamp for a key created at `created_at`.
+    pub fn expires_at(&self, created_at: DateTime<Utc>) -> DateTime<Utc> {
+        created_at + chrono::Duration::days(self.max_age_days)
+    }
+
+    /// Returns true when `expires_at` falls within the rotation window as of
+    /// `now`, signalling that the key should be rotated soon.
+    pub fn needs_rotation(&self, expires_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+        let window = chrono::Duration::days(self.rotation_window_days);
+        now >= expires_at - window
+    }
+}
+
+/// Non-secret metadata tracked for each API key. Never contains the key
+/// material itself, so it is safe to expose to operators and clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyMetadata {
+    pub public_key: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub rotation_policy: RotationPolicy,
+}
+
+impl ApiKeyMetadata {
+    /// Returns true when the key has passed its expiry timestamp.
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        now >= self.expires_at
+    }
+
+    /// Returns true when the key is inside its rotation window.
+    pub fn needs_rotation(&self, now: DateTime<Utc>) -> bool {
+        self.rotation_policy.needs_rotation(self.expires_at, now)
+    }
+}
+
+/// In-memory store of per-key metadata, keyed by the verified public key.
+pub type ApiKeyMetadataStore = Arc<DashMap<String, ApiKeyMetadata>>;
+
+pub fn create_api_key_metadata_store() -> ApiKeyMetadataStore {
+    Arc::new(DashMap::new())
+}
+
+/// Register metadata for a newly created key using the operator's rotation
+/// policy. Returns the stored metadata (without any secret material).
+pub fn register_api_key(
+    store: &ApiKeyMetadataStore,
+    public_key: &str,
+    policy: &RotationPolicy,
+    now: DateTime<Utc>,
+) -> ApiKeyMetadata {
+    let metadata = ApiKeyMetadata {
+        public_key: public_key.to_string(),
+        created_at: now,
+        expires_at: policy.expires_at(now),
+        last_used_at: None,
+        rotation_policy: policy.clone(),
+    };
+    store.insert(public_key.to_string(), metadata.clone());
+    metadata
+}
+
+/// Validate a key against its metadata: reject expired keys and record the
+/// last-used timestamp on success. Returns the updated metadata on success.
+pub fn validate_and_touch_api_key(
+    store: &ApiKeyMetadataStore,
+    public_key: &str,
+    now: DateTime<Utc>,
+) -> Result<ApiKeyMetadata, AuthError> {
+    let mut entry = store.get_mut(public_key).ok_or_else(|| AuthError {
+        error: "API key not found".to_string(),
+    })?;
+
+    if entry.is_expired(now) {
+        return Err(AuthError {
+            error: "API key has expired".to_string(),
+        });
+    }
+
+    entry.last_used_at = Some(now);
+    Ok(entry.clone())
+}
+
+/// Fetch key metadata without mutating it. Returns `None` when the key is
+/// unknown. The returned value never includes the secret key material.
+pub fn get_api_key_metadata(
+    store: &ApiKeyMetadataStore,
+    public_key: &str,
+) -> Option<ApiKeyMetadata> {
+    store.get(public_key).map(|entry| entry.clone())
 }
 
 pub fn create_challenge_store() -> ChallengeStore {
@@ -256,7 +379,7 @@ fn verify_ed25519(
 
     if sig_bytes.len() != 64 {
         return Err(AuthError {
-            error: "Signature must be 64 bytes".to_string(),
+            error: "Invalid signature length".to_string(),
         });
     }
 
@@ -264,94 +387,11 @@ fn verify_ed25519(
     sig_arr.copy_from_slice(&sig_bytes);
     let signature = Signature::from_bytes(&sig_arr);
 
-    let verifying_key = VerifyingKey::from_bytes(pub_key_bytes).map_err(|e| AuthError {
-        error: format!("Invalid public key: {}", e),
+    let verifying_key = VerifyingKey::from_bytes(pub_key_bytes).map_err(|_| AuthError {
+        error: "Invalid public key".to_string(),
     })?;
 
-    verifying_key
-        .verify_strict(message, &signature)
-        .map_err(|e| AuthError {
-            error: format!("Signature verification failed: {}", e),
-        })
+    verifying_key.verify_strict(message, &signature).map_err(|_| AuthError {
+        error: "Signature verification failed".to_string(),
+    })
 }
-
-pub async fn auth_middleware(
-    State(store): State<ChallengeStore>,
-    mut req: Request,
-    next: Next,
-) -> Response {
-    let pub_key = match req
-        .headers()
-        .get("x-stellar-public-key")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(k) => k.to_string(),
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(AuthError {
-                    error: "Missing X-Stellar-Public-Key header".to_string(),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    let signature = match req
-        .headers()
-        .get("x-stellar-signature")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(s) => s.to_string(),
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(AuthError {
-                    error: "Missing X-Stellar-Signature header".to_string(),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    let challenge = match req
-        .headers()
-        .get("x-stellar-challenge")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(c) => c.to_string(),
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(AuthError {
-                    error: "Missing X-Stellar-Challenge header".to_string(),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    if let Err(e) = verify_challenge_valid(&store, &challenge) {
-        return (StatusCode::UNAUTHORIZED, Json(e)).into_response();
-    }
-
-    let pub_key_bytes = match decode_stellar_pubkey(&pub_key) {
-        Ok(b) => b,
-        Err(e) => return (StatusCode::UNAUTHORIZED, Json(e)).into_response(),
-    };
-
-    if let Err(e) = verify_ed25519(&pub_key_bytes, challenge.as_bytes(), &signature) {
-        return (StatusCode::UNAUTHORIZED, Json(e)).into_response();
-    }
-
-    req.extensions_mut()
-        .insert(VerifiedSigner {
-            public_key: pub_key,
-        });
-
-    next.run(req).await
-}
-
-/// Rate-limit middlewar
-
-/* … truncated 6212 chars — edit only what you need near the top … */

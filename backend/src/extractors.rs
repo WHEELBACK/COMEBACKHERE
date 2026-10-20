@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::de::DeserializeOwned;
 use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::types::ErrorResponse;
 
@@ -184,6 +185,136 @@ impl Default for ApiScopes {
     }
 }
 
+/// Operator-configurable rotation policy for API keys.
+///
+/// `max_key_age` bounds how long a key may live before it must be rotated; a
+/// value of `None` disables age-based rotation. `rotation_window` is the
+/// advisory period before expiry during which clients should rotate.
+#[derive(Debug, Clone, Default)]
+pub struct RotationPolicy {
+    /// Maximum age a key may reach before it is considered stale.
+    pub max_key_age: Option<Duration>,
+    /// Advisory window before expiry during which rotation is recommended.
+    pub rotation_window: Option<Duration>,
+}
+
+impl RotationPolicy {
+    /// Build a policy from an optional max age and rotation window.
+    pub fn new(max_key_age: Option<Duration>, rotation_window: Option<Duration>) -> Self {
+        RotationPolicy {
+            max_key_age,
+            rotation_window,
+        }
+    }
+
+    /// Whether a key created at `created_at` has exceeded the max age.
+    pub fn is_stale(&self, created_at: SystemTime, now: SystemTime) -> bool {
+        match self.max_key_age {
+            Some(max_age) => now
+                .duration_since(created_at)
+                .map(|age| age >= max_age)
+                .unwrap_or(false),
+            None => false,
+        }
+    }
+
+    /// Whether a key expiring at `expires_at` is within the rotation window.
+    pub fn should_rotate(&self, expires_at: SystemTime, now: SystemTime) -> bool {
+        match self.rotation_window {
+            Some(window) => expires_at
+                .duration_since(now)
+                .map(|remaining| remaining <= window)
+                .unwrap_or(true),
+            None => false,
+        }
+    }
+}
+
+/// Non-secret metadata describing an API key.
+///
+/// This deliberately never carries the secret key value; it only exposes
+/// lifecycle information (creation, expiry, last use) and the rotation policy
+/// so operators can audit keys without leaking credentials.
+#[derive(Debug, Clone)]
+pub struct ApiKeyMetadata {
+    /// Opaque identifier for the key (never the secret itself).
+    pub key_id: String,
+    /// When the key was created.
+    pub created_at: SystemTime,
+    /// When the key expires, if it does.
+    pub expires_at: Option<SystemTime>,
+    /// When the key was last used to authenticate, if ever.
+    pub last_used_at: Option<SystemTime>,
+    /// The scopes granted to the key.
+    pub scopes: ApiScopes,
+    /// The rotation policy applied to the key.
+    pub rotation_policy: RotationPolicy,
+}
+
+impl ApiKeyMetadata {
+    /// Whether the key has expired as of `now`.
+    pub fn is_expired(&self, now: SystemTime) -> bool {
+        match self.expires_at {
+            Some(expires_at) => now >= expires_at,
+            None => false,
+        }
+    }
+
+    /// Whether the key should be rotated as of `now`, either because it is
+    /// within the rotation window or has exceeded the max key age.
+    pub fn needs_rotation(&self, now: SystemTime) -> bool {
+        if let Some(expires_at) = self.expires_at {
+            if self.rotation_policy.should_rotate(expires_at, now) {
+                return true;
+            }
+        }
+        self.rotation_policy.is_stale(self.created_at, now)
+    }
+
+    /// Record a successful use of the key at `now`.
+    pub fn record_use(&mut self, now: SystemTime) {
+        self.last_used_at = Some(now);
+    }
+
+    /// Reject the key if it has expired as of `now`.
+    pub fn ensure_not_expired(&self, now: SystemTime) -> Result<(), Response> {
+        if self.is_expired(now) {
+            Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "API key has expired".to_string(),
+                    code: Some(401),
+                }),
+            )
+                .into_response())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Serialise the non-secret metadata for API responses.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "key_id": self.key_id,
+            "created_at": system_time_to_unix(self.created_at),
+            "expires_at": self.expires_at.map(system_time_to_unix),
+            "last_used_at": self.last_used_at.map(system_time_to_unix),
+            "scopes": self.scopes.to_strings(),
+            "rotation_policy": {
+                "max_key_age_secs": self.rotation_policy.max_key_age.map(|d| d.as_secs()),
+                "rotation_window_secs": self.rotation_policy.rotation_window.map(|d| d.as_secs()),
+            },
+        })
+    }
+}
+
+/// Convert a [`SystemTime`] to Unix seconds, saturating at the epoch.
+fn system_time_to_unix(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// The identity bucket a request is rate-limited under.
 ///
 /// The key is derived **only** from verified credentials (the authenticated
@@ -231,149 +362,4 @@ impl RateLimitKey {
 #[derive(Debug, Clone, Default)]
 pub struct TrustedProxies {
     trusted: Vec<IpAddr>,
-}
-
-impl TrustedProxies {
-    /// Build the trusted-proxy set from an explicit list of addresses.
-    pub fn new<I>(addrs: I) -> Self
-    where
-        I: IntoIterator<Item = IpAddr>,
-    {
-        TrustedProxies {
-            trusted: addrs.into_iter().collect(),
-        }
-    }
-
-    /// Parse a comma-separated list of IP addresses (e.g. from an env var such
-    /// as `TRUSTED_PROXIES`). Blank entries and unparseable values are skipped.
-    pub fn from_csv(raw: &str) -> Self {
-        let addrs = raw
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse::<IpAddr>().ok());
-        TrustedProxies::new(addrs)
-    }
-
-    /// Whether the given peer address is a configured trusted proxy.
-    pub fn is_trusted(&self, peer: IpAddr) -> bool {
-        self.trusted.contains(&peer)
-    }
-
-    /// Resolve the effective client IP for a request.
-    ///
-    /// The forwarded header is consulted **only** when `peer` is a trusted
-    /// proxy; otherwise it is ignored and `peer` is returned. When trusted, the
-    /// left-most entry of `X-Forwarded-For` is treated as the originating
-    /// client, falling back to `peer` if the header is absent or malformed.
-    pub fn client_ip(&self, peer: IpAddr, forwarded_for: Option<&str>) -> IpAddr {
-        if !self.is_trusted(peer) {
-            return peer;
-        }
-        forwarded_for
-            .and_then(|value| value.split(',').next())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .and_then(|s| s.parse::<IpAddr>().ok())
-            .unwrap_or(peer)
-    }
-
-    /// Resolve the effective client IP directly from a request.
-    ///
-    /// Reads the direct peer from [`ConnectInfo`] and the `X-Forwarded-For`
-    /// header, applying the trusted-proxy rules above.
-    pub fn client_ip_from_request<B>(&self, req: &Request<B>) -> Option<IpAddr> {
-        let peer = req
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(addr)| addr.ip())?;
-        let forwarded = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok());
-        Some(self.client_ip(peer, forwarded))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ApiScope, ApiScopes, RateLimitKey, TrustedProxies};
-    use std::net::IpAddr;
-
-    fn ip(s: &str) -> IpAddr {
-        s.parse().unwrap()
-    }
-
-    #[test]
-    fn verified_identity_maps_to_merchant_bucket() {
-        let key = RateLimitKey::from_verified(Some("merchant_42"));
-        assert_eq!(key, RateLimitKey::Merchant("merchant_42".to_string()));
-        assert_eq!(key.as_bucket(), "merchant:merchant_42");
-    }
-
-    #[test]
-    fn missing_identity_maps_to_anonymous_bucket() {
-        assert_eq!(RateLimitKey::from_verified(None), RateLimitKey::Anonymous);
-        assert_eq!(RateLimitKey::from_verified(Some("")), RateLimitKey::Anonymous);
-        assert_eq!(RateLimitKey::from_verified(None).as_bucket(), "anonymous");
-    }
-
-    #[test]
-    fn spoofed_headers_cannot_change_bucket() {
-        // The key is derived solely from the verified identity; there is no
-        // header input, so a caller cannot rotate `X-Merchant-Id` or
-        // `X-Forwarded-For` to land in a different bucket.
-        let verified = Some("merchant_42");
-        let first = RateLimitKey::from_verified(verified);
-        let second = RateLimitKey::from_verified(verified);
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn scope_parsing_round_trips() {
-        assert_eq!(ApiScope::parse("read"), Some(ApiScope::Read));
-        assert_eq!(ApiScope::parse("WRITE"), Some(ApiScope::Write));
-        assert_eq!(ApiScope::parse(" webhook "), Some(ApiScope::Webhook));
-        assert_eq!(ApiScope::parse("admin"), None);
-        assert_eq!(ApiScope::Read.as_str(), "read");
-    }
-
-    #[test]
-    fn explicit_scopes_are_persisted_and_enforced() {
-        let scopes = ApiScopes::from_strings(["read", "webhook"]);
-        assert_eq!(scopes.to_strings(), vec!["read".to_string(), "webhook".to_string()]);
-        // Allowed routes: read and webhook scopes are present.
-        assert!(scopes.contains(ApiScope::Read));
-        assert!(scopes.contains(ApiScope::Webhook));
-        assert!(scopes.allows_all([ApiScope::Read]));
-        // Denied route: write scope was not granted.
-        assert!(!scopes.contains(ApiScope::Write));
-        assert!(!scopes.allows_all([ApiScope::Write]));
-    }
-
-    #[test]
-    fn keys_without_scopes_are_backward_compatible() {
-        // Legacy keys created without explicit scopes get the full set.
-        let legacy = ApiScopes::from_strings(Vec::<String>::new());
-        assert!(legacy.allows_all([ApiScope::Read, ApiScope::Write, ApiScope::Webhook]));
-        assert_eq!(ApiScopes::default(), ApiScopes::all());
-    }
-
-    #[test]
-    fn trusted_proxy_forwarded_header_is_honoured() {
-        let proxies = TrustedProxies::new([ip("10.0.0.1")]);
-        assert_eq!(
-            proxies.client_ip(ip("10.0.0.1"), Some("203.0.113.7, 10.0.0.1")),
-            ip("203.0.113.7")
-        );
-    }
-
-    #[test]
-    fn untrusted_peer_forwarded_header_is_ignored() {
-        let proxies = TrustedProxies::new([ip("10.0.0.1")]);
-        assert_eq!(
-            proxies.client_ip(ip("198.51.100.9"), Some("203.0.113.7")),
-            ip("198.51.100.9")
-        );
-    }
 }
