@@ -1,9 +1,9 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
-use crate::auth::{self, ChallengeResponse, ChallengeStore};
+use crate::auth::{self, ApiKeyScope, ChallengeResponse, ChallengeStore};
 
 #[derive(Serialize)]
 pub struct HealthResponse {
@@ -170,6 +170,18 @@ impl AuditLog {
     }
 }
 
+#[derive(Deserialize)]
+pub struct CreateApiKeyRequest {
+    #[serde(default)]
+    pub scopes: Vec<ApiKeyScope>,
+}
+
+#[derive(Serialize)]
+pub struct CreateApiKeyResponse {
+    pub key: String,
+    pub scopes: Vec<ApiKeyScope>,
+}
+
 // ─── Auth (public) ───────────────────────────────────────────────────────
 
 pub async fn get_challenge(
@@ -188,6 +200,17 @@ pub async fn health() -> Json<HealthResponse> {
 }
 
 // ─── Merchant routes (protected) ─────────────────────────────────────────
+
+pub async fn create_merchant_api_key(
+    Json(req): Json<CreateApiKeyRequest>,
+) -> impl IntoResponse {
+    let scopes = auth::normalize_scopes(req.scopes);
+    let key = auth::issue_api_key(&scopes);
+    (
+        StatusCode::CREATED,
+        Json(CreateApiKeyResponse { key, scopes }),
+    )
+}
 
 pub async fn merchant_dashboard() -> impl IntoResponse {
     let ctx = TraceContext::root();

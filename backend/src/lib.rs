@@ -15,6 +15,7 @@ pub mod soroban;
 pub mod tracing;
 pub mod types;
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,43 @@ use handlers_readiness::readiness_probe;
 use soroban::SorobanClient;
 use correlation::correlation_middleware;
 
+/// Explicit set of proxy peers whose `X-Forwarded-For` header is trusted.
+///
+/// Forwarded headers are only honored when the direct connection peer is one
+/// of these addresses; otherwise the header is ignored and the direct peer IP
+/// is used for client-IP and rate-limit decisions.
+#[derive(Clone, Debug, Default)]
+pub struct TrustedProxies {
+    addrs: Arc<Vec<IpAddr>>,
+}
+
+impl TrustedProxies {
+    /// Build from an explicit list of trusted proxy addresses.
+    pub fn new(addrs: Vec<IpAddr>) -> Self {
+        Self {
+            addrs: Arc::new(addrs),
+        }
+    }
+
+    /// Read the trusted proxy list from `TRUSTED_PROXIES` (comma-separated
+    /// IP addresses). Unset or empty means no proxies are trusted.
+    pub fn from_env() -> Self {
+        let raw = std::env::var("TRUSTED_PROXIES").unwrap_or_default();
+        let addrs = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<IpAddr>().ok())
+            .collect();
+        Self::new(addrs)
+    }
+
+    /// Returns `true` when `peer` is a configured trusted proxy.
+    pub fn is_trusted(&self, peer: IpAddr) -> bool {
+        self.addrs.iter().any(|addr| *addr == peer)
+    }
+}
+
 /// Shared application state threaded through every route handler.
 #[derive(Clone)]
 pub struct AppState {
@@ -44,6 +82,7 @@ pub struct AppState {
     pub mongodb_url: Option<String>,
     /// Optional Redis connection string; when set, readiness probes it.
     pub redis_url: Option<String>,
+    pub trusted_proxies: TrustedProxies,
 }
 
 impl AppState {
@@ -71,6 +110,7 @@ impl AppState {
             audit: Arc::new(AuditLog::new()),
             mongodb_url: None,
             redis_url: None,
+            trusted_proxies: TrustedProxies::from_env(),
         }
     }
 
@@ -78,6 +118,12 @@ impl AppState {
     pub fn with_dependencies(mut self, mongodb_url: Option<String>, redis_url: Option<String>) -> Self {
         self.mongodb_url = mongodb_url;
         self.redis_url = redis_url;
+        self
+    }
+
+    /// Override the trusted proxy set (used by tests and explicit wiring).
+    pub fn with_trusted_proxies(mut self, trusted_proxies: TrustedProxies) -> Self {
+        self.trusted_proxies = trusted_proxies;
         self
     }
 }
@@ -188,8 +234,10 @@ impl AuditLog {
 pub fn build_router(state: AppState) -> Router {
     // Rate-limiter layer: config is read from RATE_LIMIT_POINTS /
     // RATE_LIMIT_DURATION (defaults: 60 requests per 60-second window, per IP).
+    // Forwarded headers are only honored for peers in `state.trusted_proxies`.
     let rl_config = RateLimitConfig::from_env();
-    let rl_layer = RateLimiterLayer::new(new_store(), rl_config);
+    let rl_layer = RateLimiterLayer::new(new_store(), rl_config)
+        .with_trusted_proxies(state.trusted_proxies.clone());
 
     // CORS layer: allow common frontend origins and methods
     let cors_layer = CorsLayer::permissive();
@@ -242,3 +290,54 @@ pub fn build_router(state: AppState) -> Router {
     )
 )]
 pub struct ApiDoc;
+
+/// Serve the OpenAPI document (used by tests and tooling).
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    ApiDoc::openapi()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        http::StatusCode,
+        routing::get,
+        Json,
+        Router,
+    };
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn openapi_json_returns_200_and_valid_json() {
+        let app = Router::new()
+            .route("/openapi.json", get(|| async { Json(ApiDoc::openapi()) }));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let response = reqwest::get(format!("http://{addr}/openapi.json"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(body.get("openapi").is_some());
+        assert!(body.get("info").is_some());
+        assert!(body.get("paths").is_some());
+    }
+
+    #[test]
+    fn trusted_proxies_honor_configured_peer() {
+        let trusted = TrustedProxies::new(vec!["10.0.0.1".parse().unwrap()]);
+        assert!(trusted.is_trusted("10.0.0.1".parse().unwrap()));
+        assert!(!trusted.is_trusted("10.0.0.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxies_default_to_none() {
+        let trusted = TrustedProxies::default();
+        assert!(!trusted.is_trusted("127.0.0.1".parse().unwrap()));
+    }
+}
