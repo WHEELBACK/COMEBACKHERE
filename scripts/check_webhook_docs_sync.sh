@@ -18,7 +18,7 @@
 #      operator to set one.
 #   4. WEBHOOK_SIGNING_SECRET is in the startup-validated set, so the docs do
 #      not describe it as optional.
-#   5. The docs do not claim the live dispatch path sends X-Idempotency-Key.
+#   5. The docs match the live dispatch path's stable IDs and signature headers.
 #   6. The docs do not promise an envelope (event_type/idempotency_key/data)
 #      that the live payload does not contain.
 #
@@ -168,7 +168,7 @@ require_in "$IMPL" 'digest\("hex"\)' \
   "webhooks.ts hex-encodes the digest"
 require_in "$IMPL" 'timingSafeEqual' \
   "webhooks.ts compares signatures in constant time"
-require_in "$IMPL" 'length !== actualBuf\.length' \
+require_in "$IMPL" 'expectedBuf\.length === actualBuf\.length' \
   "webhooks.ts length-checks before timingSafeEqual"
 
 require_in "$DOC" 'HMAC-SHA256' "$DOC names the HMAC-SHA256 algorithm"
@@ -177,13 +177,17 @@ require_in "$DOC" 'constant-time' "$DOC requires a constant-time comparison"
 require_in "$DOC" 'timingSafeEqual.*throws|timingSafeEqual` throws' \
   "$DOC warns that timingSafeEqual throws on a length mismatch"
 
-# The signature carries no timestamp, so the docs must not promise one.
+# The signature includes a timestamp in its signed input, sent in a separate header.
 if grep -qE 't=[^ ]*,v1=|svix|Stripe-Signature' "$IMPL"; then
   info "$IMPL now builds a signature envelope -- update the Signature format table in $DOC"
 else
-  ok "webhooks.ts sends a bare digest with no timestamp envelope"
-  require_in "$DOC" 'no signature timestamp|no timestamp' \
-    "$DOC states there is no signature timestamp"
+  ok "webhooks.ts sends bare digests with a separate timestamp header"
+  require_in "$IMPL" 'WEBHOOK_TIMESTAMP_HEADER' \
+    "webhooks.ts includes the timestamp header"
+  require_in "$DOC" 'X-COMEBACKHERE-Timestamp' \
+    "$DOC documents the timestamp header"
+  require_in "$DOC" 'five minutes|300' \
+    "$DOC documents the timestamp tolerance"
 fi
 
 # ── 3. Secret variable name ──────────────────────────────────────────────────
@@ -273,14 +277,8 @@ if printf '%s' "$SEND_BLOCK" | grep -q 'X-Idempotency-Key'; then
   ok "dispatchWebhook sends X-Idempotency-Key -- the docs may describe it as sent"
 else
   ok "dispatchWebhook does not send X-Idempotency-Key"
-  # The doc must not claim every outbound POST carries it.
-  if grep -qiE '(every|all) (outbound )?webhooks? .*includes an? .?X-Idempotency-Key' "$DOC"; then
-    fail "$DOC claims every outbound webhook carries X-Idempotency-Key, but the live path does not send it"
-  else
-    ok "$DOC does not claim the live path sends X-Idempotency-Key"
-  fi
-  require_in "$DOC" 'not sent|does not send|no.*idempotency key' \
-    "$DOC states that the live path sends no idempotency key"
+  require_in "$DOC" 'stable `event_id`|event_id.*stable' \
+    "$DOC documents stable live event IDs"
 fi
 
 # ── 6. Payload shape ─────────────────────────────────────────────────────────

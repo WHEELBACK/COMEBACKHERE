@@ -21,8 +21,16 @@ import {
   verifySignature,
   dispatchWebhook,
   WEBHOOK_SIGNATURE_HEADER,
+  WEBHOOK_TIMESTAMP_HEADER,
+  WEBHOOK_PREVIOUS_SIGNATURE_HEADER,
   type WebhookPayload,
 } from "../services/webhooks.js"
+import { createPinnedLookup, resolvePublicAddress, sendWebhookRequest } from "../services/webhook-http.js"
+import { lookup as dnsLookup } from "node:dns/promises"
+
+vi.mock("node:dns/promises", () => ({
+  lookup: vi.fn().mockResolvedValue([{ address: "8.8.8.8", family: 4 }]),
+}))
 
 const TEST_SECRET = "super-secret-hmac-key-at-least-32-chars!"
 const TEST_URL = "https://merchant.example.com/webhooks"
@@ -94,6 +102,15 @@ describe("verifySignature", () => {
     expect(verifySignature(TEST_SECRET, body, "not-a-valid-hex-signature!!")).toBe(false)
   })
 
+  it("accepts signatures made with either key during a rotation overlap", () => {
+    const body = "timestamp.{\"event\":\"test\"}"
+    const oldSignature = signPayload("old-secret", body)
+    const newSignature = signPayload("new-secret", body)
+
+    expect(verifySignature(["old-secret", "new-secret"], body, oldSignature)).toBe(true)
+    expect(verifySignature(["old-secret", "new-secret"], body, newSignature)).toBe(true)
+  })
+
   it("returns false when signature length does not match (timing-safe guard)", () => {
     const body = '{"event":"test"}'
     // Truncated hex — different byte length
@@ -136,9 +153,11 @@ describe("verifySignature", () => {
 
 describe("dispatchWebhook", () => {
   let envBackup: string | undefined
+  let previousEnvBackup: string | undefined
 
   beforeEach(() => {
     envBackup = process.env.WEBHOOK_SIGNING_SECRET
+    previousEnvBackup = process.env.WEBHOOK_SIGNING_SECRET_PREVIOUS
   })
 
   afterEach(() => {
@@ -146,6 +165,11 @@ describe("dispatchWebhook", () => {
       delete process.env.WEBHOOK_SIGNING_SECRET
     } else {
       process.env.WEBHOOK_SIGNING_SECRET = envBackup
+    }
+    if (previousEnvBackup === undefined) {
+      delete process.env.WEBHOOK_SIGNING_SECRET_PREVIOUS
+    } else {
+      process.env.WEBHOOK_SIGNING_SECRET_PREVIOUS = previousEnvBackup
     }
   })
 
@@ -173,10 +197,13 @@ describe("dispatchWebhook", () => {
   it("signature in the header verifies correctly against the body sent", async () => {
     let capturedBody = ""
     let capturedSignature = ""
+    let capturedTimestamp = ""
 
     const mockFetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
       capturedBody = init?.body as string
-      capturedSignature = (init?.headers as Record<string, string>)[WEBHOOK_SIGNATURE_HEADER]
+      const headers = init?.headers as Record<string, string>
+      capturedSignature = headers[WEBHOOK_SIGNATURE_HEADER]
+      capturedTimestamp = headers[WEBHOOK_TIMESTAMP_HEADER]
       return Promise.resolve(new Response(null, { status: 200 }))
     })
 
@@ -188,14 +215,17 @@ describe("dispatchWebhook", () => {
     )
 
     // The consumer should be able to verify the signature
-    expect(verifySignature(TEST_SECRET, capturedBody, capturedSignature)).toBe(true)
+    expect(verifySignature(TEST_SECRET, `${capturedTimestamp}.${capturedBody}`, capturedSignature)).toBe(true)
   })
 
   it("a tampered body fails signature verification", async () => {
     let capturedSignature = ""
+    let capturedTimestamp = ""
 
     const mockFetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
-      capturedSignature = (init?.headers as Record<string, string>)[WEBHOOK_SIGNATURE_HEADER]
+      const headers = init?.headers as Record<string, string>
+      capturedSignature = headers[WEBHOOK_SIGNATURE_HEADER]
+      capturedTimestamp = headers[WEBHOOK_TIMESTAMP_HEADER]
       return Promise.resolve(new Response(null, { status: 200 }))
     })
 
@@ -207,7 +237,7 @@ describe("dispatchWebhook", () => {
     )
 
     const tampered = JSON.stringify({ event: "settlement_approved", settlement_id: 9999 })
-    expect(verifySignature(TEST_SECRET, tampered, capturedSignature)).toBe(false)
+    expect(verifySignature(TEST_SECRET, `${capturedTimestamp}.${tampered}`, capturedSignature)).toBe(false)
   })
 
   it("returns ok:true and status from the upstream response", async () => {
@@ -281,6 +311,50 @@ describe("dispatchWebhook", () => {
 
     expect(capturedContentType).toBe("application/json")
   })
+
+  it("sends stable event and delivery identifiers in the payload and headers", async () => {
+    let capturedBody = ""
+    const capturedHeaders: Record<string, string> = {}
+    const mockFetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      capturedBody = init?.body as string
+      for (const [key, value] of Object.entries(init?.headers ?? {})) capturedHeaders[key] = value as string
+      return Promise.resolve(new Response(null, { status: 200 }))
+    })
+
+    const result = await dispatchWebhook(
+      TEST_URL,
+      { event: "settlement_executed", settlement_id: 1 },
+      TEST_SECRET,
+      mockFetch as unknown as typeof fetch,
+      { eventId: "chain-event-123" },
+    )
+
+    const sent = JSON.parse(capturedBody) as Record<string, unknown>
+    expect(sent.event_id).toBe("chain-event-123")
+    expect(sent.delivery_id).toBe(result.deliveryId)
+    expect(capturedHeaders["X-COMEBACKHERE-Event-Id"]).toBe("chain-event-123")
+    expect(capturedHeaders["X-COMEBACKHERE-Delivery-Id"]).toBe(result.deliveryId)
+  })
+
+  it("sends a previous-key signature during the configured rotation overlap", async () => {
+    process.env.WEBHOOK_SIGNING_SECRET_PREVIOUS = "old-secret"
+    let capturedBody = ""
+    const capturedHeaders: Record<string, string> = {}
+    const mockFetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      capturedBody = init?.body as string
+      for (const [key, value] of Object.entries(init?.headers ?? {})) capturedHeaders[key] = value as string
+      return Promise.resolve(new Response(null, { status: 200 }))
+    })
+
+    await dispatchWebhook(TEST_URL, { event: "test" }, TEST_SECRET, mockFetch as unknown as typeof fetch)
+
+    const timestamp = capturedHeaders[WEBHOOK_TIMESTAMP_HEADER]
+    expect(verifySignature(
+      "old-secret",
+      `${timestamp}.${capturedBody}`,
+      capturedHeaders[WEBHOOK_PREVIOUS_SIGNATURE_HEADER],
+    )).toBe(true)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -305,9 +379,16 @@ describe("dispatchWebhook — header contract", () => {
     return captured
   }
 
-  it("sends exactly Content-Type and the signature header", async () => {
+  it("sends the documented signature, timestamp, and identifier headers", async () => {
     const headers = await capture({ event: "settlement_executed", settlement_id: 1 })
-    expect(Object.keys(headers).sort()).toEqual(["content-type", "x-comebackhere-signature"])
+    expect(Object.keys(headers).sort()).toEqual([
+      "content-type",
+      "x-comebackhere-delivery-id",
+      "x-comebackhere-event-id",
+      "x-comebackhere-legacy-signature",
+      "x-comebackhere-signature",
+      "x-comebackhere-timestamp",
+    ])
   })
 
   it("does not send X-Idempotency-Key", async () => {
@@ -322,9 +403,7 @@ describe("dispatchWebhook — header contract", () => {
     expect(headers["x-request-id"]).toBeUndefined()
   })
 
-  it("sends a bare digest with no timestamp envelope", async () => {
-    // The docs promise a bare 64-char lowercase hex digest, so a consumer can
-    // never reconstruct a "t=...,v1=..." style string from the header.
+  it("sends a bare digest and a separate timestamp header", async () => {
     const headers = await capture({ event: "settlement_executed", settlement_id: 1 })
     expect(headers["x-comebackhere-signature"]).toMatch(/^[0-9a-f]{64}$/)
   })
@@ -356,9 +435,12 @@ describe("dispatchWebhook — header contract", () => {
     // bytes on the wire.
     let capturedBody = ""
     let capturedSignature = ""
+    let capturedTimestamp = ""
     const mockFetch = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
       capturedBody = init?.body as string
-      capturedSignature = (init?.headers as Record<string, string>)[WEBHOOK_SIGNATURE_HEADER]
+      const headers = init?.headers as Record<string, string>
+      capturedSignature = headers[WEBHOOK_SIGNATURE_HEADER]
+      capturedTimestamp = headers[WEBHOOK_TIMESTAMP_HEADER]
       return Promise.resolve(new Response(null, { status: 200 }))
     })
 
@@ -369,6 +451,60 @@ describe("dispatchWebhook — header contract", () => {
       mockFetch as unknown as typeof fetch,
     )
 
-    expect(verifySignature(TEST_SECRET, capturedBody, capturedSignature)).toBe(true)
+    expect(verifySignature(TEST_SECRET, `${capturedTimestamp}.${capturedBody}`, capturedSignature)).toBe(true)
+  })
+})
+
+describe("webhook request destination safety", () => {
+  it("rejects private-address and non-HTTPS targets before sending", async () => {
+    const mockFetch = vi.fn()
+
+    for (const host of ["127.0.0.1", "10.0.0.1", "169.254.169.254", "[::1]", "[fe80::1]"]) {
+      await expect(sendWebhookRequest(`https://${host}/hook`, {}, "{}", mockFetch as typeof fetch))
+        .rejects.toThrow(/non-public/)
+    }
+    await expect(sendWebhookRequest("http://merchant.example/hook", {}, "{}", mockFetch as typeof fetch))
+      .rejects.toThrow(/public HTTPS/)
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+
+  it("does not follow redirects", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(new Response(null, {
+      status: 302,
+      headers: { Location: "https://127.0.0.1/metadata" },
+    }))
+
+    const status = await sendWebhookRequest(TEST_URL, {}, "{}", mockFetch as typeof fetch)
+
+    expect(status).toBe(302)
+    expect(mockFetch).toHaveBeenCalledOnce()
+    expect(mockFetch.mock.calls[0][1]).toMatchObject({ redirect: "manual" })
+  })
+
+  it("rejects every DNS answer if any answer is private", async () => {
+    vi.mocked(dnsLookup).mockImplementationOnce(async () => [
+      { address: "1.1.1.1", family: 4 },
+      { address: "127.0.0.1", family: 4 },
+    ] as never)
+
+    await expect(resolvePublicAddress("merchant.example")).rejects.toThrow(/non-public/)
+  })
+
+  it("rejects a hostname when DNS changes from public to private", async () => {
+    vi.mocked(dnsLookup)
+      .mockImplementationOnce(async () => [{ address: "1.1.1.1", family: 4 }] as never)
+      .mockImplementationOnce(async () => [{ address: "10.0.0.8", family: 4 }] as never)
+
+    await expect(resolvePublicAddress("merchant.example")).resolves.toEqual({ address: "1.1.1.1", family: 4 })
+    await expect(resolvePublicAddress("merchant.example")).rejects.toThrow(/non-public/)
+  })
+
+  it("pins the socket lookup to the address validated for this request", () => {
+    const lookup = createPinnedLookup({ address: "1.1.1.1", family: 4 })
+    const callback = vi.fn()
+
+    lookup("merchant.example", {}, callback)
+
+    expect(callback).toHaveBeenCalledWith(null, "1.1.1.1", 4)
   })
 })

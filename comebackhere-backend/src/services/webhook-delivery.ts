@@ -16,8 +16,15 @@
 
 import { connectMongo } from "../db/mongo.js"
 import { getWebhookRetryConfig, type WebhookRetryConfig } from "../lib/env.js"
-import { webhookDeliveryOutcomes } from "../lib/metrics.js"
+import {
+  webhookDeadLetterVolume,
+  webhookDeliveryAttempts,
+  webhookDeliveryDuration,
+  webhookDeliveryOutcomes,
+  webhookDeliveryRetries,
+} from "../lib/metrics.js"
 import { logger } from "../lib/logger.js"
+import { sendWebhookRequest } from "./webhook-http.js"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,6 +39,8 @@ export interface WebhookPayload {
   event_type: string
   invoice_id?: string
   settlement_id?: string
+  event_id: string
+  delivery_id: string
   /** Stable per-event key. Set once and preserved across retries. */
   idempotency_key: string
   timestamp: string
@@ -92,29 +101,19 @@ export async function postWebhook(
   fetchFn: typeof fetch = fetch,
   timeoutMs = 10_000,
   correlationId?: string,
+  signal?: AbortSignal,
 ): Promise<number> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Idempotency-Key": payload.idempotency_key,
+    "X-COMEBACKHERE-Event-Id": payload.event_id,
+    "X-COMEBACKHERE-Delivery-Id": payload.delivery_id,
   }
   if (correlationId && correlationId.trim() !== "") {
     headers["X-Request-Id"] = correlationId
   }
 
-  try {
-    const response = await fetchFn(endpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    })
-    return response.status
-  } finally {
-    clearTimeout(timer)
-  }
+  return sendWebhookRequest(endpoint, headers, JSON.stringify(payload), fetchFn, timeoutMs, signal)
 }
 
 // ---------------------------------------------------------------------------
@@ -176,11 +175,17 @@ export async function deliverWebhook(
     request_id: correlationId ?? null,
     attempt_history: attemptHistory,
   }
+  const startedAt = Date.now()
 
   for (let attempt = startAttempt; attempt < maxAttempts; attempt++) {
-    if (signal?.aborted) return record
+    if (signal?.aborted) {
+      webhookDeliveryDuration.observe({ status: "pending" }, (Date.now() - startedAt) / 1_000)
+      return record
+    }
 
     onAttempt?.(attempt + 1)
+    webhookDeliveryAttempts.inc()
+    if (attempt > 0) webhookDeliveryRetries.inc()
     record.attempts = attempt + 1
     record.last_attempt_at = new Date().toISOString()
     const attemptRecord: WebhookAttemptRecord = {
@@ -192,13 +197,14 @@ export async function deliverWebhook(
     record.attempt_history.push(attemptRecord)
 
     try {
-      const statusCode = await postWebhook(endpoint, payload, fetchFn, undefined, correlationId)
+      const statusCode = await postWebhook(endpoint, payload, fetchFn, undefined, correlationId, signal)
       record.last_status_code = statusCode
       attemptRecord.status_code = statusCode
 
       if (statusCode >= 200 && statusCode < 300) {
         record.status = "delivered"
         webhookDeliveryOutcomes.inc({ status: "delivered" })
+        webhookDeliveryDuration.observe({ status: "delivered" }, (Date.now() - startedAt) / 1_000)
         return record
       }
 
@@ -219,6 +225,7 @@ export async function deliverWebhook(
 
   record.status = "failed"
   webhookDeliveryOutcomes.inc({ status: "failed" })
+  webhookDeliveryDuration.observe({ status: "failed" }, (Date.now() - startedAt) / 1_000)
   logger.error(
     { attempts: record.attempts, requestId: record.request_id, lastStatusCode: record.last_status_code },
     "webhook delivery failed",
@@ -254,11 +261,14 @@ export function buildWebhookPayload(
 ): WebhookPayload {
   const id = options?.invoiceId ?? options?.settlementId ?? crypto.randomUUID()
   const idempotency_key = `${eventType}:${id}`
+  const delivery_id = crypto.randomUUID()
 
   return {
     event_type: eventType,
     invoice_id: options?.invoiceId,
     settlement_id: options?.settlementId,
+    event_id: idempotency_key,
+    delivery_id,
     idempotency_key,
     timestamp: new Date().toISOString(),
     data,
@@ -306,6 +316,7 @@ export function createMongoDeadLetterStore(): DeadLetterStore {
         deadLetter,
         { upsert: true },
       )
+      webhookDeadLetterVolume.set(await database.collection("webhook_dead_letters").countDocuments())
     },
     async find(idempotencyKey) {
       const database = await connectMongo()
@@ -318,7 +329,9 @@ export function createMongoDeadLetterStore(): DeadLetterStore {
     },
     async list(limit) {
       const database = await connectMongo()
-      const records = await database.collection<WebhookDeadLetterRecord & { _id: string }>("webhook_dead_letters")
+      const collection = database.collection<WebhookDeadLetterRecord & { _id: string }>("webhook_dead_letters")
+      webhookDeadLetterVolume.set(await collection.countDocuments())
+      const records = await collection
         .find()
         .sort({ failed_at: -1 })
         .limit(limit)
@@ -331,6 +344,7 @@ export function createMongoDeadLetterStore(): DeadLetterStore {
     async delete(idempotencyKey) {
       const database = await connectMongo()
       await database.collection("webhook_dead_letters").deleteOne({ _id: idempotencyKey })
+      webhookDeadLetterVolume.set(await database.collection("webhook_dead_letters").countDocuments())
     },
   }
 }
@@ -421,7 +435,7 @@ export class WebhookDeliveryQueue {
     this.store = options.store ?? createMongoPendingDeliveryStore()
     this.deadLetterStore = options.deadLetterStore ?? createMongoDeadLetterStore()
     this.maxAttempts = options.maxAttempts ?? this.retryConfig.maxAttempts
-    this.fetchFn = options.fetchFn ?? ((...args) => fetch(...args))
+    this.fetchFn = options.fetchFn ?? fetch
     this.delayFn = options.delayFn ?? defaultDelay
   }
 
@@ -540,6 +554,7 @@ export class WebhookDeliveryQueue {
   /** Re-enqueues deliveries persisted by a previous process. */
   async resumePending(): Promise<number> {
     const jobs = await this.store.takeAll()
+    await this.deadLetterStore.list(1)
     for (const job of jobs) this.enqueue(job.endpoint, job.payload, job.attempts, job.attempt_history)
     if (jobs.length > 0) {
       logger.info({ resumed: jobs.length }, "Persisted webhook deliveries resumed")

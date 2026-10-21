@@ -1,4 +1,9 @@
 import { describe, it, expect, vi } from "vitest"
+
+vi.mock("node:dns/promises", () => ({
+  lookup: vi.fn().mockResolvedValue([{ address: "8.8.8.8", family: 4 }]),
+}))
+
 import { getWebhookRetryConfig } from "../lib/env.js"
 import {
   deliverWebhook,
@@ -43,10 +48,13 @@ describe("webhook retry configuration", () => {
 })
 
 function makePayload(overrides?: Partial<WebhookPayload>): WebhookPayload {
+  const idempotencyKey = overrides?.idempotency_key ?? "invoice_paid:42"
   return {
     event_type: "invoice_paid",
     invoice_id: "42",
-    idempotency_key: "invoice_paid:42",
+    event_id: overrides?.event_id ?? idempotencyKey,
+    delivery_id: overrides?.delivery_id ?? "delivery-42",
+    idempotency_key: idempotencyKey,
     timestamp: new Date().toISOString(),
     data: { amount: 1_000_000 },
     ...overrides,
@@ -279,6 +287,23 @@ describe("deliverWebhook", () => {
     expect(capturedHeaders).toHaveLength(2)
     expect(capturedHeaders[0]["X-Idempotency-Key"]).toBe("invoice_paid:7")
     expect(capturedHeaders[1]["X-Idempotency-Key"]).toBe("invoice_paid:7")
+  })
+
+  it("preserves event and delivery IDs across retries", async () => {
+    const capturedHeaders: Record<string, string>[] = []
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      capturedHeaders.push((init?.headers ?? {}) as Record<string, string>)
+      return { status: 500 } as Response
+    }) as unknown as typeof fetch
+    const payload = makePayload({ event_id: "chain-event-7", delivery_id: "delivery-7" })
+
+    await deliverWebhook("https://example.com/hook", payload, 2, fetchFn, noDelay)
+
+    expect(capturedHeaders).toHaveLength(2)
+    expect(capturedHeaders.map((headers) => headers["X-COMEBACKHERE-Event-Id"]))
+      .toEqual(["chain-event-7", "chain-event-7"])
+    expect(capturedHeaders.map((headers) => headers["X-COMEBACKHERE-Delivery-Id"]))
+      .toEqual(["delivery-7", "delivery-7"])
   })
 
   it("forwards X-Request-Id on every attempt when a correlationId is supplied", async () => {

@@ -27,6 +27,32 @@ export const webhookDeliveryOutcomes = new Counter({
   registers: [metricsRegistry],
 })
 
+export const webhookDeliveryAttempts = new Counter({
+  name: "webhook_delivery_attempts_total",
+  help: "Webhook HTTP delivery attempts",
+  registers: [metricsRegistry],
+})
+
+export const webhookDeliveryRetries = new Counter({
+  name: "webhook_delivery_retries_total",
+  help: "Webhook delivery retries after the initial attempt",
+  registers: [metricsRegistry],
+})
+
+export const webhookDeliveryDuration = new Histogram({
+  name: "webhook_delivery_duration_seconds",
+  help: "Time spent delivering a webhook event",
+  labelNames: ["status"],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+  registers: [metricsRegistry],
+})
+
+export const webhookDeadLetterVolume = new Gauge({
+  name: "webhook_dead_letter_volume",
+  help: "Number of webhook deliveries currently in the dead-letter store",
+  registers: [metricsRegistry],
+})
+
 const retentionLabels = ["indexer"] as const
 
 export function counter(name: string, help: string) {

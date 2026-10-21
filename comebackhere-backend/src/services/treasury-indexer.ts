@@ -251,7 +251,7 @@ export async function processIndexerBatch(
           amount: amount.toString(),
           token,
           tx_hash: txHash,
-        }).catch((err: unknown) => {
+        }, undefined, fetch, { eventId }).catch((err: unknown) => {
           logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_proposed" }, "Treasury webhook dispatch failed")
         })
       }
@@ -270,7 +270,7 @@ export async function processIndexerBatch(
           signer,
           approval_weight: newWeight.toString(),
           tx_hash: txHash,
-        }).catch((err: unknown) => {
+        }, undefined, fetch, { eventId }).catch((err: unknown) => {
           logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_approved" }, "Treasury webhook dispatch failed")
         })
       }
@@ -297,7 +297,7 @@ export async function processIndexerBatch(
           amount: updatedRecord?.amount ?? "0",
           token: updatedRecord?.token ?? "",
           tx_hash: txHash,
-        }).catch((err: unknown) => {
+        }, undefined, fetch, { eventId }).catch((err: unknown) => {
           logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_executed" }, "Treasury webhook dispatch failed")
         })
       }
