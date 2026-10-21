@@ -5,6 +5,7 @@
 //! router — `build_router` — exactly as production wires it up, instead of
 //! re-assembling routes per test.
 
+pub mod correlation;
 pub mod extractors;
 pub mod handlers_readiness;
 pub mod idempotency;
@@ -16,7 +17,7 @@ pub mod types;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Router;
+use axum::{middleware, Router};
 use idempotency::IdempotencyStore;
 use rate_limiter::{new_store, RateLimitConfig, RateLimiterLayer};
 use utoipa::OpenApi as _;
@@ -29,6 +30,7 @@ use routes::{
 };
 use handlers_readiness::readiness_probe;
 use soroban::SorobanClient;
+use correlation::correlation_middleware;
 
 /// Shared application state threaded through every route handler.
 #[derive(Clone)]
@@ -79,6 +81,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/invoices/:id/pay", axum::routing::post(pay_invoice))
         .route("/invoices/:id/cancel", axum::routing::post(cancel_invoice))
         .route("/invoices/:id/refund", axum::routing::post(refund_invoice))
+        .layer(middleware::from_fn(correlation_middleware))
         .layer(rl_layer)
         .with_state(state)
 }
