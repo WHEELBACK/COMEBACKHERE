@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { InvoiceStatus, type Invoice, type PaymentResult } from "../types"
 import { fetchInvoice, payInvoice, cancelInvoice, requestRefund, releaseEscrow } from "../utils/soroban"
 
@@ -15,20 +15,37 @@ interface UseInvoiceReturn {
   release: (publicKey: string) => Promise<PaymentResult>
 }
 
-export function useInvoice(): UseInvoiceReturn {
+const LOAD_TIMEOUT_MS = 30_000
+
+export function useInvoice(accountKey?: string | null): UseInvoiceReturn {
   const [invoice, setInvoice] = useState<Invoice | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Drop cached invoice details when the connected account changes.
+  const prevAccount = useRef(accountKey)
+  useEffect(() => {
+    if (prevAccount.current !== accountKey) {
+      prevAccount.current = accountKey
+      setInvoice(null)
+      setError(null)
+    }
+  }, [accountKey])
+
   const loadInvoice = useCallback(async (id: number) => {
     setLoading(true)
     setError(null)
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      const result = await fetchInvoice(CONTRACT_ID, id)
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Invoice request timed out")), LOAD_TIMEOUT_MS)
+      })
+      const result = await Promise.race([fetchInvoice(CONTRACT_ID, id), timeout])
       setInvoice(result)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load invoice")
     } finally {
+      clearTimeout(timer)
       setLoading(false)
     }
   }, [])

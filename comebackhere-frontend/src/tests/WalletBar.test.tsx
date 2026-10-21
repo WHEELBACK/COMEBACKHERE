@@ -127,7 +127,7 @@ describe("WalletBar — connected state", () => {
   it("renders the truncated address with the full address accessible", () => {
     renderBar(STATES.connected)
     const addr = screen.getByTestId("wallet-address")
-    expect(addr).toHaveTextContent(`GBDXOE...${ADDRESS.slice(-4)}`)
+    expect(addr).toHaveTextContent(`${ADDRESS.slice(0, 8)}...${ADDRESS.slice(-8)}`)
     expect(addr).toHaveAttribute("aria-label", `Wallet connected: ${ADDRESS}`)
   })
 
