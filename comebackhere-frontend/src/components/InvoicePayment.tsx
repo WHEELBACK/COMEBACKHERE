@@ -176,6 +176,16 @@ export function InvoicePayment() {
         </div>
       )}
 
+      {/* Persistent live region so the receipt replacing the status message is still announced */}
+      <div
+        role="status"
+        aria-live="polite"
+        data-testid="payment-announcement"
+        style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap" }}
+      >
+        {showReceipt && result?.success ? t("invoicePayment.paymentSuccess") : ""}
+      </div>
+
       {result && !showReceipt && (
         <div
           className={`message message--${result.success ? "success" : "error"}`}
