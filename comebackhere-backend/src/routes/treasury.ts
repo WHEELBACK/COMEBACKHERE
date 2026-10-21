@@ -48,6 +48,33 @@ export { getBalanceCache, setBalanceCache, invalidateBalanceCache }
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
+router.get("/pending-settlements", async (_req: Request, res: Response) => {
+  try {
+    const database = await connectMongo()
+    const settlements = getSettlementsCollection(database)
+    const records = await settlements
+      .find({ status: "Pending" })
+      .sort({ id: 1 })
+      .toArray()
+
+    res.json(
+      records.map((s) => ({
+        id: s.id,
+        merchant_address: s.merchant_address,
+        amount: s.amount,
+        approvals: s.approvals,
+        approval_weight: s.approval_weight,
+        status: s.status,
+        hold_reason: s.hold_reason,
+        proposed_tx_hash: s.proposed_tx_hash ?? null,
+        executed_tx_hash: s.executed_tx_hash ?? null,
+      })),
+    )
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    res.status(500).json({ error: message })
+  }
+})
 router.get("/pending-settlements", asyncHandler(async (_req: Request, res: Response) => {
   const database = await connectMongo()
   const settlements = getSettlementsCollection(database)

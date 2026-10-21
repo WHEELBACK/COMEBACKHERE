@@ -1,8 +1,52 @@
+# ── Secrets & environment ────────────────────────────────────────────────────
 # Environment files
 .env
 .env.local
 .env.mainnet
 .env.testnet
+.env.local
+.env.*.local
+
+# ── Deployed contract addresses (environment-specific) ───────────────────────
+artifacts/addresses.json
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+**/node_modules/
+
+# ── Build outputs ─────────────────────────────────────────────────────────────
+dist/
+build/
+out/
+**/dist/
+
+# ── Test artifacts ────────────────────────────────────────────────────────────
+coverage/
+**/coverage/
+
+# Vitest / Jest snapshots
+**/__snapshots__/
+**/*.snap
+
+# Playwright
+**/playwright-report/
+**/test-results/
+**/blob-report/
+**/playwright/.cache/
+
+# ── TypeScript cache ──────────────────────────────────────────────────────────
+*.tsbuildinfo
+**/tsconfig.tsbuildinfo
+
+# ── Vite cache ────────────────────────────────────────────────────────────────
+**/.vite/
+
+# ── Rust / Cargo build artifacts ─────────────────────────────────────────────
+**/target/
+
+# ── OS / editor noise ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
 .env.*.local
 
 # Build output
@@ -97,6 +141,21 @@ playwright-report/
 *.swo
 *~
 
+# ── IDE-specific ──────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 # Coverage reports
 comebackhere-frontend/coverage/
 frontend/coverage/

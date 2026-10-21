@@ -15,6 +15,11 @@ const EVENT_LABELS: Record<TransactionEventType, string> = {
 
 const PAGE_SIZE = 5
 
+/** Format a millisecond timestamp as a UTC date-time string. */
+function formatUTC(ms: number): string {
+  return new Date(ms).toISOString().replace("T", " ").slice(0, 19) + " UTC"
+}
+
 function buildEvents(invoice: Invoice): TransactionEvent[] {
   const now = Date.now()
   const expiresAt = invoice.expires_at * 1000
@@ -245,7 +250,7 @@ export function TransactionHistory({ invoice }: { invoice: Invoice }) {
                 <div className="history-item__meta">
                   <span className="history-item__type">{EVENT_LABELS[entry.type]}</span>
                   <span className="history-item__timestamp">
-                    {new Date(entry.timestamp).toLocaleString()}
+                    {formatUTC(entry.timestamp)}
                   </span>
                 </div>
                 <p className="history-item__description">{entry.description}</p>

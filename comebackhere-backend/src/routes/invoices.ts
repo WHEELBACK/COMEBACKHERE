@@ -84,6 +84,8 @@ export async function createInvoice(
   const sendResult = await client.sendTransaction(prepared)
   if (sendResult.status === "ERROR") {
     throw Object.assign(
+      new Error(`Soroban submission failed: ${(sendResult as any).errorResult?.toXDR("base64")}`),
+      { status: 422, tx_hash: (sendResult as any).hash as string | undefined }
       new Error(
         `Soroban submission failed: ${(sendResult as { errorResult?: { toXDR: (format: string) => string } }).errorResult?.toXDR("base64")}`,
       ),
@@ -100,11 +102,11 @@ export async function createInvoice(
   }
 
   if (!getResult || getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
-    throw Object.assign(new Error("Transaction confirmation timeout"), { status: 504 })
+    throw Object.assign(new Error("Transaction confirmation timeout"), { status: 504, tx_hash: hash })
   }
 
   if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
-    throw Object.assign(new Error("Soroban transaction failed"), { status: 422 })
+    throw Object.assign(new Error("Soroban transaction failed"), { status: 422, tx_hash: hash })
   }
 
   const returnVal = (getResult as SorobanRpc.Api.GetSuccessfulTransactionResponse).returnValue
@@ -545,6 +547,14 @@ router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req
         durability: xdr.ContractDataDurability.persistent(),
       })
     )
+    res.status(201).json(result)
+  } catch (err: unknown) {
+    const status = (err as any)?.status ?? 500
+    const message = err instanceof Error ? err.message : String(err)
+    const tx_hash = (err as any)?.tx_hash as string | undefined
+    const body: { error: string; tx_hash?: string } = { error: message }
+    if (tx_hash) body.tx_hash = tx_hash
+    res.status(status).json(body)
   )
 
   if (!entries.entries.length) {

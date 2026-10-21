@@ -282,7 +282,7 @@ export function InvoicePayment() {
             <div className="detail-row">
               <span className="detail-label">{t("invoiceCard.expiry")}</span>
               <span className="detail-value">
-                {new Date(invoice.expires_at * 1000).toLocaleString()}
+                {new Date(invoice.expires_at * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC"}
               </span>
             </div>
             <div className="detail-row">

@@ -254,6 +254,28 @@ export default function SettlementDetail({ settlement, threshold, signers }: Set
           <span className="settlement-detail__label">Total Signer Weight</span>
           <span className="settlement-detail__value">{totalWeight}</span>
         </div>
+        {settlement.proposed_tx_hash && (
+          <div className="settlement-detail__row">
+            <span className="settlement-detail__label">Proposal Tx Hash</span>
+            <span
+              className="settlement-detail__value settlement-detail__value--hash"
+              title={settlement.proposed_tx_hash}
+            >
+              {shorten(settlement.proposed_tx_hash)}
+            </span>
+          </div>
+        )}
+        {settlement.executed_tx_hash && (
+          <div className="settlement-detail__row">
+            <span className="settlement-detail__label">Execution Tx Hash</span>
+            <span
+              className="settlement-detail__value settlement-detail__value--hash"
+              title={settlement.executed_tx_hash}
+            >
+              {shorten(settlement.executed_tx_hash)}
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="settlement-detail__progress-section">
