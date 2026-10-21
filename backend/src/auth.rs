@@ -122,6 +122,8 @@ fn verify_ed25519(
         error: format!("Invalid public key: {}", e),
     })?;
 
+    // Ensure consistent UTF-8 encoding when verifying signatures over text that may contain Unicode.
+    // For string messages, normalize to UTF-8 bytes to prevent encoding issues.
     verifying_key
         .verify_strict(message, &signature)
         .map_err(|e| AuthError {

@@ -77,7 +77,7 @@ pub fn build_router(state: AppState) -> Router {
     // CORS layer: allow common frontend origins and methods
     let cors_layer = CorsLayer::permissive();
 
-    Router::new()
+    let api_router = Router::new()
         .route("/health/rpc", axum::routing::get(get_rpc_health))
         .route("/health/ready", axum::routing::get(readiness_probe))
         .route("/invoices", axum::routing::post(create_invoice))
@@ -88,7 +88,17 @@ pub fn build_router(state: AppState) -> Router {
         .layer(cors_layer)
         .layer(middleware::from_fn(correlation_middleware))
         .layer(rl_layer)
-        .with_state(state)
+        .with_state(state);
+
+    // Support optional API_PREFIX for deployment behind reverse proxies
+    // e.g., API_PREFIX=/api/v1 routes become /api/v1/invoices instead of /invoices
+    let prefix = std::env::var("API_PREFIX").unwrap_or_else(|_| String::new());
+    if prefix.is_empty() {
+        api_router
+    } else {
+        Router::new()
+            .nest(&prefix, api_router)
+    }
 }
 
 #[derive(utoipa::OpenApi)]

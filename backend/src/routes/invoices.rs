@@ -37,6 +37,30 @@ pub async fn create_invoice(
             .into_response();
     }
 
+    // Validate that gross amount is not zero
+    if body.gross_usdc == 0 {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: "Gross amount must be greater than zero".to_string(),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
+    // Validate that gross amount is >= net amount
+    if body.gross_usdc < body.amount_usdc {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: "Gross amount must be >= net amount".to_string(),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
     // Issue #869: Validate token symbol is supported (whitelist)
     let supported_tokens = ["USDC", "XLM", "native"];
     if !supported_tokens.contains(&body.token.as_str()) {
