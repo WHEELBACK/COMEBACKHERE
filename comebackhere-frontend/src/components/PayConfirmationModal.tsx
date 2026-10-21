@@ -1,3 +1,5 @@
+import { useEffect } from "react"
+import { useWallet } from "../hooks/useWallet"
 import { useFocusTrap } from "../hooks/useFocusTrap"
 import type { Invoice } from "../types"
 import { StatusBadge } from "./StatusBadge"
@@ -18,6 +20,13 @@ export function PayConfirmationModal({
   submitting,
 }: PayConfirmationModalProps) {
   const modalRef = useFocusTrap({ onClose: onCancel, disabled: submitting })
+  const { connected } = useWallet()
+
+  // Close the dialog if the wallet disconnects while it is open.
+  useEffect(() => {
+    if (!connected && !submitting) onCancel()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected])
 
   return (
     <div

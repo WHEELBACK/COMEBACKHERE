@@ -112,16 +112,27 @@ async function checkConnection() {
   if (seq === requestSeq && !pollPaused()) setState(next)
 }
 
+function onWindowRefresh() {
+  if (document.visibilityState === "hidden") return
+  void checkConnection()
+}
+
 function subscribe(listener: () => void) {
   listeners.add(listener)
   if (listeners.size === 1) {
     void checkConnection()
     pollTimer = window.setInterval(() => void checkConnection(), POLL_INTERVAL_MS)
+    // Re-read the account and network right away when the user returns from the
+    // wallet extension, so a network switch is reflected without waiting for a poll.
+    window.addEventListener("focus", onWindowRefresh)
+    document.addEventListener("visibilitychange", onWindowRefresh)
   }
   return () => {
     listeners.delete(listener)
     if (listeners.size === 0) {
       window.clearInterval(pollTimer)
+      window.removeEventListener("focus", onWindowRefresh)
+      document.removeEventListener("visibilitychange", onWindowRefresh)
       pollTimer = undefined
       // Nothing is watching the wallet any more: start fresh next time.
       state = INITIAL_STATE

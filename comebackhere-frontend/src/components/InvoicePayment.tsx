@@ -311,7 +311,7 @@ export function InvoicePayment() {
               <button
                 className="btn btn--primary"
                 onClick={handlePayClick}
-                disabled={!!notReadyReason}
+                disabled={!!notReadyReason || submitting}
                 aria-describedby={notReadyReason ? "payment-wallet-reason" : undefined}
                 aria-label={`Pay invoice #${invoice.id}`}
               >
