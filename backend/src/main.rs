@@ -179,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::from_env();
 
+
     // Soroban RPC failover (issue #970).
     //
     // `SOROBAN_RPC_URLS` accepts a comma-separated list of RPC endpoints
@@ -236,6 +237,14 @@ async fn main() -> anyhow::Result<()> {
     if std::env::var("RECONCILE_ON_STARTUP").as_deref() == Ok("1") {
         tracing::info!("reconciliation against ledger checkpoints requested");
     }
+
+    // Wire the retry queue into live webhook dispatch.  Production webhook
+    // events are routed through the retry/dead-letter path instead of a
+    // single-attempt dispatch.  The worker runs in the background and drains
+    // the queue with backoff, moving exhausted deliveries to the dead-letter
+    // store where they can be replayed.
+    state.spawn_webhook_retry_worker();
+
 
     let app = build_router(state);
 
