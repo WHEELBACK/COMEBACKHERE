@@ -279,7 +279,10 @@ impl TreasuryContract {
                 return Err(TreasuryError::DuplicateSigner);
             }
             seen.push_back(signer.clone());
-            total_weight += weight;
+            // Use checked_add to prevent overflow when summing signer weights
+            total_weight = total_weight
+                .checked_add(weight)
+                .ok_or(TreasuryError::InvalidWeightSum)?;
         }
         if total_weight < threshold {
             return Err(TreasuryError::InvalidWeightSum);
@@ -552,7 +555,11 @@ impl TreasuryContract {
             .instance()
             .get(&DataKey::Signer(signer.clone()))
             .unwrap_or(0u64);
-        settlement.approval_weight += weight;
+        // Use checked_add to prevent overflow when accumulating approval weight
+        settlement.approval_weight = settlement
+            .approval_weight
+            .checked_add(weight)
+            .ok_or(TreasuryError::InvalidWeightSum)?;
         e.storage()
             .instance()
             .set(&DataKey::Settlement(settlement_id), &settlement);

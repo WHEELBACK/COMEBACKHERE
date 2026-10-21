@@ -66,7 +66,10 @@ impl SettlementContract {
                 return Err(SettlementError::DuplicateSigner);
             }
             seen.push_back(signer.clone());
-            total_weight += weight;
+            // Use checked_add to prevent overflow when summing signer weights
+            total_weight = total_weight
+                .checked_add(weight)
+                .ok_or(SettlementError::InvalidWeightSum)?;
         }
         if total_weight < threshold {
             return Err(SettlementError::InvalidWeightSum);
@@ -142,7 +145,10 @@ impl SettlementContract {
             return Err(SettlementError::AlreadyApproved);
         }
 
-        settlement.approval_weight += weight;
+        settlement.approval_weight = settlement
+            .approval_weight
+            .checked_add(weight)
+            .ok_or(SettlementError::InvalidWeightSum)?;
         settlement.approvals.push_back(signer);
         e.storage()
             .instance()

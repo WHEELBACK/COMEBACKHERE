@@ -66,12 +66,16 @@ coverage/
 **/test_snapshots/
 **/__snapshots__/
 **/*.snap
+**/*.snap.bak
 test-results/
 playwright-report/
 **/playwright-report/
 **/test-results/
 coverage/
 .nyc_output/
+**/test-results/
+**/allure-results/
+**/allure-report/
 
 # Vitest / Jest HTML reports and coverage artefacts
 vitest-report/

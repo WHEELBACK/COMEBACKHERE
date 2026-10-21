@@ -282,12 +282,20 @@ export async function processIndexerBatch(
       // GET /api/treasury/balances reads fresh data instead of waiting for TTL.
       invalidateBalanceCache(`settlement_executed id=${settlementId} tx=${txHash}`)
 
-      // Dispatch signed webhook for settlement_executed
+      // Dispatch signed webhook for settlement_executed.
+      // IMPORTANT: read the status from the DB record we just wrote so the
+      // webhook always reflects the current, authoritative status ("Executed")
+      // and never carries a stale in-memory value from before the DB update.
       const webhookUrl = process.env.WEBHOOK_URL
       if (webhookUrl) {
+        const updatedRecord = await settlements.findOne({ id: settlementId })
         dispatchWebhook(webhookUrl, {
           event: "settlement_executed",
           settlement_id: settlementId,
+          status: updatedRecord?.status ?? "Executed",
+          merchant_address: updatedRecord?.merchant_address ?? "",
+          amount: updatedRecord?.amount ?? "0",
+          token: updatedRecord?.token ?? "",
           tx_hash: txHash,
         }).catch((err: unknown) => {
           logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_executed" }, "Treasury webhook dispatch failed")
