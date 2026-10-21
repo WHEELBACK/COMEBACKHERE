@@ -37,14 +37,18 @@ pub async fn create_invoice(
             }),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-                code: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => {
+            // Log internal error details for debugging, but don't expose to client
+            tracing::error!("invoice creation failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to create invoice. Please contact support if this persists.".to_string(),
+                    code: Some(500),
+                }),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -75,13 +79,17 @@ pub async fn get_invoice(
             }),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-                code: None,
-            }),
-        )
-            .into_response(),
+        Err(e) => {
+            // Log internal error details for debugging, but don't expose to client
+            tracing::error!("invoice lookup failed for id {}: {}", id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to retrieve invoice. Please contact support if this persists.".to_string(),
+                    code: Some(500),
+                }),
+            )
+                .into_response()
+        }
     }
 }
