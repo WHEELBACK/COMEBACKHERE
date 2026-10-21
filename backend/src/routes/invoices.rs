@@ -54,6 +54,18 @@ pub async fn create_invoice(
             .into_response();
     }
 
+    // Validate that expires_in_seconds is not zero or expired (must be positive)
+    if body.expires_in_seconds == 0 {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: "Invoice expiration time must be greater than zero".to_string(),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
     // The merchant, token, amounts and expiry are carried by the pre-signed
     // transaction; the backend just forwards it to Soroban.
     match state.client.create_invoice(&body.signed_xdr).await {
@@ -62,7 +74,7 @@ pub async fn create_invoice(
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
                 error: "Only the invoice merchant is authorised to create an invoice".to_string(),
-                code: Some(1),
+                code: Some(403),
             }),
         )
             .into_response(),
@@ -110,7 +122,7 @@ pub async fn get_invoice(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: format!("Invoice {} not found", id),
-                code: Some(6),
+                code: Some(404),
             }),
         )
             .into_response(),

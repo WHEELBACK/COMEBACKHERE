@@ -55,21 +55,21 @@ pub async fn cancel_invoice(
             serde_json::json!(ErrorResponse {
                 error: "Only the invoice merchant is authorised to cancel this invoice"
                     .to_string(),
-                code: Some(1),
+                code: Some(403),
             }),
         ),
         Err(e) if e.to_string().contains("NOT_FOUND") => (
             StatusCode::NOT_FOUND,
             serde_json::json!(ErrorResponse {
                 error: format!("Invoice {} not found", id),
-                code: Some(4),
+                code: Some(404),
             }),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!(ErrorResponse {
                 error: e.to_string(),
-                code: None,
+                code: Some(500),
             }),
         ),
     };

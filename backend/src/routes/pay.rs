@@ -54,21 +54,21 @@ pub async fn pay_invoice(
             StatusCode::FORBIDDEN,
             serde_json::json!(ErrorResponse {
                 error: "Payer does not match the expected address for this invoice".to_string(),
-                code: Some(1),
+                code: Some(403),
             }),
         ),
         Err(e) if e.to_string().contains("NOT_FOUND") => (
             StatusCode::NOT_FOUND,
             serde_json::json!(ErrorResponse {
                 error: format!("Invoice {} not found", id),
-                code: Some(6),
+                code: Some(404),
             }),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!(ErrorResponse {
                 error: e.to_string(),
-                code: None,
+                code: Some(500),
             }),
         ),
     };
