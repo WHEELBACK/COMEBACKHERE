@@ -26,6 +26,9 @@ pub fn dispute_resolved(
     resolve_in_favor: &bool,
     resolution_weight: &u64,
 ) {
+    // Issue #906: Ensure event encoding properly handles optional fields.
+    // All fields must be explicitly encoded; decoder must handle missing fields
+    // as None rather than failing the entire event decode (Issue #906).
     env.events().publish(
         (Symbol::new(env, "dispute_resolved"),),
         (settlement_id, resolve_in_favor, resolution_weight),

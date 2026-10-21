@@ -697,6 +697,10 @@ impl TreasuryContract {
                 .instance()
                 .get::<DataKey, Settlement>(&DataKey::Settlement(id))
             {
+                // Only include settlements that are Pending and not expired.
+                // Exclude Cancelled, Executed, and PartiallyExecuted settlements
+                // from reconciliation count to prevent reverted transactions from being
+                // counted as complete (Issue #905).
                 if matches!(s.status, SettlementStatus::Pending)
                     && e.ledger().timestamp() < s.expires_at
                 {
