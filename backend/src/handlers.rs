@@ -199,6 +199,57 @@ pub async fn health() -> Json<HealthResponse> {
     })
 }
 
+// ─── Webhook receiver (public) ───────────────────────────────────────────
+
+/// Minimal webhook receiver example.
+///
+/// Verifies the `X-Webhook-Signature` header (HMAC-SHA256 over the raw body,
+/// hex-encoded) against `WEBHOOK_SECRET`, then deduplicates deliveries by
+/// `X-Webhook-Delivery` id so retried deliveries are not processed twice.
+pub async fn receive_webhook(
+    State(state): State<crate::webhook::WebhookState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let signature = headers
+        .get("x-webhook-signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+
+    if !crate::webhook::verify_signature(&state.secret, &body, signature) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "invalid signature" })),
+        );
+    }
+
+    let delivery_id = headers
+        .get("x-webhook-delivery")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    if delivery_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "missing delivery id" })),
+        );
+    }
+
+    if !state.mark_delivery(&delivery_id) {
+        // Duplicate / retried delivery: acknowledge without reprocessing.
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "duplicate", "delivery": delivery_id })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "processed", "delivery": delivery_id })),
+    )
+}
+
 // ─── Merchant routes (protected) ─────────────────────────────────────────
 
 pub async fn create_merchant_api_key(

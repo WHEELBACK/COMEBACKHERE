@@ -35,6 +35,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Generate typed API client
+        run: npm run generate:api-client
+
+      - name: Check generated client is up to date
+        run: |
+          if [ -n "$(git status --porcelain -- src/api/generated)" ]; then
+            echo "::error::Generated API client is stale. Run 'npm run generate:api-client' and commit the result."
+            git --no-pager diff -- src/api/generated
+            exit 1
+          fi
+
       - name: Type check
         run: npx tsc --noEmit
 
