@@ -187,7 +187,7 @@ A committed JSON file in the `abis/` directory that captures the contract's curr
 The automatic placement of a settlement into `OnHold` status when a `raise_dispute` call is made against it. Until the dispute is resolved (and the claimant or counterparty achieves the `resolution_weight` threshold), the settlement cannot be executed.
 
 **Mirrored Tree**
-The dual-source-tree pattern where the same contract source code exists in both `COMEBACKHERE-contracts/contracts/<name>/` and top-level `contracts/<name>/` directories. The `COMEBACKHERE-` prefix tree is canonical and CI-tested; the top-level tree is deprecated but still referenced in some documentation. See `docs/ARCHITECTURE.md` for migration status.
+An older in-repository copy of a canonical source tree. The former contract mirror has been removed; the backend and frontend mirrors remain during their migrations. See `ARCHITECTURE.md` for current source-of-truth paths.
 
 **Signer Weight**
 The numeric weight assigned to each signer in the treasury via `add_signer` or `update_signer_weight`. When a signer approves a settlement or votes on a dispute, their weight contributes to the cumulative approval weight. A signer with weight 0 is considered inactive. See also _Threshold_.

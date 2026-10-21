@@ -6,7 +6,7 @@ This repository sits at the centre of the COMEBACKHERE protocol and orchestrates
 - **Backend API** — Node/Express service that fronts the contracts.
 - **Frontend UI** — React/Vite app used by merchants, payers, and admins.
 
-Each layer has **two source trees in this repository**, plus CI jobs that pull a third copy from upstream. This document explains which tree to target when contributing.
+Contracts have one canonical source tree in this repository. The backend and frontend also retain older mirrored trees while their migrations continue. This document explains which tree to target when contributing.
 
 ## Canonical trees (where changes go)
 
@@ -18,27 +18,23 @@ The active source of truth for each layer lives in a tree with the `COMEBACKHERE
 | Backend (Node) | `comebackhere-backend/` | Referenced by `.github/workflows/ci.yml` for `npm ci`, `tsc --noEmit`, `npm run lint`, `npm run build`. |
 | Frontend (React) | `comebackhere-frontend/` | Same as backend — the `ci.yml` `working-directory` points here. |
 
-New feature work, bug fixes, and contract changes should target these three directories by default — they're the only ones with a dedicated, contract-specific CI workflow.
+New feature work, bug fixes, and contract changes should target these three directories by default — they're the source trees covered by the full CI workflows.
 
-## Mirrored trees (older in-tree copies)
+## Remaining mirrored trees
 
-The repository also contains a parallel set of directories without the prefix:
+The repository retains older backend and frontend copies without the prefix:
 
-- `contracts/` and `backend/` and `frontend/`
+- `backend/` and `frontend/`
 
-These are in-tree copies of the canonical sources at earlier points in time. They are kept because:
+The former contract mirror was removed in PR #948. The remaining mirrors are in-tree copies of canonical backend and frontend sources at earlier points in time. They are kept because:
 
-- Process docs reference them by path. `docs/error-codes.md` calls out `contracts/invoice/src/lib.rs` as the source of `InvoiceError`; that file still lives here.
 - They give reviewers a familiar path while the migration to the `COMEBACKHERE-*` trees completes.
 
-These trees are valid PR targets. They have dedicated CI coverage:
+The remaining mirrors are valid PR targets. They have dedicated CI coverage:
 
-- `ci-legacy-contracts.yml` runs `cargo test --manifest-path contracts/Cargo.toml` on changes to `contracts/**`.
 - `ci-legacy-frontend.yml` runs `npm test` for `frontend/` on changes to `frontend/**`.
 
-The legacy contract and frontend tests use the same toolchain and patterns as the canonical trees.
-
-If your change is brand-new work, target the `COMEBACKHERE-*` tree to inherit full CI coverage and ensure parity is maintained. If your change is intentionally narrow (a doc tweak, a small Rust fix to legacy contract files), the mirrored tree is fine and will still be tested.
+If your change is brand-new work, target the `COMEBACKHERE-*` tree to inherit full CI coverage and ensure parity is maintained. The remaining backend and frontend mirrors are still available during their migrations.
 
 ## CI checkout behaviour
 
@@ -71,7 +67,7 @@ When working inside this repository alone, the in-tree `COMEBACKHERE-contracts/`
 
 ## Invoice state machine
 
-The invoice contract (`COMEBACKHERE-contracts/contracts/invoice/src/lib.rs`, mirrored at `contracts/invoice/src/lib.rs`) is the source of truth every other layer reads from: backend status displays, the indexer, and both frontend apps all ultimately derive their view of an invoice from this state machine. The diagram below shows every `InvoiceStatus` value and the function whose call transitions an invoice into it. Any transition not shown here is illegal and the calling function returns an `InvalidStateTransition` / `NotPending` style error (see [docs/error-codes.md](docs/error-codes.md) for the exact variant and code per contract).
+The invoice contract (`COMEBACKHERE-contracts/contracts/invoice/src/lib.rs`) is the source of truth every other layer reads from: backend status displays, the indexer, and both frontend apps all ultimately derive their view of an invoice from this state machine. The diagram below shows every `InvoiceStatus` value and the function whose call transitions an invoice into it. Any transition not shown here is illegal and the calling function returns an `InvalidStateTransition` / `NotPending` style error (see [docs/error-codes.md](docs/error-codes.md) for the exact variant and code per contract).
 
 ```mermaid
 stateDiagram-v2

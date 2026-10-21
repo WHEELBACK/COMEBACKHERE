@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/check_error_docs_sync.sh
 #
-# Verify that every error variant declared in `contracts/` and
-# `COMEBACKHERE-contracts/` is documented in `docs/error-codes.md`.
+# Verify that every error variant declared in the canonical contract workspace
+# is documented in `docs/error-codes.md`.
 #
 # This is a deliberately small grep/regex-based check; it intentionally
 # avoids a full Rust AST parser. It emits one CI failure category: a
@@ -53,8 +53,6 @@ fi
 # 2. Scan contract sources for enum/variant tuples.
 # -----------------------------------------------------------------------------
 CODE_DIRS=(
-  "$ROOT/contracts/invoice/src"
-  "$ROOT/contracts/settlement/src"
   "$ROOT/COMEBACKHERE-contracts/contracts/invoice/src"
   "$ROOT/COMEBACKHERE-contracts/contracts/treasury/src"
   "$ROOT/COMEBACKHERE-contracts/contracts/compliance/src"

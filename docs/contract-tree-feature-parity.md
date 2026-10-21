@@ -1,4 +1,6 @@
-# Contract Source Tree Feature Parity
+# Contract Source Tree Migration Record
+
+The legacy contract workspace was removed in PR #948. `COMEBACKHERE-contracts/` is now the only in-repository contract source and is covered by the canonical contract CI workflow. The inventory below records the differences that led to the removal; it is historical, not a current parity checklist.
 
 This page tracks feature parity between the two in-tree contract workspaces:
 
@@ -49,27 +51,6 @@ This page tracks feature parity between the two in-tree contract workspaces:
 
 ---
 
-## When to target the legacy tree
+## Historical notes
 
-The legacy `contracts/` tree is a valid PR target only when:
-
-1. The change is a **narrow fix** to a file that CI already covers
-   (e.g. a doc tweak or a small Rust fix in `contracts/invoice/src/lib.rs`).
-2. You are intentionally maintaining backward compatibility with the
-   legacy workspace for a transitional period.
-
-For **all new features, bug fixes, and contract changes**, target
-`COMEBACKHERE-contracts/` to inherit full CI coverage.
-
----
-
-## Migration checklist
-
-As features are ported or parity issues resolved, update this table by
-flipping the status column. The goal is full parity — at which point the
-legacy tree can be removed.
-
-- [x] Port `api-integration-tests` to canonical workspace (or remove)
-- [ ] Resolve `settlement` vs `treasury` naming alignment
-- [ ] Add `events.rs` and `test.rs` / `tests.rs` to legacy invoice (or remove legacy tree)
-- [ ] Remove legacy tree once no doc references remain
+The historical inventory above records the legacy invoice gaps and the treasury/compliance features that were not mirrored. The settlement-only legacy contract was superseded by the canonical treasury contract. New work belongs in `COMEBACKHERE-contracts/`.

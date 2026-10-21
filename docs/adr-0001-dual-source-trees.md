@@ -10,12 +10,13 @@ The repository contains two parallel source trees for each layer of the stack:
 
 | Layer | Canonical tree | Legacy tree |
 | --- | --- | --- |
-| Contracts (Rust) | `COMEBACKHERE-contracts/` | `contracts/` |
+| Contracts (Rust) | `COMEBACKHERE-contracts/` | Removed in PR #948 |
 | Backend (Node/Express) | `comebackhere-backend/` | `backend/` |
 | Frontend (React) | `comebackhere-frontend/` | `frontend/` |
 
-The legacy trees (`contracts/`, `backend/`, `frontend/`) were the original
-in-tree copies of the source code. When the project reorganised to use
+The legacy trees were the original in-tree copies of the source code. The
+contract mirror was removed in PR #948; the backend and frontend mirrors remain.
+When the project reorganised to use
 dedicated CI workflows per layer (`.github/workflows/ci-contracts.yml`,
 `ci.yml`), new canonical directories were introduced with the `COMEBACKHERE-`
 prefix. The legacy trees were kept in place rather than deleted.
@@ -24,17 +25,15 @@ prefix. The legacy trees were kept in place rather than deleted.
 
 1. **CI restructure.** The canonical trees are wired into GitHub Actions
    workflows that run `cargo test`, `npm ci`, `tsc --noEmit`, and
-   `npm run build` on every PR. The legacy trees have no equivalent
-   dedicated CI — they rely on file-matching jobs that may or may not
-   cover a given change.
+   `npm run build` on every PR. The former contract mirror had no
+   equivalent dedicated CI coverage.
 
-2. **Backward-compatible doc references.** Documentation such as
-   `docs/error-codes.md` cites `contracts/invoice/src/lib.rs` as the
-   source of `InvoiceError`. Removing the legacy tree without updating
-   every reference would break cross-links.
+2. **Backward-compatible doc references.** Documentation once cited
+   files in the contract mirror. Those references now point to canonical
+   contract sources or identify historical error codes.
 
-3. **Reviewer familiarity.** Contributors accustomed to the old paths
-   could continue reviewing changes at the same locations during the
+3. **Reviewer familiarity.** Contributors accustomed to the old backend
+   and frontend paths could continue reviewing changes there during the
    transition period.
 
 4. **No-breaking-change migration.** Deleting the legacy trees in a
@@ -44,9 +43,8 @@ prefix. The legacy trees were kept in place rather than deleted.
 ### What each tree contains
 
 The canonical trees carry the full current source plus event modules,
-benchmark suites, integration tests, and ABI-generation hooks. The legacy
-trees carry an older snapshot — some modules (e.g. `events.rs`,
-`benchmark.rs`, `test.rs`) have never been back-ported.
+benchmark suites, integration tests, and ABI-generation hooks. The
+remaining backend and frontend mirrors carry older snapshots.
 
 See [docs/contract-tree-feature-parity.md](./contract-tree-feature-parity.md)
 for a detailed comparison.
@@ -55,19 +53,22 @@ for a detailed comparison.
 
 ## Decision
 
-We maintain the dual-tree structure until the following conditions are met:
+The contract migration is complete: the legacy contract tree was removed
+in PR #948, and its documentation and CI references were updated. The
+backend and frontend mirrors remain until their migrations are complete.
+For those remaining mirrors:
 
 1. **All doc references** to legacy paths are updated or removed.
 2. **Full feature parity** is achieved (see the migration checklist in
    `contract-tree-feature-parity.md`).
 3. **No open PRs** target the legacy trees.
-4. A **single PR** deletes the legacy trees and updates any remaining
+4. A **single PR** removes each remaining legacy tree and updates its
    references.
 
 Until then, the rule is simple:
 
-> New work targets the `COMEBACKHERE-*` tree. The legacy tree is a valid
-> PR target only for narrow fixes to files that CI already covers.
+> New work targets the `COMEBACKHERE-*` tree. Follow the repository's
+> contributor guidance for any remaining backend or frontend mirrors.
 
 ---
 
