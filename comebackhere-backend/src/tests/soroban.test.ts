@@ -164,11 +164,6 @@ describe("getTokenBalance", () => {
   }
 
   it("returns the token balance as a bigint on success", async () => {
-    // NOTE: The source calls BigInt(balance.toString()) where balance is an
-    // Int128Parts object. Int128Parts.toString() returns "[object Object]", so
-    // BigInt() throws for any real i128 value.  This test documents the current
-    // behaviour.  When the source is fixed (e.g. to use balance.lo()._value and
-    // balance.hi()._value), this test should be updated to expect(balance).toBe(5_000_000n).
     const client = makeMockClient({
       getAccount: vi.fn().mockResolvedValue(fakeAccount),
       simulateTransaction: vi.fn().mockResolvedValue({
@@ -177,14 +172,11 @@ describe("getTokenBalance", () => {
       }),
     })
 
-    await expect(
-      getTokenBalance(client, TOKEN_CONTRACT, HOLDER, SOURCE_ACCT, NETWORK),
-    ).rejects.toThrow("Cannot convert")
+    const balance = await getTokenBalance(client, TOKEN_CONTRACT, HOLDER, SOURCE_ACCT, NETWORK)
+    expect(balance).toBe(5_000_000n)
   })
 
   it("returns 0n for a zero balance", async () => {
-    // Same source-level bug applies — BigInt(Int128Parts.toString()) always throws.
-    // This test documents the current behaviour for the zero-balance case.
     const client = makeMockClient({
       getAccount: vi.fn().mockResolvedValue(fakeAccount),
       simulateTransaction: vi.fn().mockResolvedValue({
@@ -193,9 +185,8 @@ describe("getTokenBalance", () => {
       }),
     })
 
-    await expect(
-      getTokenBalance(client, TOKEN_CONTRACT, HOLDER, SOURCE_ACCT, NETWORK),
-    ).rejects.toThrow("Cannot convert")
+    const balance = await getTokenBalance(client, TOKEN_CONTRACT, HOLDER, SOURCE_ACCT, NETWORK)
+    expect(balance).toBe(0n)
   })
 
   it("throws 422 when the simulation fails (token not found / invalid contract)", async () => {
