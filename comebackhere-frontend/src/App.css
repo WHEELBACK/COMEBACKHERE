@@ -1607,3 +1607,15 @@ h3 {
     justify-content: center;
   }
 }
+
+/* Keep the copy icon visible on narrow screens: long identifiers wrap
+   instead of pushing the control out of the viewport. */
+.copyable-text {
+  max-width: 100%;
+}
+
+.copyable-text__value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}

@@ -35,3 +35,10 @@ describe("CopyableText", () => {
     expect(writeText).toHaveBeenCalledWith("clipboard-value")
   })
 })
+
+describe("CopyableText layout", () => {
+  it("marks the value span so long identifiers can wrap beside the copy icon", () => {
+    render(<CopyableText text={"G".repeat(56)} label="Copy value" />)
+    expect(screen.getByText("G".repeat(56))).toHaveClass("copyable-text__value")
+  })
+})

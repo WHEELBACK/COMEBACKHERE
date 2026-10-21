@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react"
 import { useT } from "../i18n"
+import { getExplorerTxBaseUrl } from "../utils/explorerUrl"
 
 // ---------------------------------------------------------------------------
 // Types matching the GET /invoices/:id/events endpoint shape
@@ -90,7 +91,7 @@ async function fetchEvents(
 // Component
 // ---------------------------------------------------------------------------
 
-const DEFAULT_EXPLORER = "https://stellar.expert/explorer/testnet/tx"
+const DEFAULT_EXPLORER = getExplorerTxBaseUrl()
 
 export function InvoiceTimeline({
   invoiceId,

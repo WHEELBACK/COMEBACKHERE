@@ -38,7 +38,7 @@ export function CopyableText({ text, label, className }: CopyableTextProps) {
       aria-label={`${label ?? "Copy"}: ${text}`}
       style={{ cursor: "pointer", position: "relative", display: "inline-flex", alignItems: "center", gap: "4px" }}
     >
-      <span ref={textRef}>{text}</span>
+      <span ref={textRef} className="copyable-text__value">{text}</span>
       <svg
         width="14"
         height="14"

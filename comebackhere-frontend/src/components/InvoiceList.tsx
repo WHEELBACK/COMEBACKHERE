@@ -4,6 +4,7 @@ import { StatusBadge } from "./StatusBadge"
 import { InvoiceListSkeleton } from "./Skeleton"
 import { listInvoices, ApiError, INVOICE_PAGE_SIZE, type InvoicePage } from "../utils/api"
 import { FILTERABLE_STATUSES, statusBadgeClass, statusLabel } from "../utils/invoiceStatus"
+import { PAYMENT_COMPLETED_EVENT } from "../utils/invoiceEvents"
 import { INVOICE_TOKENS, fromSmallestUnit } from "../utils/invoiceForm"
 
 interface InvoiceListProps {
@@ -51,6 +52,13 @@ export function InvoiceList({ merchantAddress, onOpenInvoice, onCreateInvoice }:
       })
     return () => controller.abort()
   }, [merchantAddress, status, page, reloadKey])
+
+  // Refetch when a payment completes elsewhere in the app.
+  useEffect(() => {
+    const onPaid = () => setReloadKey((k) => k + 1)
+    window.addEventListener(PAYMENT_COMPLETED_EVENT, onPaid)
+    return () => window.removeEventListener(PAYMENT_COMPLETED_EVENT, onPaid)
+  }, [])
 
   const handleFilter = useCallback((next: InvoiceStatus | null) => {
     setStatus(next)

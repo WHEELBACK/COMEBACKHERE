@@ -94,3 +94,11 @@ describe("useHashTab", () => {
     expect(result.current[0]).toBe("payment")
   })
 })
+
+describe("parseTabHash after authentication expires", () => {
+  it("falls back to the default tab for stale authenticated-only routes", () => {
+    expect(parseTabHash("#/session-expired")).toBe(DEFAULT_TAB)
+    expect(parseTabHash("#login")).toBe(DEFAULT_TAB)
+    expect(parseTabHash("#%E0%A4%A")).toBe(DEFAULT_TAB)
+  })
+})
