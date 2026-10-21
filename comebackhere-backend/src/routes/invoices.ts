@@ -1,11 +1,12 @@
 import { Router, type Request, type Response } from "express"
 import type { FindCursor, WithId } from "mongodb"
 import { Keypair, TransactionBuilder, BASE_FEE, Contract, nativeToScVal, SorobanRpc, xdr } from "stellar-sdk"
-import { connectMongo, getInvoiceEventsCollection, getInvoicesCollection, type InvoiceRecord, type InvoiceStatus } from "../db/mongo.js"
+import { connectMongo, getComplianceAuditCollection, getInvoiceEventsCollection, getInvoicesCollection, type InvoiceRecord, type InvoiceStatus } from "../db/mongo.js"
 import { requireEnv } from "../lib/env.js"
-import { asyncHandler, NotFoundError } from "../lib/errors.js"
+import { asyncHandler, ForbiddenError, NotFoundError } from "../lib/errors.js"
 import { cacheGet, cacheSet } from "../lib/cache.js"
 import { validateBody, validateParams, validateQuery } from "../middleware/validate.js"
+import { requireMerchantApiKey } from "../middleware/apiKey.js"
 import { createInvoiceSchema, invoiceIdParamSchema, invoiceListQuerySchema } from "../schemas/index.js"
 import { getInvoiceStatus } from "./invoice-actions.js"
 
@@ -752,6 +753,17 @@ router.post("/", requireMerchantApiKey, validateBody(createInvoiceSchema), async
 
   const client = buildSorobanClient(env.rpcUrl)
   const body = { ...req.body, merchant_address: res.locals.merchantAddress } as CreateInvoiceBody
+
+  // #892 — reject invoice creation for compliance-blocked addresses
+  const complianceDb = await connectMongo()
+  const latestAudit = await getComplianceAuditCollection(complianceDb).findOne(
+    { address: body.merchant_address },
+    { sort: { ledger: -1, _id: -1 } },
+  )
+  if (latestAudit && latestAudit.event_type === "address_blocked") {
+    throw new ForbiddenError("Merchant address has been blocked by compliance")
+  }
+
   const result = await createInvoice(
     body,
     client,
