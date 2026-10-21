@@ -108,6 +108,13 @@ export function useFocusTrap<T extends HTMLElement = HTMLDivElement>(
       const prev = previouslyFocusedRef.current
       if (prev instanceof HTMLElement) {
         prev.focus()
+        // The trigger may be briefly disabled/re-rendered while the modal
+        // closes; retry once after the DOM settles so focus is not lost.
+        if (document.activeElement !== prev) {
+          window.setTimeout(() => {
+            if (prev.isConnected) prev.focus()
+          }, 0)
+        }
       }
     }
     // onClose identity may change between renders; using the ref pattern keeps

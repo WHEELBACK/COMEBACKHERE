@@ -66,7 +66,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const addToast = useCallback((type: ToastType, message: string, duration = 5000) => {
     const id = ++nextId
-    setToasts((prev) => [...prev, { id, type, message, duration }])
+    const text = typeof message === "string" && message.trim() ? message : "Something went wrong. Please try again."
+    setToasts((prev) => [...prev, { id, type, message: text, duration }])
   }, [])
 
   return (

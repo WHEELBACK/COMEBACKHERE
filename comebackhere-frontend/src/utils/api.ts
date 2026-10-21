@@ -1,6 +1,9 @@
 import type { InvoiceStatus } from "../types"
 
-const API_BASE = (import.meta.env.VITE_API_URL as string | undefined) || "http://localhost:3000"
+/** Resolved on every call so environment changes are never served from a stale module-level value. */
+function getApiBase(): string {
+  return (import.meta.env.VITE_API_URL as string | undefined) || "http://localhost:3000"
+}
 
 export interface ApiErrorDetail {
   field: string
@@ -22,7 +25,7 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response
   try {
-    res = await fetch(`${API_BASE}${path}`, {
+    res = await fetch(`${getApiBase()}${path}`, {
       ...init,
       headers: { "Content-Type": "application/json", ...init?.headers },
     })
@@ -36,7 +39,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     throw new ApiError(
-      body?.error || `Request failed with status ${res.status}`,
+      (typeof body?.error === "string" && body.error.trim()) || `Request failed with status ${res.status}`,
       res.status,
       Array.isArray(body?.details) ? body.details : []
     )

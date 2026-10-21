@@ -11,6 +11,7 @@ import {
   SorobanRpc,
 } from "soroban-client"
 import type { Invoice, InvoiceStatus, PaymentResult } from "../types"
+import { waitForLedgerConfirmation } from "./ledgerConfirmation"
 
 const SOROBAN_RPC = import.meta.env.VITE_SOROBAN_RPC as string
 const NETWORK_PASSPHRASE = import.meta.env.VITE_NETWORK_PASSPHRASE as string
@@ -98,7 +99,9 @@ export async function payInvoice(contractId: string, invoiceId: number, publicKe
     })
       .addOperation(new Contract(contractId).call("mark_paid", nativeToScVal(invoiceId, { type: "u32" })))
       .setTimeout(30).build() as Transaction
-    return { success: true, transaction_hash: await buildAndSend(server, tx, freighter) }
+    const hash = await buildAndSend(server, tx, freighter)
+    await waitForLedgerConfirmation(server, hash)
+    return { success: true, transaction_hash: hash }
   } catch (err: unknown) {
     return { success: false, error: err instanceof Error ? err.message : "Payment failed" }
   }
