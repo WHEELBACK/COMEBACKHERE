@@ -5,6 +5,11 @@ use soroban_sdk::{testutils::Address as _, vec, Address, Env};
 
 const APPROVE_BASELINE: &str = include_str!("../resources/approve_settlement_baseline.json");
 const EXECUTE_BASELINE: &str = include_str!("../resources/execute_settlement_baseline.json");
+const INVOICE_CREATE_BASELINE: &str = include_str!("../resources/invoice_create_baseline.json");
+const INVOICE_PAY_BASELINE: &str = include_str!("../resources/invoice_pay_baseline.json");
+const INVOICE_CANCEL_BASELINE: &str = include_str!("../resources/invoice_cancel_baseline.json");
+const INVOICE_REFUND_BASELINE: &str = include_str!("../resources/invoice_refund_baseline.json");
+const INVOICE_SETTLE_BASELINE: &str = include_str!("../resources/invoice_settle_baseline.json");
 
 fn assert_cost_within_baseline(baseline_json: &str, cpu: u64, memory: u64) {
     let baseline: serde_json::Value =
@@ -190,4 +195,69 @@ fn bench_execute_settlement() {
     let memory = e.budget().memory_bytes_cost() - memory_before;
 
     assert_cost_within_baseline(EXECUTE_BASELINE, cpu, memory);
+}
+
+/// Measures the resource cost of a single invoice lifecycle stage and asserts
+/// it stays within the published baseline tolerance. Each stage is measured in
+/// isolation against a freshly prepared invoice so the deltas are reproducible.
+fn measure_invoice_stage<F: FnOnce(&TreasuryContractClient, &Address, &Address)>(stage: F) -> (u64, u64) {
+    let (e, id) = setup_bench_env();
+    let client = TreasuryContractClient::new(&e, &id);
+    let signer = Address::generate(&e);
+    let token = Address::generate(&e);
+
+    e.budget().reset_unlimited();
+    let cpu_before = e.budget().cpu_instruction_cost();
+    let memory_before = e.budget().memory_bytes_cost();
+    stage(&client, &signer, &token);
+    let cpu = e.budget().cpu_instruction_cost() - cpu_before;
+    let memory = e.budget().memory_bytes_cost() - memory_before;
+
+    (cpu, memory)
+}
+
+#[test]
+fn bench_invoice_create() {
+    let (cpu, memory) = measure_invoice_stage(|client, signer, token| {
+        client.create_invoice(signer, token, &5_000_000u64);
+    });
+    assert_cost_within_baseline(INVOICE_CREATE_BASELINE, cpu, memory);
+}
+
+#[test]
+fn bench_invoice_pay() {
+    let (cpu, memory) = measure_invoice_stage(|client, signer, token| {
+        let invoice_id = client.create_invoice(signer, token, &5_000_000u64);
+        client.pay_invoice(signer, &invoice_id);
+    });
+    assert_cost_within_baseline(INVOICE_PAY_BASELINE, cpu, memory);
+}
+
+#[test]
+fn bench_invoice_cancel() {
+    let (cpu, memory) = measure_invoice_stage(|client, signer, token| {
+        let invoice_id = client.create_invoice(signer, token, &5_000_000u64);
+        client.cancel_invoice(signer, &invoice_id);
+    });
+    assert_cost_within_baseline(INVOICE_CANCEL_BASELINE, cpu, memory);
+}
+
+#[test]
+fn bench_invoice_refund() {
+    let (cpu, memory) = measure_invoice_stage(|client, signer, token| {
+        let invoice_id = client.create_invoice(signer, token, &5_000_000u64);
+        client.pay_invoice(signer, &invoice_id);
+        client.refund_invoice(signer, &invoice_id);
+    });
+    assert_cost_within_baseline(INVOICE_REFUND_BASELINE, cpu, memory);
+}
+
+#[test]
+fn bench_invoice_settle() {
+    let (cpu, memory) = measure_invoice_stage(|client, signer, token| {
+        let invoice_id = client.create_invoice(signer, token, &5_000_000u64);
+        client.pay_invoice(signer, &invoice_id);
+        client.settle_invoice(signer, &invoice_id);
+    });
+    assert_cost_within_baseline(INVOICE_SETTLE_BASELINE, cpu, memory);
 }
