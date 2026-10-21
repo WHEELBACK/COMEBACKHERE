@@ -212,3 +212,29 @@ mod tests {
         assert!(!is_compliance_failure("UNAUTHORIZED"));
     }
 }
+
+/// Reconcile backend indexed invoice records against on-chain ledger
+/// checkpoint state. Reports discrepancies and safely updates or flags
+/// affected records without destructive data loss.
+#[utoipa::path(
+    post,
+    path = "/invoices/reconcile",
+    responses(
+        (status = 200, description = "Reconciliation report", body = serde_json::Value),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "invoices"
+)]
+pub async fn reconcile_invoices(State(state): State<AppState>) -> impl IntoResponse {
+    match state.client.reconcile_invoices().await {
+        Ok(report) => (StatusCode::OK, Json(serde_json::json!(report))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+                code: None,
+            }),
+        )
+            .into_response(),
+    }
+}

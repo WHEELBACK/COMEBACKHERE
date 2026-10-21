@@ -87,6 +87,16 @@ fn is_transient(err: &anyhow::Error) -> bool {
         || msg.contains("broken pipe")
 }
 
+/// Returns `true` when the failure is transport-level (the endpoint could not
+/// be reached) rather than an RPC-level rejection.
+///
+/// Only transport failures trigger Soroban RPC failover (issue #970): a
+/// well-formed JSON-RPC error response means the endpoint answered, so the
+/// request must not be replayed against a fallback endpoint.
+fn is_transport_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| cause.is::<reqwest::Error>())
+}
+
 // ---------------------------------------------------------------------------
 // Retry wrapper
 // ---------------------------------------------------------------------------
@@ -148,6 +158,11 @@ pub struct SorobanClient {
     pub contract_id: String,
     pub horizon_url: String,
     http: Client,
+    /// Ordered fallback RPC endpoints (issue #970).
+    ///
+    /// The primary endpoint is always tried first; fallbacks are only used when
+    /// the primary is unreachable (connection error or timeout).
+    fallback_urls: Vec<String>,
 }
 
 impl SorobanClient {
@@ -160,7 +175,36 @@ impl SorobanClient {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("reqwest client should be created"),
+            fallback_urls: Vec::new(),
         }
+    }
+
+    /// Build a client with an ordered list of fallback RPC endpoints.
+    ///
+    /// All endpoints must serve the same network (the network passphrase is
+    /// shared), so failover never changes transaction/network correctness.
+    /// Failover is limited to transport-level failures; RPC-level errors are
+    /// returned to the caller untouched so non-idempotent operations are never
+    /// silently replayed against another endpoint.
+    pub fn with_fallbacks(
+        rpc_url: String,
+        fallback_urls: Vec<String>,
+        contract_id: String,
+        horizon_url: String,
+    ) -> Self {
+        let mut client = Self::new(rpc_url, contract_id, horizon_url);
+        client.fallback_urls = fallback_urls
+            .into_iter()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+            .collect();
+        client
+    }
+
+    /// The ordered list of endpoints used for RPC calls: primary first, then
+    /// the configured fallbacks.
+    fn rpc_endpoints(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.rpc_url.as_str()).chain(self.fallback_urls.iter().map(String::as_str))
     }
 
     // ------------------------------------------------------------------
@@ -168,11 +212,41 @@ impl SorobanClient {
     // ------------------------------------------------------------------
 
     /// POST to the Soroban RPC endpoint and deserialize the JSON-RPC envelope.
+    ///
+    /// When the primary endpoint is unreachable (connection error or timeout)
+    /// the configured fallback endpoints are tried in order. RPC-level errors
+    /// (a well-formed JSON-RPC error response) are never failed over: they are
+    /// returned to the caller so that a rejected transaction is not replayed
+    /// against another endpoint.
     async fn rpc_post(&self, req: &RpcRequest) -> Result<RpcResponse> {
+        let mut last_err: Option<anyhow::Error> = None;
+
+        for endpoint in self.rpc_endpoints() {
+            match self.rpc_post_to(endpoint, req).await {
+                Ok(response) => return Ok(response),
+                Err(err) => {
+                    if !is_transport_error(&err) {
+                        return Err(err);
+                    }
+                    tracing::warn!(
+                        endpoint = %endpoint,
+                        error = %err,
+                        "Soroban RPC endpoint unreachable; trying next endpoint"
+                    );
+                    last_err = Some(err);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("no Soroban RPC endpoint configured")))
+    }
+
+    /// POST to a single Soroban RPC endpoint (wrapped with retry).
+    async fn rpc_post_to(&self, endpoint: &str, req: &RpcRequest) -> Result<RpcResponse> {
         let response = with_retry(|| async {
             let http_resp = self
                 .http
-                .post(&self.rpc_url)
+                .post(endpoint)
                 .json(&req)
                 .send()
                 .await?;

@@ -223,4 +223,38 @@ mod tests {
             "expected horizon to be healthy, got: {body}"
         );
     }
+
+    /// Failover: primary Soroban RPC is unreachable but a fallback endpoint is
+    /// healthy. The health check must report `soroban_rpc` as healthy because
+    /// the client transparently fails over to the fallback under the documented
+    /// condition (primary unreachable).
+    #[tokio::test]
+    async fn reports_soroban_rpc_healthy_when_failover_endpoint_is_available() {
+        // Primary RPC is down; fallback RPC is up.
+        let primary_addr = spawn_mock_dependencies(false, true).await;
+        let fallback_addr = spawn_mock_dependencies(true, true).await;
+
+        let client = Arc::new(SorobanClient::with_fallbacks(
+            format!("http://{primary_addr}/soroban/rpc"),
+            vec![format!("http://{fallback_addr}/soroban/rpc")],
+            "contract".to_string(),
+            format!("http://{primary_addr}"),
+        ));
+        let health_addr = spawn_health_server(client).await;
+
+        let response = reqwest::get(format!("http://{health_addr}/health/rpc"))
+            .await
+            .unwrap();
+
+        // Horizon is healthy and Soroban RPC fails over to the fallback, so the
+        // overall status must be 200.
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(
+            body["dependencies"]["soroban_rpc"]["status"].as_str().unwrap(),
+            "healthy",
+            "expected soroban_rpc to be healthy via failover, got: {body}"
+        );
+    }
 }

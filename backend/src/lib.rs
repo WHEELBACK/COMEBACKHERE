@@ -9,7 +9,9 @@ pub mod correlation;
 pub mod extractors;
 pub mod handlers_readiness;
 pub mod idempotency;
+pub mod indexer_backfill;
 pub mod rate_limiter;
+pub mod reconciliation;
 pub mod routes;
 pub mod soroban;
 pub mod tracing;
@@ -29,6 +31,7 @@ use routes::{
     health::get_rpc_health,
     invoices::{create_invoice, get_invoice},
     pay::pay_invoice,
+    reconciliation::run_reconciliation,
     refund::refund_invoice,
 };
 use handlers_readiness::readiness_probe;
@@ -88,23 +91,58 @@ pub struct AppState {
 impl AppState {
     /// Build state from environment variables, matching the defaults used by
     /// the standalone binary (see `main.rs`).
+    ///
+    /// Soroban RPC failover (#970): the primary endpoint is read from
+    /// `SOROBAN_RPC_URL`; optional fallbacks are read from
+    /// `SOROBAN_RPC_URLS` as a comma-separated list (`SOROBAN_RPC_FALLBACK_URLS`
+    /// is accepted as an alias). All endpoints must serve the same network
+    /// (the network passphrase is shared), so failover never changes
+    /// transaction/network correctness.
     pub fn from_env() -> Self {
         let rpc_url = std::env::var("SOROBAN_RPC_URL")
             .unwrap_or_else(|_| "http://localhost:8000/soroban/rpc".to_string());
+        let fallback_urls = std::env::var("SOROBAN_RPC_URLS")
+            .or_else(|_| std::env::var("SOROBAN_RPC_FALLBACK_URLS"))
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let contract_id = std::env::var("INVOICE_CONTRACT_ID")
             .unwrap_or_else(|_| "CONTRACT_ID_PLACEHOLDER".to_string());
         let horizon_url = std::env::var("HORIZON_API_URL")
             .unwrap_or_else(|_| "https://horizon.stellar.org".to_string());
         let mongodb_url = std::env::var("MONGODB_URL").ok();
         let redis_url = std::env::var("REDIS_URL").ok();
-        Self::new(rpc_url, contract_id, horizon_url)
+        Self::new_with_fallbacks(rpc_url, fallback_urls, contract_id, horizon_url)
             .with_dependencies(mongodb_url, redis_url)
     }
 
     /// Build state pointing at explicit endpoints (used by tests).
     pub fn new(rpc_url: String, contract_id: String, horizon_url: String) -> Self {
+        Self::new_with_fallbacks(rpc_url, Vec::new(), contract_id, horizon_url)
+    }
+
+    /// Build state with a primary RPC endpoint plus ordered fallbacks.
+    ///
+    /// The primary is always tried first; fallbacks are only used when the
+    /// primary is unhealthy/unreachable (see `SorobanClient` failover rules).
+    pub fn new_with_fallbacks(
+        rpc_url: String,
+        fallback_urls: Vec<String>,
+        contract_id: String,
+        horizon_url: String,
+    ) -> Self {
         Self {
-            client: Arc::new(SorobanClient::new(rpc_url, contract_id, horizon_url)),
+            client: Arc::new(SorobanClient::with_fallbacks(
+                rpc_url,
+                fallback_urls,
+                contract_id,
+                horizon_url,
+            )),
             // 24-hour TTL for idempotency keys (matches common API gateway defaults).
             idempotency: IdempotencyStore::new(Duration::from_secs(86_400)),
             audit: Arc::new(AuditLog::new()),
@@ -250,6 +288,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/invoices/:id/pay", axum::routing::post(pay_invoice))
         .route("/invoices/:id/cancel", axum::routing::post(cancel_invoice))
         .route("/invoices/:id/refund", axum::routing::post(refund_invoice))
+        .route("/admin/reconcile", axum::routing::post(run_reconciliation))
         .layer(cors_layer)
         .layer(middleware::from_fn(correlation_middleware))
         .layer(rl_layer)
@@ -280,6 +319,7 @@ pub fn build_router(state: AppState) -> Router {
         routes::pay::pay_invoice,
         routes::cancel::cancel_invoice,
         routes::refund::refund_invoice,
+        routes::reconciliation::run_reconciliation,
     ),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -287,6 +327,7 @@ pub fn build_router(state: AppState) -> Router {
         (name = "pay", description = "Payment operations"),
         (name = "cancel", description = "Cancellation operations"),
         (name = "refund", description = "Refund operations"),
+        (name = "admin", description = "Administrative operations")
     )
 )]
 pub struct ApiDoc;
