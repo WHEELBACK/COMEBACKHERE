@@ -1151,7 +1151,11 @@ impl TreasuryContract {
     /// * `e` - Soroban environment handle.
     /// * `admin` - Admin address (must authenticate).
     /// * `token` - Token being withdrawn; used to look up the daily cap.
+
+    /// * `to` - Target recipient address that receives the withdrawn funds.
+
     /// * `to` - Target recipient address that tokens are transferred to.
+
     /// * `amount` - Amount to withdraw.
     ///
     /// # Errors
@@ -1206,9 +1210,12 @@ impl TreasuryContract {
             );
         }
 
+
+
         // #888: Actually transfer the tokens to the recipient.
         // Previously `_to` was declared but never used — the tokens were never
         // moved out of the treasury, leaving the recipient with nothing.
+
         token::Client::new(&e, &token).transfer(
             &e.current_contract_address(),
             &to,
