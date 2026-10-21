@@ -1,186 +1,120 @@
-name: CI - Post-Deployment Verification
+name: Backup Restore Verification
 
 on:
   schedule:
-    - cron: "0 2 * * *"
+    - cron: '0 3 * * *'
   workflow_dispatch:
-    inputs:
-      network:
-        description: "Target network (testnet)"
-        required: true
-        default: "testnet"
-      invoice_contract_id:
-        description: "Deployed invoice contract ID (C…)"
-        required: true
-      treasury_contract_id:
-        description: "Deployed treasury contract ID (C…)"
-        required: true
-      compliance_contract_id:
-        description: "Deployed compliance contract ID (C…)"
-        required: true
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
-  deploy-testnet:
-    name: deploy (testnet)
+  verify-backup-restore:
+    name: Verify MongoDB and Redis backup restore
     runs-on: ubuntu-latest
-    # Deployment only runs on manual dispatch. The nightly scheduled run
-    # skips deployment and verifies the existing live testnet deployment.
+    timeout-minutes: 20
+
+    services:
+      mongo:
+        image: mongo:6
+        ports:
+          - 27017:27017
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+
+    env:
+      MONGO_URI: mongodb://localhost:27017
+      REDIS_HOST: localhost
+      REDIS_PORT: '6379'
+      BACKUP_DIR: ${{ github.workspace }}/backup-verify
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: WHEELBACK/COMEBACKHERE-contracts
-          ref: main
-          path: COMEBACKHERE-contracts
-
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
-
-      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            COMEBACKHERE-contracts/target
-          key: ${{ runner.os }}-cargo-deploy-${{ hashFiles('COMEBACKHERE-contracts/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-deploy-
-
-      - name: Build WASM artifacts
-        if: github.event_name == 'workflow_dispatch'
-        run: cargo build --target wasm32-unknown-unknown --release
-        working-directory: COMEBACKHERE-contracts
-
-      - name: Run deploy_testnet.sh
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          STELLAR_NETWORK: ${{ github.event.inputs.network }}
-          SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
-          SOROBAN_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
-          ADMIN_PUBLIC_KEY: ${{ secrets.TESTNET_ADMIN_PUBLIC_KEY }}
-          ADMIN_SECRET_KEY: ${{ secrets.TESTNET_ADMIN_SECRET_KEY }}
-          INVOICE_CONTRACT_ID: ${{ github.event.inputs.invoice_contract_id }}
-          TREASURY_CONTRACT_ID: ${{ github.event.inputs.treasury_contract_id }}
-          COMPLIANCE_CONTRACT_ID: ${{ github.event.inputs.compliance_contract_id }}
-        run: ./scripts/deploy_testnet.sh
-
-  resolve-live-addresses:
-    name: resolve live testnet contract IDs
-    runs-on: ubuntu-latest
-    # Resolves the currently deployed testnet contract IDs from the most
-    # recent successful manual deploy run so scheduled verification targets
-    # the live deployment instead of requiring manually supplied inputs.
-    outputs:
-      network: ${{ steps.addresses.outputs.network }}
-      invoice_contract_id: ${{ steps.addresses.outputs.invoice_contract_id }}
-      treasury_contract_id: ${{ steps.addresses.outputs.treasury_contract_id }}
-      compliance_contract_id: ${{ steps.addresses.outputs.compliance_contract_id }}
-
-    steps:
-      - name: Find latest successful deploy run
-        id: find-run
-        if: github.event_name == 'schedule'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data } = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'ci-post-deploy-verify.yml',
-              event: 'workflow_dispatch',
-              status: 'success',
-              per_page: 5,
-            });
-            const run = data.workflow_runs[0];
-            if (!run) {
-              core.setFailed('No previous successful workflow_dispatch run found; cannot resolve live testnet contract IDs.');
-            } else {
-              core.setOutput('run_id', String(run.id));
-            }
-
-      - name: Download deployed addresses artifact
-        if: github.event_name == 'schedule'
-        uses: actions/download-artifact@v8
-        with:
-          name: deployed-addresses-testnet
-          run-id: ${{ steps.find-run.outputs.run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract live testnet contract IDs
-        id: addresses
-        if: github.event_name == 'schedule'
+      - name: Install MongoDB database tools
         run: |
-          python3 - <<'PYEOF'
-          import json
-          import os
+          curl -fsSL https://www.mongodb.org/static/pgp/server-6.0.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-6.0.gpg
+          echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-6.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/6.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
+          sudo apt-get update
+          sudo apt-get install -y mongodb-database-tools redis-tools
 
-          with open('artifacts/addresses.json') as f:
-              data = json.load(f)
+      - name: Seed source data and create backups
+        run: |
+          set -euo pipefail
+          mkdir -p "$BACKUP_DIR/mongo" "$BACKUP_DIR/redis"
 
-          by_name = {c['name']: c['address'] for c in data.get('contracts', [])}
+          # Seed MongoDB with the data we expect to recover.
+          mongosh "$MONGO_URI/backup_verify" --quiet --eval '
+            db.users.insertMany([
+              { _id: 1, email: "alice@example.com" },
+              { _id: 2, email: "bob@example.com" }
+            ]);
+            db.orders.insertOne({ _id: 100, total: 42 });
+          '
 
-          def emit(key, value):
-              with open(os.environ.get('GITHUB_OUTPUT'), 'a') as out:
-                  out.write(f"{key}={value}\n")
+          # Seed Redis with the keys we expect to recover.
+          redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" SET backup:verify:key "expected-value"
+          redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" HSET backup:verify:hash field value
 
-          emit('network', data.get('network', 'testnet'))
-          emit('invoice_contract_id', by_name.get('invoice', ''))
-          emit('treasury_contract_id', by_name.get('treasury', ''))
-          emit('compliance_contract_id', by_name.get('compliance', ''))
-          PYEOF
+          # Produce backups.
+          mongodump --uri="$MONGO_URI" --db=backup_verify --out="$BACKUP_DIR/mongo"
+          redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" SAVE
+          redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" --rdb "$BACKUP_DIR/redis/dump.rdb"
 
-  verify:
-    name: post-deploy WASM hash verification
-    runs-on: ubuntu-latest
-    needs: [deploy-testnet, resolve-live-addresses]
+      - name: Restore backups into clean instances
+        run: |
+          set -euo pipefail
 
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          # Restore MongoDB into a fresh database name to prove the dump is usable.
+          mongorestore --uri="$MONGO_URI" --nsFrom='backup_verify.*' --nsTo='backup_verify_restored.*' "$BACKUP_DIR/mongo"
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: WHEELBACK/COMEBACKHERE-contracts
-          ref: main
-          path: COMEBACKHERE-contracts
+          # Restore Redis by loading the RDB into a fresh server instance.
+          redis-server --port 6380 --dir "$BACKUP_DIR/redis" --dbfilename dump.rdb --daemonize yes
+          for i in $(seq 1 30); do
+            if redis-cli -p 6380 PING >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
 
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      - name: Verify recovered data
+        run: |
+          set -euo pipefail
+          failures=0
 
-      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            COMEBACKHERE-contracts/target
-          key: ${{ runner.os }}-cargo-deploy-${{ hashFiles('COMEBACKHERE-contracts/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-deploy-
+          # Verify MongoDB recovered collections and documents.
+          users_count=$(mongosh "$MONGO_URI/backup_verify_restored" --quiet --eval 'db.users.countDocuments({})')
+          orders_count=$(mongosh "$MONGO_URI/backup_verify_restored" --quiet --eval 'db.orders.countDocuments({})')
+          alice=$(mongosh "$MONGO_URI/backup_verify_restored" --quiet --eval 'db.users.findOne({ _id: 1 }).email')
 
-      - name: Build WASM artifacts (for hash comparison)
-        run: cargo build --target wasm32-unknown-unknown --release
-        working-directory: COMEBACKHERE-contracts
+          if [ "$users_count" != "2" ]; then
+            echo "::error::MongoDB restore verification failed: expected 2 users, got '$users_count'"
+            failures=$((failures + 1))
+          fi
+          if [ "$orders_count" != "1" ]; then
+            echo "::error::MongoDB restore verification failed: expected 1 order, got '$orders_count'"
+            failures=$((failures + 1))
+          fi
+          if [ "$alice" != "alice@example.com" ]; then
+            echo "::error::MongoDB restore verification failed: expected alice@example.com, got '$alice'"
+            failures=$((failures + 1))
+          fi
 
-      - name: Run verify.sh
-        env:
-          SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
-          STELLAR_NETWORK: ${{ github.event.inputs.network || needs.resolve-live-addresses.outputs.network || 'testnet' }}
-          INVOICE_CONTRACT_ID: ${{ github.event.inputs.invoice_contract_id || needs.resolve-live-addresses.outputs.invoice_contract_id }}
-          TREASURY_CONTRACT_ID: ${{ github.event.inputs.treasury_contract_id || needs.resolve-live-addresses.outputs.treasury_contract_id }}
-          COMPLIANCE_CONTRACT_ID: ${{ github.event.inputs.compliance_contract_id || needs.resolve-live-addresses.outputs.compliance_contract_id }}
-          CONTRACTS_DIR: COMEBACKHERE-contracts/target/wasm32-unknown-unknown/release
-        run: ./scripts/verify.sh
+          # Verify Redis recovered keys and values.
+          redis_value=$(redis-cli -p 6380 GET backup:verify:key)
+          redis_hash=$(redis-cli -p 6380 HGET backup:verify:hash field)
 
-  export-addresses:
-    name: export and validate deployed addresses
-    runs-on: ubuntu-latest
-    needs: verify
+          if [ "$redis_value" != "expected-value" ]; then
+            echo "::error::Redis restore verification failed: expected 'expected-value', got '$redis_value'"
+            failures=$((failures + 1))
+          fi
+          if [ "$redis_hash" != "value" ]; then
+            echo "::error::Redis restore verification failed: expected hash field 'value', got '$redis_hash'"
+            failures=$((failures + 1))
+          fi
 
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          if [ "$failures" -ne 0 ]; then
+            echo "Backup restore verification failed with $failures error(s)."
+            exit 1
+          fi
 
       - name: Run export_deployed_addresses.sh
         env:

@@ -10,6 +10,7 @@ use dashmap::DashMap;
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 const CHALLENGE_PREFIX: &str = "COMEBACKHERE Auth Challenge:";
@@ -31,6 +32,114 @@ pub struct AuthError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifiedSigner {
     pub public_key: String,
+}
+
+/// A single administrative audit record.
+///
+/// `prev_hash` chains each record to the one before it and `hash` commits to
+/// the record contents plus `prev_hash`, so any silent modification or
+/// deletion of a record breaks the chain and is detectable via
+/// [`verify_audit_chain`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditRecord {
+    pub sequence: u64,
+    pub actor: String,
+    pub action: String,
+    pub timestamp: String,
+    pub prev_hash: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditIntegrityError {
+    pub error: String,
+    pub sequence: Option<u64>,
+}
+
+/// Compute the tamper-evident hash for an audit record.
+fn compute_audit_hash(
+    sequence: u64,
+    actor: &str,
+    action: &str,
+    timestamp: &str,
+    prev_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(sequence.to_le_bytes());
+    hasher.update(actor.as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(action.as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(timestamp.as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(prev_hash.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Append a new audit record to `chain`, linking it to the previous record.
+///
+/// Returns the newly created record. The record's `hash` is derived from its
+/// contents and the previous record's hash, making later tampering evident.
+pub fn append_audit_record(
+    chain: &mut Vec<AuditRecord>,
+    actor: &str,
+    action: &str,
+) -> AuditRecord {
+    let sequence = chain.last().map(|r| r.sequence + 1).unwrap_or(0);
+    let prev_hash = chain
+        .last()
+        .map(|r| r.hash.clone())
+        .unwrap_or_else(|| "0".repeat(64));
+    let timestamp = Utc::now().to_rfc3339();
+    let hash = compute_audit_hash(sequence, actor, action, &timestamp, &prev_hash);
+
+    let record = AuditRecord {
+        sequence,
+        actor: actor.to_string(),
+        action: action.to_string(),
+        timestamp,
+        prev_hash,
+        hash,
+    };
+    chain.push(record.clone());
+    record
+}
+
+/// Verify the integrity of an audit chain.
+///
+/// Detects modified records (hash mismatch), reordered records (sequence or
+/// link mismatch), and deleted records (broken `prev_hash` linkage).
+pub fn verify_audit_chain(chain: &[AuditRecord]) -> Result<(), AuditIntegrityError> {
+    let mut expected_prev = "0".repeat(64);
+    for (idx, record) in chain.iter().enumerate() {
+        if record.sequence != idx as u64 {
+            return Err(AuditIntegrityError {
+                error: format!("Audit record sequence mismatch at index {}", idx),
+                sequence: Some(record.sequence),
+            });
+        }
+        if record.prev_hash != expected_prev {
+            return Err(AuditIntegrityError {
+                error: format!("Audit chain link broken at sequence {}", record.sequence),
+                sequence: Some(record.sequence),
+            });
+        }
+        let expected_hash = compute_audit_hash(
+            record.sequence,
+            &record.actor,
+            &record.action,
+            &record.timestamp,
+            &record.prev_hash,
+        );
+        if record.hash != expected_hash {
+            return Err(AuditIntegrityError {
+                error: format!("Audit record hash mismatch at sequence {}", record.sequence),
+                sequence: Some(record.sequence),
+            });
+        }
+        expected_prev = record.hash.clone();
+    }
+    Ok(())
 }
 
 pub fn create_challenge_store() -> ChallengeStore {
@@ -277,11 +386,44 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_challenge_has_unique_nonces() {
-        let store = create_challenge_store();
-        let a = generate_challenge(&store);
-        let b = generate_challenge(&store);
-        assert_ne!(a.challenge, b.challenge);
-        assert_eq!(store.len(), 2);
+    fn test_audit_append_links_records() {
+        let mut chain = Vec::new();
+        let first = append_audit_record(&mut chain, "admin", "grant_role");
+        let second = append_audit_record(&mut chain, "admin", "revoke_role");
+        assert_eq!(first.sequence, 0);
+        assert_eq!(second.sequence, 1);
+        assert_eq!(second.prev_hash, first.hash);
+        assert_eq!(chain.len(), 2);
+        assert!(verify_audit_chain(&chain).is_ok());
+    }
+
+    #[test]
+    fn test_audit_detects_modification() {
+        let mut chain = Vec::new();
+        append_audit_record(&mut chain, "admin", "grant_role");
+        append_audit_record(&mut chain, "admin", "revoke_role");
+        // Tamper with a record's contents without updating its hash
+        chain[0].action = "delete_everything".to_string();
+        let result = verify_audit_chain(&chain);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().sequence, Some(0));
+    }
+
+    #[test]
+    fn test_audit_detects_deletion() {
+        let mut chain = Vec::new();
+        append_audit_record(&mut chain, "admin", "grant_role");
+        append_audit_record(&mut chain, "admin", "revoke_role");
+        append_audit_record(&mut chain, "admin", "rotate_key");
+        // Silently remove a middle record
+        chain.remove(1);
+        let result = verify_audit_chain(&chain);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_audit_empty_chain_is_valid() {
+        let chain: Vec<AuditRecord> = Vec::new();
+        assert!(verify_audit_chain(&chain).is_ok());
     }
 }

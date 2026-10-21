@@ -21,8 +21,13 @@ on:
       - 'comebackhere-frontend/vite.config.ts'
       - 'comebackhere-frontend/package.json'
       - 'tests/smoke_stack.sh'
+      - 'tests/verify_backup_restore.sh'
       - 'tests/README.md'
       - '.github/workflows/ci-stack-smoke.yml'
+  schedule:
+    # Operator-independent recurring check that backups can actually be
+    # restored and contain the expected data (issue #977).
+    - cron: '0 4 * * *'
   workflow_call: # called by ci-summary.yml
   workflow_dispatch: # useful for re-running a flaky stack start
 
@@ -69,6 +74,12 @@ jobs:
         # The service ports come from the published mappings in the merged
         # config, so the defaults match a local `docker compose up`.
         run: ./tests/smoke_stack.sh --timeout 180
+
+      # Exercise a real backup -> restore round trip for MongoDB and Redis and
+      # assert the recovered data matches what was written. Exits non-zero on
+      # any mismatch so the failure surfaces here and in scheduled runs.
+      - name: Verify backup and restore
+        run: ./tests/verify_backup_restore.sh
 
       - name: Tear the stack down
         if: always()
