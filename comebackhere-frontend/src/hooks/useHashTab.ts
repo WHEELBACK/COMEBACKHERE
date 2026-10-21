@@ -9,6 +9,8 @@ export const TABS = [
   "tokens",
   "batch-expire",
   "treasury",
+  "signers",
+  "api-keys",
 ] as const
 
 export type Tab = (typeof TABS)[number]

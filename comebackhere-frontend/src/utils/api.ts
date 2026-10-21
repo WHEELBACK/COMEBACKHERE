@@ -114,3 +114,75 @@ export async function listInvoices(
   }
   return result
 }
+
+export interface MerchantApiKeyMetadata {
+  key_id: string
+  merchant_address: string
+  created_at: string
+  revoked_at?: string | null
+  last_used_at?: string | null
+  is_active: boolean
+}
+
+export interface CreateApiKeyResponse {
+  key_id: string
+  merchant_address: string
+  api_key: string
+  created_at: string
+  rotated_at?: string
+  is_active: boolean
+}
+
+export function listMerchantApiKeys(merchantAddress: string, adminKey?: string): Promise<MerchantApiKeyMetadata[]> {
+  const headers: Record<string, string> = {
+    "X-Merchant-Address": merchantAddress,
+  }
+  if (adminKey) {
+    headers["X-Admin-Key"] = adminKey
+  }
+  return request<MerchantApiKeyMetadata[]>(`/api/merchant-keys?merchant_address=${encodeURIComponent(merchantAddress)}`, {
+    headers,
+  })
+}
+
+export function createMerchantApiKey(merchantAddress: string, adminKey?: string): Promise<CreateApiKeyResponse> {
+  const headers: Record<string, string> = {
+    "X-Merchant-Address": merchantAddress,
+  }
+  if (adminKey) {
+    headers["X-Admin-Key"] = adminKey
+  }
+  return request<CreateApiKeyResponse>("/api/merchant-keys", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ merchant_address: merchantAddress }),
+  })
+}
+
+export function rotateMerchantApiKey(merchantAddress: string, adminKey?: string): Promise<CreateApiKeyResponse> {
+  const headers: Record<string, string> = {
+    "X-Merchant-Address": merchantAddress,
+  }
+  if (adminKey) {
+    headers["X-Admin-Key"] = adminKey
+  }
+  return request<CreateApiKeyResponse>("/api/merchant-keys/rotate", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ merchant_address: merchantAddress }),
+  })
+}
+
+export function revokeMerchantApiKey(keyId: string, merchantAddress: string, adminKey?: string): Promise<void> {
+  const headers: Record<string, string> = {
+    "X-Merchant-Address": merchantAddress,
+  }
+  if (adminKey) {
+    headers["X-Admin-Key"] = adminKey
+  }
+  return request<void>(`/api/merchant-keys/${encodeURIComponent(keyId)}`, {
+    method: "DELETE",
+    headers,
+  })
+}
+
