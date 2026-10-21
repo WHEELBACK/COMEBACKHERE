@@ -1,11 +1,255 @@
-name: Backup Restore Verification
+name: CI - Post-Deployment Verification
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: "0 2 * * *"
   workflow_dispatch:
+    inputs:
+      network:
+        description: "Target network (testnet)"
+        required: true
+        default: "testnet"
+      invoice_contract_id:
+        description: "Deployed invoice contract ID (C…)"
+        required: true
+      treasury_contract_id:
+        description: "Deployed treasury contract ID (C…)"
+        required: true
+      compliance_contract_id:
+        description: "Deployed compliance contract ID (C…)"
+        required: true
+      admin_key_exception:
+        description: "Approved exception ID allowing admin-key reuse (leave empty to enforce separation)"
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  admin-key-preflight:
+    name: admin-key separation preflight
+    runs-on: ubuntu-latest
+    # Blocks deployment when invoice, treasury, and compliance admin keys are
+    # not distinct, unless an explicit approved exception is recorded.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate admin-key separation
+        env:
+          INVOICE_ADMIN_PUBLIC_KEY: ${{ secrets.TESTNET_INVOICE_ADMIN_PUBLIC_KEY }}
+          TREASURY_ADMIN_PUBLIC_KEY: ${{ secrets.TESTNET_TREASURY_ADMIN_PUBLIC_KEY }}
+          COMPLIANCE_ADMIN_PUBLIC_KEY: ${{ secrets.TESTNET_COMPLIANCE_ADMIN_PUBLIC_KEY }}
+          ADMIN_KEY_EXCEPTION: ${{ github.event.inputs.admin_key_exception }}
+        run: |
+          python3 - <<'PYEOF'
+          import os
+          import sys
+
+          keys = {
+              'invoice': os.environ.get('INVOICE_ADMIN_PUBLIC_KEY', '').strip(),
+              'treasury': os.environ.get('TREASURY_ADMIN_PUBLIC_KEY', '').strip(),
+              'compliance': os.environ.get('COMPLIANCE_ADMIN_PUBLIC_KEY', '').strip(),
+          }
+
+          missing = [name for name, value in keys.items() if not value]
+          if missing:
+              print(f"::error::Missing admin public key(s) for: {', '.join(missing)}")
+              sys.exit(1)
+
+          seen = {}
+          reused = []
+          for name, value in keys.items():
+              if value in seen:
+                  reused.append((seen[value], name))
+              else:
+                  seen[value] = name
+
+          if not reused:
+              print("Admin-key separation OK: invoice, treasury, and compliance keys are distinct.")
+              sys.exit(0)
+
+          pairs = ', '.join(f"{a}/{b}" for a, b in reused)
+          exception = os.environ.get('ADMIN_KEY_EXCEPTION', '').strip()
+          if exception:
+              print(f"::warning::Admin-key reuse detected ({pairs}); proceeding under approved exception '{exception}'.")
+              sys.exit(0)
+
+          print(f"::error::Admin-key reuse detected ({pairs}). Invoice, treasury, and compliance admin keys must be distinct. Record an approved exception via the admin_key_exception input to override.")
+          sys.exit(1)
+          PYEOF
+
+  deploy-testnet:
+    name: deploy (testnet)
+    runs-on: ubuntu-latest
+    needs: [admin-key-preflight]
+    # Deployment only runs on manual dispatch. The nightly scheduled run
+    # skips deployment and verifies the existing live testnet deployment.
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: WHEELBACK/COMEBACKHERE-contracts
+          ref: main
+          path: COMEBACKHERE-contracts
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            COMEBACKHERE-contracts/target
+          key: ${{ runner.os }}-cargo-deploy-${{ hashFiles('COMEBACKHERE-contracts/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deploy-
+
+      - name: Build WASM artifacts
+        if: github.event_name == 'workflow_dispatch'
+        run: cargo build --target wasm32-unknown-unknown --release
+        working-directory: COMEBACKHERE-contracts
+
+      - name: Run deploy_testnet.sh
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          STELLAR_NETWORK: ${{ github.event.inputs.network }}
+          SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+          SOROBAN_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+          ADMIN_PUBLIC_KEY: ${{ secrets.TESTNET_ADMIN_PUBLIC_KEY }}
+          ADMIN_SECRET_KEY: ${{ secrets.TESTNET_ADMIN_SECRET_KEY }}
+          INVOICE_CONTRACT_ID: ${{ github.event.inputs.invoice_contract_id }}
+          TREASURY_CONTRACT_ID: ${{ github.event.inputs.treasury_contract_id }}
+          COMPLIANCE_CONTRACT_ID: ${{ github.event.inputs.compliance_contract_id }}
+        run: ./scripts/deploy_testnet.sh
+
+  resolve-live-addresses:
+    name: resolve live testnet contract IDs
+    runs-on: ubuntu-latest
+    # Resolves the currently deployed testnet contract IDs from the most
+    # recent successful manual deploy run so scheduled verification targets
+    # the live deployment instead of requiring manually supplied inputs.
+    outputs:
+      network: ${{ steps.addresses.outputs.network }}
+      invoice_contract_id: ${{ steps.addresses.outputs.invoice_contract_id }}
+      treasury_contract_id: ${{ steps.addresses.outputs.treasury_contract_id }}
+      compliance_contract_id: ${{ steps.addresses.outputs.compliance_contract_id }}
+
+    steps:
+      - name: Find latest successful deploy run
+        id: find-run
+        if: github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'ci-post-deploy-verify.yml',
+              event: 'workflow_dispatch',
+              status: 'success',
+              per_page: 5,
+            });
+            const run = data.workflow_runs[0];
+            if (!run) {
+              core.setFailed('No previous successful workflow_dispatch run found; cannot resolve live testnet contract IDs.');
+            } else {
+              core.setOutput('run_id', String(run.id));
+            }
+
+      - name: Download deployed addresses artifact
+        if: github.event_name == 'schedule'
+        uses: actions/download-artifact@v8
+        with:
+          name: deployed-addresses-testnet
+          run-id: ${{ steps.find-run.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract live testnet contract IDs
+        id: addresses
+        if: github.event_name == 'schedule'
+        run: |
+          python3 - <<'PYEOF'
+          import json
+          import os
+
+          with open('artifacts/addresses.json') as f:
+              data = json.load(f)
+
+          by_name = {c['name']: c['address'] for c in data.get('contracts', [])}
+
+          def emit(key, value):
+              with open(os.environ.get('GITHUB_OUTPUT'), 'a') as out:
+                  out.write(f"{key}={value}\n")
+
+          emit('network', data.get('network', 'testnet'))
+          emit('invoice_contract_id', by_name.get('invoice', ''))
+          emit('treasury_contract_id', by_name.get('treasury', ''))
+          emit('compliance_contract_id', by_name.get('compliance', ''))
+          PYEOF
+
+  verify:
+    name: post-deploy WASM hash verification
+    runs-on: ubuntu-latest
+    needs: [deploy-testnet, resolve-live-addresses]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: WHEELBACK/COMEBACKHERE-contracts
+          ref: main
+          path: COMEBACKHERE-contracts
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            COMEBACKHERE-contracts/target
+          key: ${{ runner.os }}-cargo-deploy-${{ hashFiles('COMEBACKHERE-contracts/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deploy-
+
+      - name: Build WASM artifacts (for hash comparison)
+        run: cargo build --target wasm32-unknown-unknown --release
+        working-directory: COMEBACKHERE-contracts
+
+      - name: Run verify.sh
+        env:
+          SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+          STELLAR_NETWORK: ${{ github.event.inputs.network || needs.resolve-live-addresses.outputs.network || 'testnet' }}
+          INVOICE_CONTRACT_ID: ${{ github.event.inputs.invoice_contract_id || needs.resolve-live-addresses.outputs.invoice_contract_id }}
+          TREASURY_CONTRACT_ID: ${{ github.event.inputs.treasury_contract_id || needs.resolve-live-addresses.outputs.treasury_contract_id }}
+          COMPLIANCE_CONTRACT_ID: ${{ github.event.inputs.compliance_contract_id || needs.resolve-live-addresses.outputs.compliance_contract_id }}
+          CONTRACTS_DIR: COMEBACKHERE-contracts/target/wasm32-unknown-unknown/release
+        run: ./scripts/verify.sh
+
+  export-addresses:
+    name: export and validate deployed addresses
+    runs-on: ubuntu-latest
+    needs: verify
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run export_deployed_addresses.sh
+        env:
+          STELLAR_NETWORK: ${{ github.event.inputs.network || needs.resolve-live-addresses.outputs.network || 'testnet' }}
+          INVOICE_CONTRACT_ID: ${{ github.event.inputs.invoice_contract_id || needs.resolve-live-addresses.outputs.invoice_contract_id }}
+          TREASURY_CONTRACT_ID: ${{ github.event.inputs.treasury_contract_id || needs.resolve-live-addresses.outputs.treasury_contract_id }}
+          COMPLIANCE_CONTRACT_ID: ${{ github.event.inputs.compliance_contract_id || needs.resolve-live-addresses.outputs.compliance_contract_id }}
+        run: ./scripts/export_deployed_addresses.sh
+
+      - name: Upload addresses artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+
   verify-backup-restore:
     name: Verify MongoDB and Redis backup restore
     runs-on: ubuntu-latest
@@ -115,20 +359,6 @@ jobs:
             echo "Backup restore verification failed with $failures error(s)."
             exit 1
           fi
-
-      - name: Run export_deployed_addresses.sh
-        env:
-          STELLAR_NETWORK: ${{ github.event.inputs.network || needs.resolve-live-addresses.outputs.network || 'testnet' }}
-          INVOICE_CONTRACT_ID: ${{ github.event.inputs.invoice_contract_id || needs.resolve-live-addresses.outputs.invoice_contract_id }}
-          TREASURY_CONTRACT_ID: ${{ github.event.inputs.treasury_contract_id || needs.resolve-live-addresses.outputs.treasury_contract_id }}
-          COMPLIANCE_CONTRACT_ID: ${{ github.event.inputs.compliance_contract_id || needs.resolve-live-addresses.outputs.compliance_contract_id }}
-        run: ./scripts/export_deployed_addresses.sh
-
-      - name: Upload addresses artifact
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: deployed-addresses-${{ github.event.inputs.network || needs.resolve-live-addresses.outputs.network || 'testnet' }}
-          path: artifacts/addresses.json
 
   alert-schedule-failure:
     name: alert on nightly verification failure

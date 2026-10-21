@@ -9,6 +9,17 @@ use crate::extractors::ValidatedBody;
 use crate::AppState;
 use crate::types::{CreateInvoiceRequest, ErrorResponse};
 
+/// Compliance failures must fail closed: when the compliance check is
+/// unavailable, returns a malformed response, or errors out, invoice and
+/// payment operations are rejected rather than allowed to proceed.
+fn is_compliance_failure(msg: &str) -> bool {
+    let msg = msg.to_ascii_uppercase();
+    msg.contains("COMPLIANCE")
+        || msg.contains("SANCTION")
+        || msg.contains("MALFORMED")
+        || msg.contains("UNAVAILABLE")
+}
+
 #[utoipa::path(
     post,
     path = "/invoices",
@@ -102,6 +113,14 @@ pub async fn create_invoice(
             }),
         )
             .into_response(),
+        Err(e) if is_compliance_failure(&e.to_string()) => (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Compliance check failed; operation rejected".to_string(),
+                code: Some(403),
+            }),
+        )
+            .into_response(),
         Err(e) => {
             // Log internal error details for debugging, but don't expose to client
             tracing::error!("invoice creation failed: {}", e);
@@ -162,5 +181,34 @@ pub async fn get_invoice(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_compliance_failure;
+
+    #[test]
+    fn compliance_unavailable_fails_closed() {
+        assert!(is_compliance_failure("COMPLIANCE_UNAVAILABLE"));
+        assert!(is_compliance_failure("compliance service unavailable"));
+    }
+
+    #[test]
+    fn compliance_malformed_response_fails_closed() {
+        assert!(is_compliance_failure("COMPLIANCE_MALFORMED_RESPONSE"));
+        assert!(is_compliance_failure("malformed compliance payload"));
+    }
+
+    #[test]
+    fn compliance_error_return_fails_closed() {
+        assert!(is_compliance_failure("COMPLIANCE_ERROR"));
+        assert!(is_compliance_failure("sanctions screening failed"));
+    }
+
+    #[test]
+    fn unrelated_errors_are_not_treated_as_compliance_failures() {
+        assert!(!is_compliance_failure("NOT_FOUND"));
+        assert!(!is_compliance_failure("UNAUTHORIZED"));
     }
 }

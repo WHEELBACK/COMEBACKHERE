@@ -1,21 +1,24 @@
 {
-  "network": "local-testnet",
-  "chainId": 31337,
-  "merchant": {
-    "name": "Seeded Local Merchant",
-    "address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-    "privateKey": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
-  },
-  "contracts": {
-    "invoiceRegistry": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-    "settlement": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-    "token": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
-  },
-  "seed": {
-    "invoiceId": "inv_local_0001",
-    "amount": "1000000000000000000",
-    "currency": "ETH",
-    "description": "Seeded local testnet invoice",
-    "payer": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+  "network": "testnet",
+  "contracts": [
+    {
+      "name": "invoice",
+      "address": "C...",
+      "admin": "G..."
+    },
+    {
+      "name": "treasury",
+      "address": "C...",
+      "admin": "G..."
+    },
+    {
+      "name": "compliance",
+      "address": "C...",
+      "admin": "G..."
+    }
+  ],
+  "adminKeySeparation": {
+    "enforced": true,
+    "exception": null
   }
 }
