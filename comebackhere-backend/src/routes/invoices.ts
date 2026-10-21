@@ -473,7 +473,7 @@ router.get("/", validateQuery(invoiceListQuerySchema), asyncHandler(async (req: 
       }
     : filter
 
-  let findCursor = collection.find(pageFilter).sort({ created_at: -1, invoice_id: -1 })
+  let findCursor = collection.find(pageFilter).sort({ created_at: -1, invoice_id: -1, _id: -1 })
   if (legacyPagination) findCursor = findCursor.skip(offset)
   const rows = await findCursor.limit(limit + 1).toArray()
   const hasMore = rows.length > limit
@@ -535,6 +535,37 @@ router.get("/", validateQuery(invoiceListQuerySchema), asyncHandler(async (req: 
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
+/**
+ * Sync invoice status from contract to database (#874).
+ * Called before returning invoice details to ensure status reflects current contract state.
+ */
+async function syncInvoiceStatus(
+  invoiceId: string,
+  collection: ReturnType<typeof getInvoicesCollection>,
+  env: { invoiceContractId: string; rpcUrl: string; signerSecret: string; networkPassphrase: string }
+): Promise<InvoiceStatus | null> {
+  try {
+    const { getInvoiceStatus } = await import("./invoice-actions.js")
+    const contractStatus = await getInvoiceStatus(invoiceId, {
+      rpcUrl: env.rpcUrl,
+      invoiceContractId: env.invoiceContractId,
+      signerSecret: env.signerSecret,
+      networkPassphrase: env.networkPassphrase,
+    })
+
+    // Update the database with the current contract status
+    await collection.updateOne(
+      { invoice_id: invoiceId },
+      { $set: { status: contractStatus, updated_at: new Date() } }
+    )
+
+    return contractStatus
+  } catch (err) {
+    // If we can't fetch from contract, return null to fall back to DB status
+    return null
+  }
+}
+
 router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req: Request, res: Response) => {
   // Normalize the invoice ID to strip leading zeros so that "042" and "42"
   // resolve to the same invoice (issue #880: mixed-case / zero-padded IDs).
@@ -543,18 +574,17 @@ router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req
   const env = requireEnv({ invoiceContractId: "INVOICE_CONTRACT_ID", rpcUrl: "SOROBAN_RPC_URL", signerSecret: "SIGNER_SECRET_KEY", networkPassphrase: "NETWORK_PASSPHRASE" })
 
   const db = await connectMongo()
-  const invoice = await getInvoicesCollection(db).findOne({ invoice_id: id })
+  const collection = getInvoicesCollection(db)
 
+  // Get the invoice from database
+  const invoice = await collection.findOne({ invoice_id: id })
   if (!invoice) {
     throw new NotFoundError("Invoice not found")
   }
 
-  const status = await getInvoiceStatus(id, {
-    rpcUrl: env.rpcUrl,
-    invoiceContractId: env.invoiceContractId,
-    signerSecret: env.signerSecret,
-    networkPassphrase: env.networkPassphrase,
-  })
+  // Sync status from contract to ensure it reflects any settlement (#874)
+  const contractStatus = await syncInvoiceStatus(id, collection, env)
+  const status = contractStatus || invoice.status
 
   res.json({ invoice_id: id, status, due_date: invoice.due_date })
 }))
@@ -732,6 +762,16 @@ router.post("/", requireMerchantApiKey, validateBody(createInvoiceSchema), async
 
   const db = await connectMongo()
   const collection = getInvoicesCollection(db)
+
+  // Check for duplicate invoice ID to prevent conflicts (#877)
+  const existing = await collection.findOne({ invoice_id: result.invoice_id })
+  if (existing) {
+    throw Object.assign(
+      new Error(`Invoice ID ${result.invoice_id} already exists; please retry to generate a new ID`),
+      { status: 409 }
+    )
+  }
+
   const now = new Date()
   await collection.insertOne({
     invoice_id: result.invoice_id,

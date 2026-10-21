@@ -28,6 +28,9 @@ const futureTimestamp = z
   .refine((val) => val > Math.floor(Date.now() / 1000), {
     message: "due_date must be in the future",
   })
+  .refine((val) => val <= Math.floor(Date.now() / 1000) + 315_360_000, {
+    message: "due_date must be within 10 years from now",
+  })
 
 export const createInvoiceSchema = z.object({
   token: z.string().min(1, "token is required"),
