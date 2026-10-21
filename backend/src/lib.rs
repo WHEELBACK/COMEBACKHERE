@@ -68,6 +68,9 @@ impl AppState {
 /// This is the single source of truth for the route table: `main` serves it
 /// in production and integration tests exercise it directly, so the two can
 /// never drift apart.
+///
+/// Supports API_PREFIX environment variable for deployments behind reverse proxies
+/// with path prefixes (e.g., API_PREFIX=/api/v1 routes /api/v1/invoices instead of /invoices).
 pub fn build_router(state: AppState) -> Router {
     // Rate-limiter layer: config is read from RATE_LIMIT_POINTS /
     // RATE_LIMIT_DURATION (defaults: 60 requests per 60-second window, per IP).
