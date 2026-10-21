@@ -136,3 +136,28 @@ describe("toRawBigInt", () => {
     expect(() => toRawBigInt("1e7")).toThrow(RangeError)
   })
 })
+
+// ---------------------------------------------------------------------------
+// #878 — minFraction must be bounded by fractionDigits, not maxFraction
+// ---------------------------------------------------------------------------
+
+describe("formatAmount — #878 minimumFractionDigits clamped to fractionDigits", () => {
+  it("does not pad fraction zeros for a 0-decimal token even when maximumFractionDigits is set", () => {
+    // A whole-number-only token (decimals=0) should never display a decimal
+    // point. Previously minFraction was clamped to maxFraction instead of
+    // fractionDigits, so passing maximumFractionDigits:2 would produce "42.00".
+    expect(formatAmount(42n, 0, "PTS", { maximumFractionDigits: 2 })).toBe("42 PTS")
+    expect(formatAmount(0n, 0, "PTS", { maximumFractionDigits: 3 })).toBe("0 PTS")
+  })
+
+  it("does not add spurious zeros when maximumFractionDigits exceeds token decimals", () => {
+    // A 2-decimal token: maximumFractionDigits:5 should not pad beyond 2 places.
+    expect(formatAmount(100n, 2, "USD", { maximumFractionDigits: 5 })).toBe("1.00 USD")
+    expect(formatAmount(150n, 2, "USD", { maximumFractionDigits: 5 })).toBe("1.50 USD")
+  })
+
+  it("still respects explicit minimumFractionDigits within the token's decimal range", () => {
+    // A 7-decimal token with min=4 should pad to 4 places.
+    expect(formatAmount(10_000_000n, 7, "XLM", { minimumFractionDigits: 4 })).toBe("1.0000 XLM")
+  })
+})

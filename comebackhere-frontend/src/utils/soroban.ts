@@ -82,10 +82,25 @@ export async function fetchInvoice(contractId: string, invoiceId: number): Promi
 }
 
 async function buildAndSend(server: Server, tx: Transaction, freighter: FreighterApi): Promise<string> {
+  const expectedPassphrase = getNetworkPassphrase()
   const sim = await server.simulateTransaction(tx)
-  const prepared = assembleTransaction(tx, getNetworkPassphrase(), sim).build()
-  const signedXdr = await freighter.signTransaction(prepared.toXDR(), { networkPassphrase: getNetworkPassphrase() })
-  const res = await server.sendTransaction(TransactionBuilder.fromXDR(signedXdr, getNetworkPassphrase()) as Transaction)
+  const prepared = assembleTransaction(tx, expectedPassphrase, sim).build()
+  const signedXdr = await freighter.signTransaction(prepared.toXDR(), { networkPassphrase: expectedPassphrase })
+
+  // Validate that the signed transaction was built for the expected network.
+  // Freighter signs with whatever network the wallet is currently connected to;
+  // if the wallet is on the wrong network the signed envelope would carry that
+  // network's passphrase and the RPC node would reject it. We catch this here
+  // to surface a clear error rather than a cryptic submission failure (#882).
+  const signedTx = TransactionBuilder.fromXDR(signedXdr, expectedPassphrase) as Transaction
+  if (signedTx.networkPassphrase !== undefined && signedTx.networkPassphrase !== expectedPassphrase) {
+    throw new Error(
+      `Network mismatch: wallet is on "${signedTx.networkPassphrase}" but the app expects "${expectedPassphrase}". ` +
+      "Switch your wallet to the correct network and try again.",
+    )
+  }
+
+  const res = await server.sendTransaction(signedTx)
   return res.hash
 }
 
