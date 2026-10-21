@@ -21,7 +21,7 @@ The following components are in scope for responsible disclosure:
 
 | Component | Repository / Location |
 | --- | --- |
-| Soroban smart contracts | `COMEBACKHERE-contracts/` and `contracts/` |
+| Soroban smart contracts | `COMEBACKHERE-contracts/` |
 | Backend API | `comebackhere-backend` (separate repo) |
 | Frontend application | `frontend/` and `comebackhere-frontend/` |
 | Deployment scripts | `scripts/` |

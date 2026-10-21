@@ -15,6 +15,10 @@ Changes are organized by component: **Contract**, **Backend**, and **Frontend**.
 
 ### Contract
 
+#### Removed
+
+- Removed the obsolete legacy contract tree; `COMEBACKHERE-contracts/` is the canonical source. Closes #948.
+
 #### Added
 
 - Invoice contract with `create_invoice` supporting minimum amount validation.

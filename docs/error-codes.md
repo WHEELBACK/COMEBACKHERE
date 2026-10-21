@@ -10,7 +10,7 @@ This document maps every `InvoiceError`, `ContractError`, `SettlementError`, and
 
 ## InvoiceError
 
-Defined in `contracts/invoice/src/lib.rs`. The `COMEBACKHERE-contracts/contracts/invoice` crate declares a related enum called `ContractError (invoice)` (see below) — variant names overlap but numeric codes are independent.
+Historical error codes from the removed legacy invoice contract. The canonical `COMEBACKHERE-contracts/contracts/invoice` crate declares `ContractError (invoice)` below; variant names may overlap, but numeric codes are independent.
 
 | Code | Name | Trigger condition | Remediation |
 | ------ | ------ | ------------------- | ------------- |
@@ -97,7 +97,7 @@ Both batch operations cap `addresses` at 50 entries per call (`ContractError::Ba
 
 ## SettlementError
 
-Defined in `contracts/settlement/src/lib.rs`.
+Historical error codes from the removed legacy settlement contract. Settlement operations are now handled by the canonical treasury contract.
 
 | Code | Name | Trigger condition | Remediation |
 | ------ | ------ | ------------------- | ------------- |

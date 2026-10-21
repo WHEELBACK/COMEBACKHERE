@@ -24,8 +24,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+
+      - name: Reject changes to removed legacy contracts
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed_files="$(git diff --name-only --diff-filter=d "$BASE_SHA" "$HEAD_SHA" -- contracts/)"
+          if [[ -n "$changed_files" ]]; then
+            printf 'Changes to the removed contracts/ tree are not accepted:\n%s\n' "$changed_files" >&2
+            exit 1
+          fi
 
       - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:

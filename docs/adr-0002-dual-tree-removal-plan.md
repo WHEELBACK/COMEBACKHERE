@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+In progress. The legacy contract tree was removed in PR #948; backend and frontend migration work remains.
 
 ## Context
 
@@ -22,7 +22,7 @@ Without a concrete plan and timeline, the migration risk stalling indefinitely.
 
 ### Remaining Parity Gaps
 
-Based on [docs/contract-tree-feature-parity.md](./contract-tree-feature-parity.md), the legacy `contracts/` tree lacks:
+Before its removal, the legacy contract tree differed from the canonical workspace as follows (see [the migration record](./contract-tree-feature-parity.md)):
 
 | Module | Missing in Legacy Tree | Issue(s) |
 | --- | --- | --- |
@@ -41,8 +41,8 @@ For `backend/` and `frontend/`, both trees are substantially in sync but the leg
 
 - [ ] Complete [#186](https://github.com/WHEELBACK/COMEBACKHERE/issues/186) — Add event indexing to canonical invoice and treasury contracts.
 - [ ] Complete [#182](https://github.com/WHEELBACK/COMEBACKHERE/issues/182) — Add benchmarks to treasury contract.
-- [ ] Add `events.rs`, `test.rs`, and `tests.rs` to legacy invoice contract OR document that legacy invoice is deprecated.
-- [ ] Audit `docs/error-codes.md` and other doc files that reference `contracts/invoice/src/lib.rs`; update all refs to point to `COMEBACKHERE-contracts/contracts/invoice/src/lib.rs`.
+- [x] Remove the legacy contract tree rather than back-porting features to the old invoice copy.
+- [x] Update error-code documentation to reference canonical contract sources and identify historical error codes.
 - [ ] Update CONTRIBUTING.md to explicitly state legacy trees are deprecated as of this milestone.
 
 **Exit Criteria:**
@@ -55,8 +55,8 @@ For `backend/` and `frontend/`, both trees are substantially in sync but the leg
 
 - [ ] Verify `backend/` is byte-identical to `comebackhere-backend/` (or document intentional divergence).
 - [ ] Verify `frontend/` is byte-identical to `comebackhere-frontend/` (or document intentional divergence).
-- [ ] Resolve `contracts/settlement/` vs `COMEBACKHERE-contracts/contracts/treasury/` naming — decide whether legacy settlement is kept as a separate module or fully deprecated.
-- [ ] Close or migrate any open PRs targeting `contracts/`, `backend/`, or `frontend/` to canonical paths.
+- [x] Resolve the settlement/treasury naming difference by removing the legacy settlement contract as superseded.
+- [x] Confirm no open PRs target `contracts/`; migrate any open PRs targeting the remaining `backend/` or `frontend/` mirrors to canonical paths.
 
 **Exit Criteria:**
 - No open PRs target the legacy trees.
@@ -70,7 +70,7 @@ For `backend/` and `frontend/`, both trees are substantially in sync but the leg
 - [ ] Run `cargo test --manifest-path COMEBACKHERE-contracts/Cargo.toml` to confirm full canonical contract coverage.
 - [ ] Verify all contract features in the canonical tree are exercised by CI or integration tests.
 - [ ] Run backend and frontend test suites to confirm they pass on canonical trees.
-- [ ] Update CI to explicitly reject any new PRs that add code to `contracts/`, `backend/`, or `frontend/`.
+- [x] Update CI to reject changes to the removed `contracts/` tree. Backend and frontend mirror guards remain part of their migration work.
 
 **Exit Criteria:**
 - CI coverage for canonical trees is documented and green.
@@ -80,14 +80,13 @@ For `backend/` and `frontend/`, both trees are substantially in sync but the leg
 
 A mirrored tree is safe to delete when:
 
-1. **No doc references remain** that would 404 or become invalid (see Milestone 1).
-2. **All features are ported to the canonical tree** or explicitly removed (see Milestone 2).
-3. **No open PRs target that tree** (see Milestone 2).
-4. **CI is updated to reject new additions** to the legacy tree (see Milestone 3).
-5. **A single-commit removal PR** is opened that:
-   - Deletes the legacy tree directory.
-   - Updates any remaining ARCHITECTURE.md, CONTRIBUTING.md, and README.md refs.
-   - Adds an entry to CHANGELOG.md under `[Unreleased] > Removed` documenting the tree deletion.
+The contract-tree deletion criteria were completed in PR #948: its obsolete behavior was superseded or removed, contract-specific documentation and CI references were updated, and the tree was deleted. The criteria below continue to apply to the backend and frontend mirrors.
+
+1. **No doc references remain** that would 404 or become invalid.
+2. **Features are ported to their canonical trees** or explicitly removed.
+3. **No open PRs target the remaining mirrors.**
+4. **CI is updated** for the remaining mirrors' migration status.
+5. A removal PR updates remaining references and records the deletion under `[Unreleased] > Removed`.
 
 ### Proposed Deletion Order
 

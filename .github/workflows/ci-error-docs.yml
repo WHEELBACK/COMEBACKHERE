@@ -4,7 +4,6 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - 'contracts/**'
       - 'COMEBACKHERE-contracts/**'
       - 'docs/error-codes.md'
       - 'scripts/check_error_docs_sync.sh'
