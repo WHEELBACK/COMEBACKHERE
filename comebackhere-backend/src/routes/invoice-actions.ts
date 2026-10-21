@@ -5,6 +5,7 @@ import { requireEnv } from "../lib/env.js"
 import { asyncHandler, ContractError, parseContractErrorCode } from "../lib/errors.js"
 import { validateParams } from "../middleware/validate.js"
 import { invoiceActionIdParamSchema } from "../schemas/index.js"
+import { connectMongo, getInvoicesCollection } from "../db/mongo.js"
 
 const router = Router()
 
@@ -43,6 +44,14 @@ export async function getInvoiceStatus(
   }
 }
 
+export async function isInvoiceExpired(invoiceId: string): Promise<boolean> {
+  const db = await connectMongo()
+  const invoice = await getInvoicesCollection(db).findOne({ invoice_id: invoiceId })
+  if (!invoice) return false
+  const now = Math.floor(Date.now() / 1000)
+  return now > invoice.due_date
+}
+
 export async function applyInvoiceAction(
   action: InvoiceAction,
   invoiceId: string,
@@ -51,6 +60,24 @@ export async function applyInvoiceAction(
 ): Promise<{ invoice_id: string; status: "Cancelled" | "RefundRequested"; tx_hash: string }> {
   const signer = Keypair.fromSecret(env.signerSecret)
   const currentStatus = await getInvoiceStatus(invoiceId, env, client)
+
+  // Prevent paid invoices from reverting to pending (#872)
+  if (action === "cancel_invoiced" && currentStatus === "Paid") {
+    throw new ContractError(3, "Cannot cancel a paid invoice", 409)
+  }
+
+  // Prevent payment on cancelled invoices (#871)
+  if (action === "request_refund" && currentStatus === "Cancelled") {
+    throw new ContractError(3, "Cannot pay a cancelled invoice", 409)
+  }
+
+  // Prevent payment on expired invoices (#873)
+  if (action === "request_refund") {
+    const isExpired = await isInvoiceExpired(invoiceId)
+    if (isExpired) {
+      throw new ContractError(3, "Cannot pay an expired invoice", 409)
+    }
+  }
 
   if (action === "request_refund" && currentStatus !== "Paid") {
     if (currentStatus === "RefundRequested") {

@@ -7,6 +7,7 @@ import { asyncHandler, NotFoundError } from "../lib/errors.js"
 import { cacheGet, cacheSet } from "../lib/cache.js"
 import { validateBody, validateParams, validateQuery } from "../middleware/validate.js"
 import { createInvoiceSchema, invoiceIdParamSchema, invoiceListQuerySchema } from "../schemas/index.js"
+import { getInvoiceStatus } from "./invoice-actions.js"
 
 const router = Router()
 
@@ -94,8 +95,6 @@ export async function createInvoice(
   const sendResult = await client.sendTransaction(prepared)
   if (sendResult.status === "ERROR") {
     throw Object.assign(
-      new Error(`Soroban submission failed: ${(sendResult as any).errorResult?.toXDR("base64")}`),
-      { status: 422, tx_hash: (sendResult as any).hash as string | undefined }
       new Error(
         `Soroban submission failed: ${(sendResult as { errorResult?: { toXDR: (format: string) => string } }).errorResult?.toXDR("base64")}`,
       ),
@@ -541,39 +540,23 @@ router.get("/:id", validateParams(invoiceIdParamSchema), asyncHandler(async (req
   // resolve to the same invoice (issue #880: mixed-case / zero-padded IDs).
   const id = String(BigInt(req.params.id))
 
-  const env = requireEnv({ invoiceContractId: "INVOICE_CONTRACT_ID" })
+  const env = requireEnv({ invoiceContractId: "INVOICE_CONTRACT_ID", rpcUrl: "SOROBAN_RPC_URL", signerSecret: "SIGNER_SECRET_KEY", networkPassphrase: "NETWORK_PASSPHRASE" })
 
-  const server = new SorobanRpc.Server(env.rpcUrl)
-  const contract = new Contract(env.invoiceContractId)
+  const db = await connectMongo()
+  const invoice = await getInvoicesCollection(db).findOne({ invoice_id: id })
 
-  // Build a read-only ledger entry query for the invoice
-  const ledgerKey = contract.getFootprint()
-  void ledgerKey // used below via getLedgerEntries
-
-  // Query the contract's ledger entry directly
-  const entries = await server.getLedgerEntries(
-    xdr.LedgerKey.contractData(
-      new xdr.LedgerKeyContractData({
-        contract: new Contract(env.invoiceContractId).address().toScAddress(),
-        key: nativeToScVal(BigInt(id), { type: "u64" }),
-        durability: xdr.ContractDataDurability.persistent(),
-      })
-    )
-    res.status(201).json(result)
-  } catch (err: unknown) {
-    const status = (err as any)?.status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    const tx_hash = (err as any)?.tx_hash as string | undefined
-    const body: { error: string; tx_hash?: string } = { error: message }
-    if (tx_hash) body.tx_hash = tx_hash
-    res.status(status).json(body)
-  )
-
-  if (!entries.entries.length) {
+  if (!invoice) {
     throw new NotFoundError("Invoice not found")
   }
 
-  res.json({ invoice_id: id, status: "Pending" })
+  const status = await getInvoiceStatus(id, {
+    rpcUrl: env.rpcUrl,
+    invoiceContractId: env.invoiceContractId,
+    signerSecret: env.signerSecret,
+    networkPassphrase: env.networkPassphrase,
+  })
+
+  res.json({ invoice_id: id, status, due_date: invoice.due_date })
 }))
 
 /**
