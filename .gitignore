@@ -139,12 +139,8 @@ Thumbs.db
 .vite/
 **/.vite/
 .vite-inspect/
-**/.vite/
 
 # Vitest / Jest output
-vitest-report/
-html/
-lcov.info
 vitest-coverage/
 **/.vitest-cache/
 
@@ -169,7 +165,9 @@ Cargo.lock
 
 # Playwright state
 playwright/.auth/
-playwright-report/
+
+# Playwright screenshots (generated during e2e runs)
+**/e2e/screenshots/
 
 # Editor session files
 *.swp

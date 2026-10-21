@@ -92,6 +92,15 @@ pub enum TreasuryError {
     DailyLimitExceeded = 13,
     /// An upgrade was requested while a settlement was partially executed.
     UpgradeInProgress = 14,
+    /// The requested settlement ID does not exist in storage.
+    SettlementNotFound = 15,
+    /// The settlement proposal has passed its `expires_at` ledger timestamp.
+    SettlementExpired = 16,
+    /// `resolve_dispute` was called on a settlement that is not `OnHold`.
+    NotDisputed = 17,
+    /// `set_settlement_ttl` was called with `ttl_seconds == 0`, or the TTL
+    /// overflowed when added to the current ledger timestamp.
+    InvalidSettlementTtl = 18,
 }
 
 // At five seconds per ledger, renew instance state from roughly 335 days
@@ -1041,7 +1050,9 @@ impl TreasuryContract {
     /// * `amount` - Amount of tokens to deposit.
     ///
     /// # Errors
-    /// * Returns [`TreasuryError::TokenNotAllowed`] if token is not on the allowlist.
+    /// * Returns [`TreasuryError::TokenNotAllowed`] if the allowlist is empty or the token
+    ///   is not present on the allowlist. An empty allowlist means no token is permitted,
+    ///   not that all tokens are permitted.
     /// * Returns [`TreasuryError::ContractPaused`] if contract is paused.
     pub fn deposit(
         e: Env,
@@ -1054,7 +1065,10 @@ impl TreasuryContract {
             .instance()
             .get(&DataKey::TokenAllowlist)
             .unwrap_or_else(|| Vec::new(&e));
-        if !allowlist.contains(&token) {
+        // #887: An empty allowlist must reject all tokens, not permit all.
+        // Previously the guard was `if !allowlist.contains(&token)` which passed
+        // when the list was empty because `contains` returns false on an empty Vec.
+        if allowlist.is_empty() || !allowlist.contains(&token) {
             return Err(TreasuryError::TokenNotAllowed);
         }
 
@@ -1137,7 +1151,7 @@ impl TreasuryContract {
     /// * `e` - Soroban environment handle.
     /// * `admin` - Admin address (must authenticate).
     /// * `token` - Token being withdrawn; used to look up the daily cap.
-    /// * `_to` - Target recipient address.
+    /// * `to` - Target recipient address that tokens are transferred to.
     /// * `amount` - Amount to withdraw.
     ///
     /// # Errors
@@ -1150,7 +1164,7 @@ impl TreasuryContract {
         e: Env,
         admin: Address,
         token: Address,
-        _to: Address,
+        to: Address,
         amount: u64,
     ) -> Result<(), TreasuryError> {
         check_not_paused(&e)?;
@@ -1191,6 +1205,15 @@ impl TreasuryContract {
                 },
             );
         }
+
+        // #888: Actually transfer the tokens to the recipient.
+        // Previously `_to` was declared but never used — the tokens were never
+        // moved out of the treasury, leaving the recipient with nothing.
+        token::Client::new(&e, &token).transfer(
+            &e.current_contract_address(),
+            &to,
+            &(amount as i128),
+        );
 
         Ok(())
     }
