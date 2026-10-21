@@ -6,7 +6,7 @@
 contracts/             @dreamgeneX
 COMEBACKHERE-contracts/ @dreamgeneX
 
-# ABI metadata generated from contract sources; any change must be
+# ABI metadata generated from contract sources; any change must
 # reviewed alongside the contract source that produced it.
 abis/                  @dreamgeneX
 
@@ -16,3 +16,11 @@ docs/                  @dreamgeneX
 
 # Frontend — assign a frontend team owner when one is established.
 # comebackhere-frontend/  @frontend-team
+
+# Legacy trees scheduled for removal (see issue #951). Open PRs must not
+# target these paths; port changes to the canonical replacements above
+# (contracts/ -> COMEBACKHERE-contracts/, frontend/ -> comebackhere-frontend/)
+# before the trees are deleted.
+/contracts/            @dreamgeneX
+/backend/              @dreamgeneX
+/frontend/             @dreamgeneX

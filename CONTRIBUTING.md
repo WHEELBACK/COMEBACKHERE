@@ -18,12 +18,10 @@ source of truth and the only path that gets the full required-status-check
 matrix on every PR.
 
 The sibling-less top-level `contracts/`, `backend/`, and `frontend/`
-directories are also valid PR targets — they contain older in-tree copies of
-the same sources and are still referenced from documentation (for example,
-`docs/error-codes.md` cites `contracts/invoice/src/lib.rs` as the source of
-`InvoiceError`). They do not, however, have a dedicated CI workflow of their
-own, so changes there rely on whichever `ci-*.yml` job happens to match the
-files. When in doubt, target the canonical `COMEBACKHERE-*` tree.
+directories are **legacy trees scheduled for removal**. Do not open new pull
+requests against them. If you have an open PR that touches any of these paths,
+port its changes to the canonical `COMEBACKHERE-*` tree before the legacy
+trees are deleted — no open PR may target a tree scheduled for removal.
 
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full reasoning, the exact
 directory layout, and how the mirrors are kept in step.

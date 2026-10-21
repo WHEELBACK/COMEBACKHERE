@@ -48,3 +48,79 @@ pub fn admin_transfer_accepted(env: &Env, new_admin: &Address) {
         new_admin,
     );
 }
+
+pub fn admin_proposal_created(
+    env: &Env,
+    proposal_id: &u64,
+    proposer: &Address,
+    kind: &u32,
+    target: &Address,
+    threshold: &u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "admin_proposal_created"),),
+        (proposal_id, proposer, kind, target, threshold),
+    );
+}
+
+pub fn admin_proposal_approved(
+    env: &Env,
+    proposal_id: &u64,
+    signer: &Address,
+    approvals: &u32,
+    required: &u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "admin_proposal_approved"),),
+        (proposal_id, signer, approvals, required),
+    );
+}
+
+pub fn admin_proposal_executed(env: &Env, proposal_id: &u64, approvals: &u32) {
+    env.events().publish(
+        (Symbol::new(env, "admin_proposal_executed"),),
+        (proposal_id, approvals),
+    );
+}
+
+pub fn admin_proposal_rejected(
+    env: &Env,
+    proposal_id: &u64,
+    approvals: &u32,
+    required: &u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "admin_proposal_rejected"),),
+        (proposal_id, approvals, required),
+    );
+}
+
+pub fn upgrade_scheduled(
+    env: &Env,
+    proposal_id: &u64,
+    new_wasm_hash: &soroban_sdk::BytesN<32>,
+    executable_at: &u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "upgrade_scheduled"),),
+        (proposal_id, new_wasm_hash, executable_at),
+    );
+}
+
+pub fn upgrade_cancelled(env: &Env, proposal_id: &u64, cancelled_by: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "upgrade_cancelled"),),
+        (proposal_id, cancelled_by),
+    );
+}
+
+pub fn upgrade_executed(
+    env: &Env,
+    proposal_id: &u64,
+    new_wasm_hash: &soroban_sdk::BytesN<32>,
+) {
+    env.events().publish(
+        (Symbol::new(env, "upgrade_executed"),),
+        (proposal_id, new_wasm_hash),
+    );
+}
