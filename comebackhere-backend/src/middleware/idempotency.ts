@@ -69,6 +69,17 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
     let resolveFlight!: () => void
     const flight = new Promise<void>((resolve) => { resolveFlight = resolve })
     inFlight.set(key, flight)
+    // Release exactly once, even if the response never goes through res.json
+    // (res.send/res.end, client abort, handler crash): otherwise waiters hang.
+    let released = false
+    const release = (): void => {
+      if (released) return
+      released = true
+      resolveFlight()
+      if (inFlight.get(key) === flight) inFlight.delete(key)
+      void cacheReleaseLock(lockKey)
+    }
+    res.once("close", release)
     const json = res.json.bind(res)
     res.json = ((body: unknown) => {
       const response = { status: res.statusCode, body }
@@ -76,9 +87,7 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
         memory.set(key, { fingerprint: requestFingerprint, response, expiresAt: Date.now() + TTL_SECONDS * 1000 })
         void cacheSet(key, { fingerprint: requestFingerprint, response }, TTL_SECONDS)
       }
-      resolveFlight()
-      inFlight.delete(key)
-      void cacheReleaseLock(lockKey)
+      release()
       return json(body)
     }) as Response["json"]
     next()
