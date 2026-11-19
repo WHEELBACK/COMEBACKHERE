@@ -130,10 +130,14 @@ export async function createInvoice(
 // ---------------------------------------------------------------------------
 
 const ALLOWED_STATUSES: InvoiceStatus[] = ["Pending", "Paid", "Expired", "Cancelled", "RefundRequested", "Released"]
+const ALLOWED_DATE_FIELDS = ["created_at", "due_date", "updated_at"] as const
 
 export interface ListFilters {
   status?: InvoiceStatus
   merchant?: string
+  fromDate?: number // Unix timestamp (seconds)
+  toDate?: number // Unix timestamp (seconds)
+  dateField?: (typeof ALLOWED_DATE_FIELDS)[number] // which field to filter on
 }
 
 /** Reads the list filters from the query string; unknown statuses are ignored. */
@@ -143,13 +147,51 @@ export function parseListFilters(query: Request["query"]): ListFilters {
   const status = statusFilter && ALLOWED_STATUSES.includes(statusFilter as InvoiceStatus)
     ? (statusFilter as InvoiceStatus)
     : undefined
-  return { status, merchant }
+
+  // Parse date range filters
+  const fromDateStr = typeof query.from_date === "string" ? query.from_date : undefined
+  const toDateStr = typeof query.to_date === "string" ? query.to_date : undefined
+  const dateFieldStr = typeof query.date_field === "string" ? query.date_field : undefined
+
+  const fromDate = fromDateStr && /^\d+$/.test(fromDateStr) ? parseInt(fromDateStr, 10) : undefined
+  const toDate = toDateStr && /^\d+$/.test(toDateStr) ? parseInt(toDateStr, 10) : undefined
+  const dateField = dateFieldStr && ALLOWED_DATE_FIELDS.includes(dateFieldStr as any)
+    ? (dateFieldStr as (typeof ALLOWED_DATE_FIELDS)[number])
+    : "created_at"
+
+  // Validate date range
+  if (fromDate && toDate && fromDate > toDate) {
+    throw new Error("from_date must be before to_date")
+  }
+
+  return {
+    status,
+    merchant,
+    fromDate: fromDate || undefined,
+    toDate: toDate || undefined,
+    dateField: (fromDate || toDate) ? dateField : undefined,
+  }
 }
 
 export function buildListFilter(filters: ListFilters): Record<string, unknown> {
   const filter: Record<string, unknown> = {}
   if (filters.status) filter.status = filters.status
   if (filters.merchant) filter.merchant_address = filters.merchant
+
+  // Add date range filter if provided
+  if (filters.dateField && (filters.fromDate || filters.toDate)) {
+    const dateFilter: Record<string, number> = {}
+    if (filters.fromDate !== undefined) {
+      // Convert Unix timestamp (seconds) to milliseconds for MongoDB date comparison
+      dateFilter.$gte = filters.fromDate * 1000
+    }
+    if (filters.toDate !== undefined) {
+      // End of the day (exclusive upper bound)
+      dateFilter.$lt = (filters.toDate + 86_400) * 1000
+    }
+    filter[filters.dateField] = dateFilter
+  }
+
   return filter
 }
 
@@ -313,8 +355,22 @@ function waitForDrain(res: Response): Promise<void> {
  */
 router.get("/export.csv", async (req: Request, res: Response) => {
   const filters = parseListFilters(req.query)
-  const date = new Date().toISOString().slice(0, 10)
-  const filename = `invoices${filters.status ? `-${filters.status.toLowerCase()}` : ""}-${date}.csv`
+  const now = new Date()
+  const date = now.toISOString().slice(0, 10)
+  
+  // Build filename with filter info and date range
+  let filename = `invoices${filters.status ? `-${filters.status.toLowerCase()}` : ""}`
+  if (filters.dateField && (filters.fromDate || filters.toDate)) {
+    if (filters.fromDate) {
+      const fromDate = new Date(filters.fromDate * 1000).toISOString().slice(0, 10)
+      filename += `-from-${fromDate}`
+    }
+    if (filters.toDate) {
+      const toDate = new Date(filters.toDate * 1000).toISOString().slice(0, 10)
+      filename += `-to-${toDate}`
+    }
+  }
+  filename += `-${date}.csv`
 
   let cursor: FindCursor<WithId<InvoiceRecord>> | undefined
   try {
