@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { type Request, type Response, type NextFunction } from "express"
 import { cacheGet, cacheReleaseLock, cacheSet, cacheTryLock } from "../lib/cache.js"
 import { ConflictError } from "../lib/errors.js"
+import { validateIdempotencyKey } from "../lib/idempotency-key.js"
 
 const TTL_SECONDS = 24 * 60 * 60
 const memory = new Map<string, { fingerprint: string; response: StoredResponse; expiresAt: number }>()
@@ -21,6 +22,13 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
   const idempotencyKey = req.header("Idempotency-Key")?.trim()
   if (!idempotencyKey) {
     next()
+    return
+  }
+
+  try {
+    validateIdempotencyKey(idempotencyKey)
+  } catch (err) {
+    next(err)
     return
   }
 
