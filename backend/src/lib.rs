@@ -5,8 +5,10 @@
 //! router — `build_router` — exactly as production wires it up, instead of
 //! re-assembling routes per test.
 
+pub mod balance_reconciliation;
 pub mod correlation;
 pub mod extractors;
+pub mod fee_distributor;
 pub mod handlers_readiness;
 pub mod idempotency;
 pub mod rate_limiter;
