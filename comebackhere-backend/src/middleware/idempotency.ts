@@ -2,9 +2,11 @@ import { createHash } from "node:crypto"
 import { type Request, type Response, type NextFunction } from "express"
 import { cacheGet, cacheReleaseLock, cacheSet, cacheTryLock } from "../lib/cache.js"
 import { ConflictError } from "../lib/errors.js"
+import { pruneExpiring } from "../lib/bounded-map.js"
 import { validateIdempotencyKey } from "../lib/idempotency-key.js"
 
 const TTL_SECONDS = 24 * 60 * 60
+const MAX_MEMORY_ENTRIES = 5_000
 const memory = new Map<string, { fingerprint: string; response: StoredResponse; expiresAt: number }>()
 const inFlight = new Map<string, Promise<void>>()
 
@@ -93,6 +95,7 @@ export function idempotencyMiddleware(req: Request, res: Response, next: NextFun
       const response = { status: res.statusCode, body }
       if (res.statusCode >= 200 && res.statusCode < 300) {
         memory.set(key, { fingerprint: requestFingerprint, response, expiresAt: Date.now() + TTL_SECONDS * 1000 })
+        pruneExpiring(memory, MAX_MEMORY_ENTRIES)
         void cacheSet(key, { fingerprint: requestFingerprint, response }, TTL_SECONDS)
       }
       release()
