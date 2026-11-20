@@ -12,6 +12,11 @@ const redactPaths = [
   "req.headers.authorization",
   "req.headers.x-admin-key",
   "req.headers.x-api-key",
+  "*.secret",
+  "*.password",
+  "*.token",
+  "req.headers.cookie",
+  "req.headers.x-webhook-signature",
   "err.message",
   "error.message",
 ]

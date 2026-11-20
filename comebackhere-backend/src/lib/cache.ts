@@ -1,5 +1,6 @@
 import Redis from "ioredis"
 import { logger } from "./logger.js"
+import { pruneExpiring } from "./bounded-map.js"
 
 let _redis: Redis | null = null
 
@@ -86,6 +87,7 @@ export function memoryCacheGet<T>(key: string): T | null {
 /** Stores `value` under `key`; the TTL is a safety net for changes nobody invalidates. */
 export function memoryCacheSet(key: string, value: unknown, ttlMs: number): void {
   _memoryCache.set(key, { value, expiresAt: Date.now() + ttlMs })
+  pruneExpiring(_memoryCache, 1_000)
 }
 
 /**
@@ -118,4 +120,77 @@ export function setBalanceCache(data: TreasuryBalances): void {
 /** Evicts cached balances so the next GET /balances re-reads them from RPC. */
 export function invalidateBalanceCache(reason?: string): boolean {
   return invalidateCacheKey(BALANCE_CACHE_KEY, reason)
+}
+
+// ---------------------------------------------------------------------------
+// Merchant profile cache (validated profiles with 15-minute TTL)
+// ---------------------------------------------------------------------------
+
+export interface MerchantProfile {
+  address: string
+  name: string
+  complianceStatus: "approved" | "blocked" | "pending"
+  validatedAt: number
+  apiKeyRotationAt?: number
+}
+
+export const MERCHANT_PROFILE_CACHE_KEY_PREFIX = "merchant:profile:"
+export const MERCHANT_PROFILE_CACHE_TTL_MS = 15 * 60 * 1000 // 15 minutes
+
+/**
+ * Build the cache key for a merchant profile.
+ * @param merchantAddress - The merchant's Soroban wallet address
+ */
+function getMerchantProfileCacheKey(merchantAddress: string): string {
+  return `${MERCHANT_PROFILE_CACHE_KEY_PREFIX}${merchantAddress}`
+}
+
+/**
+ * Retrieve a cached merchant profile if it exists and hasn't expired.
+ * @param merchantAddress - The merchant's Soroban wallet address
+ * @returns The cached profile, or null if not cached or expired
+ */
+export function getMerchantProfileCache(merchantAddress: string): MerchantProfile | null {
+  const key = getMerchantProfileCacheKey(merchantAddress)
+  return memoryCacheGet<MerchantProfile>(key)
+}
+
+/**
+ * Cache a validated merchant profile for 15 minutes.
+ * @param profile - The merchant profile to cache
+ */
+export function setMerchantProfileCache(profile: MerchantProfile): void {
+  const key = getMerchantProfileCacheKey(profile.address)
+  memoryCacheSet(key, profile, MERCHANT_PROFILE_CACHE_TTL_MS)
+}
+
+/**
+ * Invalidate a cached merchant profile.
+ *
+ * Call this when:
+ * - Compliance status changes (merchant is blocked/approved)
+ * - API keys are rotated
+ * - Merchant details are updated
+ *
+ * @param merchantAddress - The merchant's Soroban wallet address
+ * @param reason - Optional reason for invalidation (logged for debugging)
+ * @returns true if a cached entry was evicted, false otherwise
+ */
+export function invalidateMerchantProfileCache(merchantAddress: string, reason?: string): boolean {
+  const key = getMerchantProfileCacheKey(merchantAddress)
+  return invalidateCacheKey(key, reason)
+}
+
+/**
+ * Clear all cached merchant profiles.
+ * Used during shutdown or cache reset operations.
+ */
+export function clearAllMerchantProfileCaches(): void {
+  const prefix = MERCHANT_PROFILE_CACHE_KEY_PREFIX
+  for (const [key] of _memoryCache) {
+    if (key.startsWith(prefix)) {
+      _memoryCache.delete(key)
+    }
+  }
+  logger.info({ prefix }, "All merchant profile caches cleared")
 }
