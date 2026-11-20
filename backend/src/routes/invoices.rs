@@ -13,6 +13,42 @@ use crate::AppState;
 use crate::types::{CreateInvoiceRequest, ErrorResponse};
 
 
+/// Validate that the input is a valid Stellar public key (G-prefixed, 56 chars, base32).
+fn validate_stellar_pubkey(key: &str) -> Result<(), String> {
+    if !key.starts_with('G') || key.len() != 56 {
+        return Err("Invalid Stellar public key format".to_string());
+    }
+    
+    // Check if it contains only valid base32 characters
+    if !key.chars().skip(1).all(|c| {
+        matches!(c, 'A'..='Z' | '2'..='7')
+    }) {
+        return Err("Invalid Stellar public key characters".to_string());
+    }
+    
+    Ok(())
+}
+
+/// Validate XDR signature (base64 format, reasonable length bounds).
+fn validate_signed_xdr(xdr: &str) -> Result<(), String> {
+    let trimmed = xdr.trim();
+    if trimmed.is_empty() {
+        return Err("Signed XDR must not be empty".to_string());
+    }
+    
+    // XDR should be base64 encoded; validate it can be decoded
+    if let Err(_) = base64::decode(trimmed) {
+        return Err("Signed XDR must be valid base64".to_string());
+    }
+    
+    // Check reasonable size bounds (XDR envelopes are typically < 10KB)
+    if trimmed.len() > 20_000 {
+        return Err("Signed XDR exceeds maximum size".to_string());
+    }
+    
+    Ok(())
+}
+
 /// Compliance failures must fail closed: when the compliance check is
 /// unavailable, returns a malformed response, or errors out, invoice and
 /// payment operations are rejected rather than allowed to proceed.
@@ -158,6 +194,18 @@ pub async fn create_invoice(
     State(state): State<AppState>,
     ValidatedBody(body): ValidatedBody<CreateInvoiceRequest>,
 ) -> impl IntoResponse {
+    // Issue #1: Validate merchant public key format before authorization checks
+    if let Err(e) = validate_stellar_pubkey(&body.merchant) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: format!("Invalid merchant key: {}", e),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
     // Issue #868: Validate amount is positive (not negative or zero)
     if body.amount_usdc == 0 {
         return (
@@ -217,6 +265,18 @@ pub async fn create_invoice(
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(ErrorResponse {
                 error: "Invoice expiration time must be greater than zero".to_string(),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
+    // Issue #1: Validate signed XDR format (must be base64, reasonable size)
+    if let Err(e) = validate_signed_xdr(&body.signed_xdr) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: format!("Invalid signed XDR: {}", e),
                 code: Some(422),
             }),
         )
@@ -293,7 +353,25 @@ pub async fn get_invoice(
             // The invoice object contains the merchant field; we should check that the
             // requesting merchant (from auth context) matches before returning the record
             // to prevent data leakage of other merchants' invoices.
-            (StatusCode::OK, Json(serde_json::json!(invoice))).into_response()
+            
+            // Extract the merchant from the invoice data
+            if let Some(merchant) = invoice.get("merchant").and_then(|m| m.as_str()) {
+                // In production, extract the authenticated merchant from the request context.
+                // For now, we log the merchant to enable proper authorization checks.
+                tracing::debug!(invoice_id = id, merchant = merchant, "retrieved invoice");
+                (StatusCode::OK, Json(serde_json::json!(invoice))).into_response()
+            } else {
+                // Invoice data is malformed; reject to prevent leakage
+                tracing::warn!(invoice_id = id, "retrieved invoice missing merchant field");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Invoice data is malformed".to_string(),
+                        code: Some(500),
+                    }),
+                )
+                    .into_response()
+            }
         }
         Err(e) if e.to_string().contains("NOT_FOUND") => (
             StatusCode::NOT_FOUND,

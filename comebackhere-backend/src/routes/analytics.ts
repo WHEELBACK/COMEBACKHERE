@@ -263,7 +263,6 @@ router.get("/metrics", validateQuery(analyticsQuerySchema), async (req: Request,
     )
     res.status(500).json({ error: "Failed to fetch analytics metrics" })
   }
-
-}))
+})
 
 export default router

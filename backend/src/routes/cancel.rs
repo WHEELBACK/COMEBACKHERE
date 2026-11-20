@@ -10,6 +10,42 @@ use crate::idempotency::IdempotencyStore;
 use crate::types::{CancelRequest, ErrorResponse};
 use crate::AppState;
 
+/// Validate that the input is a valid Stellar public key (G-prefixed, 56 chars, base32).
+fn validate_stellar_pubkey(key: &str) -> Result<(), String> {
+    if !key.starts_with('G') || key.len() != 56 {
+        return Err("Invalid Stellar public key format".to_string());
+    }
+    
+    // Check if it contains only valid base32 characters
+    if !key.chars().skip(1).all(|c| {
+        matches!(c, 'A'..='Z' | '2'..='7')
+    }) {
+        return Err("Invalid Stellar public key characters".to_string());
+    }
+    
+    Ok(())
+}
+
+/// Validate XDR signature (base64 format, reasonable length bounds).
+fn validate_signed_xdr(xdr: &str) -> Result<(), String> {
+    let trimmed = xdr.trim();
+    if trimmed.is_empty() {
+        return Err("Signed XDR must not be empty".to_string());
+    }
+    
+    // XDR should be base64 encoded; validate it can be decoded
+    if let Err(_) = base64::decode(trimmed) {
+        return Err("Signed XDR must be valid base64".to_string());
+    }
+    
+    // Check reasonable size bounds (XDR envelopes are typically < 10KB)
+    if trimmed.len() > 20_000 {
+        return Err("Signed XDR exceeds maximum size".to_string());
+    }
+    
+    Ok(())
+}
+
 #[utoipa::path(
     post,
     path = "/invoices/{id}/cancel",
@@ -31,24 +67,68 @@ pub async fn cancel_invoice(
     headers: HeaderMap,
     ValidatedBody(body): ValidatedBody<CancelRequest>,
 ) -> impl IntoResponse {
+    // Issue #1: Validate merchant public key format
+    if let Err(e) = validate_stellar_pubkey(&body.merchant) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: format!("Invalid merchant key: {}", e),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
+    // Issue #1: Validate signed XDR format (must be base64, reasonable size)
+    if let Err(e) = validate_signed_xdr(&body.signed_xdr) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: format!("Invalid signed XDR: {}", e),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
     // ── Idempotency check ────────────────────────────────────────────────────
     let idem_key = headers
         .get("Idempotency-Key")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    let body_json_obj = serde_json::json!({
+        "merchant": body.merchant,
+        "signed_xdr": body.signed_xdr,
+    });
+
     if let Some(ref key) = idem_key {
         let store_key = IdempotencyStore::make_key("cancel", id, key);
-        if let Some(cached) = state.idempotency.get(&store_key) {
-            let status = StatusCode::from_u16(cached.status).unwrap_or(StatusCode::OK);
-            return (status, Json(cached.body)).into_response();
+        let payload_hash = IdempotencyStore::hash_payload(&body_json_obj);
+        match state.idempotency.get(&store_key, &payload_hash) {
+            Ok(Some(cached)) => {
+                let status = StatusCode::from_u16(cached.status).unwrap_or(StatusCode::OK);
+                return (status, Json(cached.body)).into_response();
+            }
+            Err(err) => {
+                // Idempotency violation: same key used with different payload
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorResponse {
+                        error: err,
+                        code: Some(422),
+                    }),
+                )
+                    .into_response();
+            }
+            Ok(None) => {} // Key not found or expired, proceed with processing
         }
     }
 
     // ── Process the cancellation ─────────────────────────────────────────────
     let result = state.client.cancel_invoice(id, &body.merchant, &body.signed_xdr).await;
 
-    let (status, body_json) = match result {
+    let (status, response_body) = match result {
         Ok(resp) => {
             // Emit the invoice.cancelled lifecycle webhook event.
             state
@@ -84,10 +164,11 @@ pub async fn cancel_invoice(
     // ── Cache the result ─────────────────────────────────────────────────────
     if let Some(ref key) = idem_key {
         let store_key = IdempotencyStore::make_key("cancel", id, key);
-        state.idempotency.insert(store_key, status.as_u16(), body_json.clone());
+        let payload_hash = IdempotencyStore::hash_payload(&body_json_obj);
+        state.idempotency.insert(store_key, status.as_u16(), response_body.clone(), payload_hash);
     }
 
-    (status, Json(body_json)).into_response()
+    (status, Json(response_body)).into_response()
 }
 
 #[cfg(test)]

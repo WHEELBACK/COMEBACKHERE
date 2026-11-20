@@ -8,10 +8,13 @@ export function hashMerchantApiKey(key: string): string {
   return createHash("sha256").update(key).digest("hex")
 }
 
+/** Upper bound on bearer token length; real keys are far shorter, so longer values are rejected before hashing or DB access. */
+export const MAX_API_KEY_LENGTH = 256
+
 export const requireMerchantApiKey: RequestHandler = (req, res, next) => {
   const authorization = req.get("authorization")
   const match = authorization?.match(/^Bearer (\S+)$/i)
-  if (!match) {
+  if (!match || match[1].length > MAX_API_KEY_LENGTH) {
     next(new UnauthorizedError("A merchant API key is required"))
     return
   }
