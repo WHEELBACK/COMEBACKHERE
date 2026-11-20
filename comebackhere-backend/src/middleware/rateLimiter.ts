@@ -1,5 +1,6 @@
 import { type Request, type Response, type NextFunction } from "express"
 import { RateLimiterRedis, RateLimiterMemory, type RateLimiterAbstract } from "rate-limiter-flexible"
+import { createHash } from "crypto"
 import Redis from "ioredis"
 import { RateLimitError } from "../lib/errors.js"
 
@@ -147,7 +148,8 @@ export function rateLimitMiddleware(
     req.socket.remoteAddress ??
     "unknown"
   const apiKey = req.header("X-API-Key")?.trim()
-  const key = apiKey ? `api-key:${apiKey}` : `ip:${ip}`
+  // Hash the caller-supplied key so arbitrarily long headers cannot bloat limiter memory / Redis keys.
+  const key = apiKey ? `api-key:${createHash("sha256").update(apiKey).digest("hex")}` : `ip:${ip.slice(0, 64)}`
 
   const { ipPoints, apiKeyPoints } = getConfig()
   const points = apiKey ? apiKeyPoints : ipPoints

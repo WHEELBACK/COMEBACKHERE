@@ -90,7 +90,12 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
     return
   }
 
-  const appError = toAppError(err)
+  const normalised = toAppError(err)
+  // Never leak internals (stack/driver messages) of unexpected 5xx errors to clients.
+  const appError =
+    !(err instanceof AppError) && normalised.status >= 500 && normalised.code === "INTERNAL_ERROR"
+      ? new AppError(normalised.status, normalised.code, "Internal server error")
+      : normalised
   const correlationId = typeof res.locals.requestId === "string" ? res.locals.requestId : null
 
   if (appError.status >= 500) {

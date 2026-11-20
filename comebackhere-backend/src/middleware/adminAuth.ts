@@ -1,6 +1,15 @@
-import { createHash } from "crypto"
+import { createHash, timingSafeEqual } from "crypto"
 import type { RequestHandler } from "express"
 import { ForbiddenError, ServiceMisconfiguredError, UnauthorizedError } from "../lib/errors.js"
+
+const MAX_ADMIN_KEY_LENGTH = 512
+
+/** Constant-time comparison; hashing first equalises lengths so none leaks. */
+export function safeKeyEquals(supplied: string, configured: string): boolean {
+  const a = createHash("sha256").update(supplied).digest()
+  const b = createHash("sha256").update(configured).digest()
+  return timingSafeEqual(a, b)
+}
 
 export const requireAdmin: RequestHandler = (req, res, next) => {
   const configuredKey = process.env.ADMIN_KEY
@@ -14,7 +23,7 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
     next(new UnauthorizedError("Admin credentials are required"))
     return
   }
-  if (suppliedKey !== configuredKey) {
+  if (suppliedKey.length > MAX_ADMIN_KEY_LENGTH || !safeKeyEquals(suppliedKey, configuredKey)) {
     next(new ForbiddenError("Admin credentials are invalid"))
     return
   }

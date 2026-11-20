@@ -10,7 +10,7 @@ function makeValidator(part: RequestPart) {
       const result = schema.safeParse(req[part])
       if (!result.success) {
         const details = result.error.issues.map((issue) => ({
-          field: issue.path.join("."),
+          field: issue.path.length ? issue.path.join(".") : "(root)",
           message: issue.message,
         }))
         const message = details.map((d) => `${d.field}: ${d.message}`).join("; ")
@@ -19,6 +19,9 @@ function makeValidator(part: RequestPart) {
       }
       if (part === "body") {
         req.body = result.data
+      } else if (part === "params") {
+        // Apply coerced/stripped params; req.query is a read-only getter in Express 5, so it is left as-is.
+        req.params = result.data as Request["params"]
       }
       next()
     }

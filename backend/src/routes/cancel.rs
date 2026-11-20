@@ -10,6 +10,42 @@ use crate::idempotency::IdempotencyStore;
 use crate::types::{CancelRequest, ErrorResponse};
 use crate::AppState;
 
+/// Validate that the input is a valid Stellar public key (G-prefixed, 56 chars, base32).
+fn validate_stellar_pubkey(key: &str) -> Result<(), String> {
+    if !key.starts_with('G') || key.len() != 56 {
+        return Err("Invalid Stellar public key format".to_string());
+    }
+    
+    // Check if it contains only valid base32 characters
+    if !key.chars().skip(1).all(|c| {
+        matches!(c, 'A'..='Z' | '2'..='7')
+    }) {
+        return Err("Invalid Stellar public key characters".to_string());
+    }
+    
+    Ok(())
+}
+
+/// Validate XDR signature (base64 format, reasonable length bounds).
+fn validate_signed_xdr(xdr: &str) -> Result<(), String> {
+    let trimmed = xdr.trim();
+    if trimmed.is_empty() {
+        return Err("Signed XDR must not be empty".to_string());
+    }
+    
+    // XDR should be base64 encoded; validate it can be decoded
+    if let Err(_) = base64::decode(trimmed) {
+        return Err("Signed XDR must be valid base64".to_string());
+    }
+    
+    // Check reasonable size bounds (XDR envelopes are typically < 10KB)
+    if trimmed.len() > 20_000 {
+        return Err("Signed XDR exceeds maximum size".to_string());
+    }
+    
+    Ok(())
+}
+
 #[utoipa::path(
     post,
     path = "/invoices/{id}/cancel",
@@ -31,6 +67,30 @@ pub async fn cancel_invoice(
     headers: HeaderMap,
     ValidatedBody(body): ValidatedBody<CancelRequest>,
 ) -> impl IntoResponse {
+    // Issue #1: Validate merchant public key format
+    if let Err(e) = validate_stellar_pubkey(&body.merchant) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: format!("Invalid merchant key: {}", e),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
+    // Issue #1: Validate signed XDR format (must be base64, reasonable size)
+    if let Err(e) = validate_signed_xdr(&body.signed_xdr) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse {
+                error: format!("Invalid signed XDR: {}", e),
+                code: Some(422),
+            }),
+        )
+            .into_response();
+    }
+
     // ── Idempotency check ────────────────────────────────────────────────────
     let idem_key = headers
         .get("Idempotency-Key")
