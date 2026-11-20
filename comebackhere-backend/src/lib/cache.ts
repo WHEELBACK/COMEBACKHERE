@@ -1,5 +1,6 @@
 import Redis from "ioredis"
 import { logger } from "./logger.js"
+import { pruneExpiring } from "./bounded-map.js"
 
 let _redis: Redis | null = null
 
@@ -86,6 +87,7 @@ export function memoryCacheGet<T>(key: string): T | null {
 /** Stores `value` under `key`; the TTL is a safety net for changes nobody invalidates. */
 export function memoryCacheSet(key: string, value: unknown, ttlMs: number): void {
   _memoryCache.set(key, { value, expiresAt: Date.now() + ttlMs })
+  pruneExpiring(_memoryCache, 1_000)
 }
 
 /**
