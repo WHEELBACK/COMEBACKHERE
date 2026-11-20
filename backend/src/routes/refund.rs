@@ -38,18 +38,38 @@ pub async fn refund_invoice(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    let body_json_obj = serde_json::json!({
+        "payer": body.payer,
+        "signed_xdr": body.signed_xdr,
+    });
+
     if let Some(ref key) = idem_key {
         let store_key = IdempotencyStore::make_key("refund", id, key);
-        if let Some(cached) = state.idempotency.get(&store_key) {
-            let status = StatusCode::from_u16(cached.status).unwrap_or(StatusCode::OK);
-            return (status, Json(cached.body)).into_response();
+        let payload_hash = IdempotencyStore::hash_payload(&body_json_obj);
+        match state.idempotency.get(&store_key, &payload_hash) {
+            Ok(Some(cached)) => {
+                let status = StatusCode::from_u16(cached.status).unwrap_or(StatusCode::OK);
+                return (status, Json(cached.body)).into_response();
+            }
+            Err(err) => {
+                // Idempotency violation: same key used with different payload
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorResponse {
+                        error: err,
+                        code: Some(422),
+                    }),
+                )
+                    .into_response();
+            }
+            Ok(None) => {} // Key not found or expired, proceed with processing
         }
     }
 
     // ── Process the refund ───────────────────────────────────────────────────
     let result = state.client.refund_invoice(id, &body.payer, &body.signed_xdr).await;
 
-    let (status, body_json) = match result {
+    let (status, response_body) = match result {
         Ok(resp) => (StatusCode::OK, serde_json::json!(resp)),
         Err(e) if e.to_string().contains("NOT_PAID") => (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -84,10 +104,11 @@ pub async fn refund_invoice(
     // ── Cache the result ─────────────────────────────────────────────────────
     if let Some(ref key) = idem_key {
         let store_key = IdempotencyStore::make_key("refund", id, key);
-        state.idempotency.insert(store_key, status.as_u16(), body_json.clone());
+        let payload_hash = IdempotencyStore::hash_payload(&body_json_obj);
+        state.idempotency.insert(store_key, status.as_u16(), response_body.clone(), payload_hash);
     }
 
-    (status, Json(body_json)).into_response()
+    (status, Json(response_body)).into_response()
 }
 
 #[cfg(test)]
