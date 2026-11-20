@@ -90,10 +90,14 @@ export function createApp(options: CreateAppOptions = {}) {
       res.on("finish", () => {
         const routePath = req.route ? String(req.route.path) : "unmatched"
         const route = `${req.baseUrl}${routePath}` || "/"
-        httpRequestDuration.observe(
-          { method: req.method, route, status_code: String(res.statusCode) },
-          Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
-        )
+        // A throw inside a "finish" listener is an uncaught exception that would
+        // crash the process under load; metrics must never take the server down.
+        try {
+          httpRequestDuration.observe(
+            { method: req.method, route, status_code: String(res.statusCode) },
+            Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
+          )
+        } catch { /* ignore metric failures */ }
       })
     }
     next()

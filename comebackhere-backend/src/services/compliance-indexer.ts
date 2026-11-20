@@ -109,6 +109,7 @@ export async function processComplianceIndexerBatch(
 }
 
 let timer: ReturnType<typeof setInterval> | null = null
+let tickInFlight = false
 export function startComplianceIndexer(): void {
   if (timer) return
   const rpcUrl = process.env.SOROBAN_RPC_URL
@@ -116,8 +117,12 @@ export function startComplianceIndexer(): void {
   if (!rpcUrl || !contractId) return
   const client = buildSorobanClient(rpcUrl)
   const tick = async () => {
+    // Skip overlapping polls: a slow batch must not stack concurrent DB work.
+    if (tickInFlight) return
+    tickInFlight = true
     try { await processComplianceIndexerBatch(client, contractId, await connectMongo()) }
     catch (err) { logger.error({ errorName: err instanceof Error ? err.name : "UnknownError" }, "Compliance indexer failed") }
+    finally { tickInFlight = false }
   }
   void tick()
   timer = setInterval(() => void tick(), POLL_INTERVAL_MS)
