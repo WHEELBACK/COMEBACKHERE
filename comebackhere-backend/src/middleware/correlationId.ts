@@ -21,6 +21,14 @@ import { type Request, type Response, type NextFunction } from "express"
 import { randomUUID } from "node:crypto"
 import { logger } from "../lib/logger.js"
 
+const MAX_REQUEST_ID_LENGTH = 128
+const SAFE_REQUEST_ID = /^[A-Za-z0-9._:\-]+$/
+
+/** Client-supplied IDs end up in logs and headers: bound length and charset. */
+export function isSafeRequestId(value: string): boolean {
+  return value.length <= MAX_REQUEST_ID_LENGTH && SAFE_REQUEST_ID.test(value)
+}
+
 export function correlationIdMiddleware(
   req: Request,
   res: Response,
@@ -29,7 +37,7 @@ export function correlationIdMiddleware(
   const incomingId = req.headers["x-request-id"]
   // Only accept a single string value; ignore arrays (malformed headers)
   const requestId =
-    typeof incomingId === "string" && incomingId.trim() !== ""
+    typeof incomingId === "string" && incomingId.trim() !== "" && isSafeRequestId(incomingId.trim())
       ? incomingId.trim()
       : randomUUID()
 
