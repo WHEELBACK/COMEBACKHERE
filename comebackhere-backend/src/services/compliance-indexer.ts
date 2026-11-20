@@ -3,6 +3,7 @@ import { buildSorobanClient, type SorobanClient } from "../lib/soroban.js"
 import { connectMongo, getCursorsCollection, getComplianceAuditCollection, type ComplianceAuditRecord, type ComplianceAuditStatus } from "../db/mongo.js"
 import { indexerLedgerLag } from "../lib/metrics.js"
 import { logger } from "../lib/logger.js"
+import { complianceStatusForEvent, tryParseEvent } from "../lib/compliance-guards.js"
 
 const CURSOR_ID = "compliance_audit_events"
 const EVENT_LIMIT = 100
@@ -61,7 +62,15 @@ export async function processComplianceIndexerBatch(
   for (const event of response.events ?? []) {
     const eventType = symbol(event.topic, 0)
     if (!EVENT_TYPES.has(eventType)) continue
-    const addressValue = eventAddress(event, eventType)
+    const parsed = tryParseEvent(event, (e) => ({
+      addressValue: eventAddress(e, eventType), status: complianceStatusForEvent(eventType), expiresAt: eventExpiry(e, eventType),
+    }))
+    if (!parsed) {
+      lastToken = event.pagingToken ?? lastToken
+      logger.warn({ eventType, pagingToken: event.pagingToken }, "Skipping malformed compliance event")
+      continue
+    }
+    const { addressValue } = parsed
     const id = complianceEventId(event, eventType, addressValue)
     lastToken = event.pagingToken ?? lastToken
     if (seen.has(id)) continue
@@ -69,8 +78,8 @@ export async function processComplianceIndexerBatch(
       event_id: id,
       event_type: eventType as ComplianceAuditRecord["event_type"],
       address: addressValue,
-      status: eventStatus(event, eventType),
-      expires_at: eventExpiry(event, eventType),
+      status: parsed.status,
+      expires_at: parsed.expiresAt,
       ledger: event.ledger ?? 0,
       ledger_closed_at: event.ledgerClosedAt ?? null,
       transaction_hash: event.txHash ?? "",

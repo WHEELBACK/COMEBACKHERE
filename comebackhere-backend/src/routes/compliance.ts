@@ -14,6 +14,7 @@ import { requireAdmin } from "../middleware/adminAuth.js"
 import { allowBodySchema, blockBodySchema, complianceAuditQuerySchema } from "../schemas/index.js"
 import { connectMongo, getComplianceAuditCollection } from "../db/mongo.js"
 import { cacheDelete } from "../lib/cache.js"
+import { assertNonEmptyAddress, isValidAllowanceExpiry } from "../lib/compliance-guards.js"
 
 const router = Router()
 
@@ -106,6 +107,7 @@ export async function callComplianceOp(
   signerSecret: string,
   networkPassphrase: string
 ): Promise<{ address: string; status: string; hash: string }> {
+  assertNonEmptyAddress(args[0]?.address()?.toString())
   const keypair = Keypair.fromSecret(signerSecret)
   const contract = new Contract(contractId)
 
@@ -133,6 +135,9 @@ export async function callComplianceOp(
   prepared.sign(keypair)
 
   const sendResult = await client.sendTransaction(prepared)
+  if (!sendResult?.hash) {
+    throw Object.assign(new Error("Soroban submission returned no transaction hash"), { status: 502 })
+  }
   if (sendResult.status === "ERROR") {
     throw Object.assign(
       new Error(
@@ -146,7 +151,13 @@ export async function callComplianceOp(
   let getResult: SorobanRpc.Api.GetTransactionResponse | null = null
   for (let i = 0; i < 10; i++) {
     await new Promise((r) => setTimeout(r, 1000))
-    getResult = await client.getTransaction(hash)
+    try {
+      getResult = await client.getTransaction(hash)
+    } catch (err) {
+      // Transient RPC errors while polling must not abort an already-submitted tx.
+      if (i === 9) throw err
+      continue
+    }
     if (getResult.status !== SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) break
   }
 
@@ -194,6 +205,9 @@ router.post("/allow", requireAdmin, validateBody(allowBodySchema), asyncHandler(
   })
 
   const client = buildSorobanClient(env.rpcUrl)
+  if (until !== undefined && !isValidAllowanceExpiry(until)) {
+    throw Object.assign(new Error("until must be a positive Unix timestamp"), { status: 400 })
+  }
   const operation = until ? "allow_address_until" : "allow_address"
   const args = until
     ? [nativeToScVal(address, { type: "address" }), nativeToScVal(until, { type: "u64" })]
