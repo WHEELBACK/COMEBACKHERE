@@ -7,6 +7,7 @@
 
 pub mod balance_reconciliation;
 pub mod correlation;
+pub mod escrow_adapter;
 pub mod extractors;
 pub mod fee_distributor;
 pub mod handlers_readiness;
