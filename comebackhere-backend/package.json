@@ -23,6 +23,7 @@
     "stellar-sdk": "^12.1.0",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
+    "vite": "^8.3.8",
     "zod": "^4.4.3"
   },
   "devDependencies": {
