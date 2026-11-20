@@ -93,6 +93,9 @@ pub struct AppState {
     /// Retry/dead-letter dispatcher used for every production webhook event.
     pub webhooks: Arc<WebhookDispatcher>,
 
+    /// Merchant-scoped webhook configuration storage.
+    pub merchant_webhooks: Arc<routes::invoices::MerchantWebhookStore>,
+
 }
 
 impl AppState {
@@ -161,6 +164,9 @@ impl AppState {
             // Production webhook events flow through the retry + dead-letter
             // queue rather than a single best-effort attempt.
             webhooks: Arc::new(WebhookDispatcher::new(RetryConfig::from_env())),
+
+            // In-memory merchant webhook configuration store
+            merchant_webhooks: Arc::new(routes::invoices::MerchantWebhookStore::default()),
 
         }
     }
