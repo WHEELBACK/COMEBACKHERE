@@ -9,6 +9,7 @@ import {
   SorobanRpc,
   xdr,
 } from "stellar-sdk"
+import { assertContractId, assertHolderAddress, assertMethodName } from "./soroban-input-guards.js"
 
 export type SorobanClient = {
   getAccount: (publicKey: string) => Promise<ConstructorParameters<typeof TransactionBuilder>[0]>
@@ -83,6 +84,8 @@ export async function simulateContractRead(
   sourceAccount: string,
   networkPassphrase: string,
 ): Promise<xdr.ScVal> {
+  assertContractId(contractId)
+  assertMethodName(method)
   const contract = new Contract(contractId)
   const account = await client.getAccount(sourceAccount)
   const tx = new TransactionBuilder(account, {
@@ -115,6 +118,8 @@ export async function getTokenBalance(
   sourceAccount: string,
   networkPassphrase: string,
 ): Promise<bigint> {
+  assertContractId(tokenContractId, "token contract id")
+  assertHolderAddress(holderAddress, "holder address")
   const retval = await simulateContractRead(
     client,
     tokenContractId,
