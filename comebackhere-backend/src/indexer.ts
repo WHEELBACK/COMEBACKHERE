@@ -449,6 +449,12 @@ async function initialStartLedger(rpc: IndexerRpc): Promise<number> {
 /**
  * Fetches and processes one batch of events, then saves the cursor.
  *
+ * #209 ledger continuity check — after Redis reconnect, verify the ledger
+ * range hasn't shifted unexpectedly (e.g. node restart or retention shrinkage).
+ * If the oldest retained ledger is now ahead of our resume point, we record
+ * a retention gap and skip to the oldest retained ledger, preventing silent
+ * event loss.
+ *
  * `database` defaults to the shared Mongo connection; pass null to run
  * without Mongo (cursor kept in Redis / memory only, no idempotency).
  * Returns the number of newly applied events.
@@ -474,6 +480,28 @@ export async function pollOnce(
     if (mem !== "0") pagingToken = mem
   }
   if (!pagingToken && !startLedger) startLedger = await initialStartLedger(rpc)
+
+  // #209 ledger continuity check: before fetching, verify the oldest retained
+  // ledger hasn't advanced beyond our resume point (indicating a retention gap).
+  // This catches node restarts or retention window shrinkage that would cause
+  // silent event loss.
+  const oldestRetained = await getOldestRetainedLedger(rpc)
+  if (oldestRetained !== null) {
+    const resumeLedger = startLedger ?? (pagingToken ? ledgerFromPagingToken(pagingToken) : null) ?? lastLedger
+    if (resumeLedger > 0 && oldestRetained > resumeLedger) {
+      // The oldest retained ledger is now ahead of our resume point.
+      // Record the gap and skip to the oldest retained ledger.
+      await recordRetentionGap(db, contractId, resumeLedger, oldestRetained - 1)
+      pagingToken = undefined
+      startLedger = oldestRetained
+      lastLedger = oldestRetained
+      if (db) await saveMongoCursor(db, null, oldestRetained)
+      logger.warn(
+        { resumeLedger, oldestRetained, missingLedgers: oldestRetained - resumeLedger },
+        "Retention window shifted during Redis reconnect; gap detected and recorded",
+      )
+    }
+  }
 
   const fetchEvents = () =>
     rpc.getEvents({

@@ -69,11 +69,23 @@ export function getNetworkPassphrase(): string {
  *
  * Both halves are stored as XDR Integer instances whose toString() returns
  * the numeric string, so BigInt(hi.toString()) / BigInt(lo.toString()) work.
+ *
+ * Handles signed 128-bit integers correctly:
+ * - If hi >= 2^63, the value is negative (two's complement)
+ * - Convert to negative by subtracting 2^128 to maintain correct semantics
  */
 function i128ToBigInt(parts: xdr.Int128Parts): bigint {
   const lo = BigInt(parts.lo().toString())
   const hi = BigInt(parts.hi().toString())
-  return (hi << 64n) | lo
+  const value = (hi << 64n) | lo
+  
+  // Check if this is a negative number (high bit of hi is set)
+  // In two's complement, if the sign bit is set, subtract 2^128
+  const SIGN_BIT = 1n << 127n
+  if (value & SIGN_BIT) {
+    return value - (1n << 128n)
+  }
+  return value
 }
 
 export async function simulateContractRead(
@@ -229,16 +241,43 @@ export async function getSettlementSimulation(
     entries[key] = entry.val()
   }
 
+  // Validate required fields are present and have expected types
+  if (!entries.settlement_id?.u64()) {
+    throw Object.assign(
+      new Error("Missing or invalid settlement_id in simulate_settlement response"),
+      { status: 422 },
+    )
+  }
+  if (!entries.status) {
+    throw Object.assign(
+      new Error("Missing status in simulate_settlement response"),
+      { status: 422 },
+    )
+  }
+  if (!entries.treasury_balance?.i128()) {
+    throw Object.assign(
+      new Error("Missing or invalid treasury_balance in simulate_settlement response"),
+      { status: 422 },
+    )
+  }
+  if (!entries.projected_balance?.i128()) {
+    throw Object.assign(
+      new Error("Missing or invalid projected_balance in simulate_settlement response"),
+      { status: 422 },
+    )
+  }
+
   return {
-    settlementId: BigInt(entries.settlement_id?.u64()?.toString() ?? "0"),
+    settlementId: BigInt(entries.settlement_id.u64()!.toString()),
     status: scValToSettlementStatus(entries.status ?? xdr.ScVal.scvVoid()),
     wouldSucceed: entries.would_succeed?.b() ?? false,
     approvalWeight: BigInt(entries.approval_weight?.u64()?.toString() ?? "0"),
     threshold: BigInt(entries.threshold?.u64()?.toString() ?? "0"),
     settlementAmount: BigInt(entries.settlement_amount?.u64()?.toString() ?? "0"),
     // #898 — use i128ToBigInt so treasury/projected balances parse correctly.
-    treasuryBalance: i128ToBigInt(entries.treasury_balance?.i128() ?? xdr.Int128Parts.fromXDR(Buffer.alloc(16))),
-    projectedBalance: i128ToBigInt(entries.projected_balance?.i128() ?? xdr.Int128Parts.fromXDR(Buffer.alloc(16))),
+    // Now with proper signed integer handling for negative balances
+    treasuryBalance: i128ToBigInt(entries.treasury_balance.i128()!),
+    projectedBalance: i128ToBigInt(entries.projected_balance.i128()!),
   }
 }
 
