@@ -1,0 +1,223 @@
+================================================================================
+FOUR ISSUES ANALYSIS — COMPLETE
+================================================================================
+
+PROJECT:     COMEBACKHERE Backend
+ANALYSIS DATE: 2025-01-24
+SCOPE:       indexer.ts, mongo.ts, soroban.ts, treasury.ts
+
+================================================================================
+DELIVERABLES
+================================================================================
+
+✓ FOUR_ISSUES_INDEX.md
+  - Navigation guide
+  - Document index with quick links
+  - Checklist and statistics
+  - 6 KB
+
+✓ FOUR_ISSUES_SUMMARY.md
+  - Executive summary (10 min read)
+  - High-level status of all 4 issues
+  - Severity and priority matrix
+  - 13 KB
+
+✓ FOUR_ISSUES_ANALYSIS.md
+  - Deep dive analysis (30 min read)
+  - Current implementation status for each issue
+  - Detailed gaps explanation
+  - Test coverage assessment
+  - Issue-by-issue breakdown
+  - 24 KB
+
+✓ FOUR_ISSUES_QUICK_REFERENCE.md
+  - Developer reference (15 min read)
+  - Exact line numbers for every issue
+  - Code snippets (before/after)
+  - Copy-paste ready fixes
+  - Quick test commands
+  - 14 KB
+
+✓ FOUR_ISSUES_FIXES.md
+  - Implementation guide (20 min read)
+  - Step-by-step fixes
+  - Test cases to add
+  - Load test recommendations
+  - Verification checklist
+  - 16 KB
+
+================================================================================
+FINDINGS SUMMARY
+================================================================================
+
+ISSUE 1: WebSocket Reconnect Backoff & Ledger Sync (indexer.ts)
+  Status:    ✓ MOSTLY CORRECT
+  Severity:  MEDIUM
+  Priority:  Phase 3
+  Sub-Issues: 2
+  - Gap 1: Race condition if retention window shrinks (MEDIUM)
+  - Gap 2: Silent recovery not explicit (LOW)
+  Recommended Action: Add pre-check for ledger continuity after reconnect
+
+ISSUE 2: MongoDB Pool Size & Timeout Tuning (mongo.ts)
+  Status:    ⚠ RISKY UNDER LOAD
+  Severity:  CRITICAL
+  Priority:  Phase 1-2
+  Sub-Issues: 4
+  - Issue 1: Socket timeout mismatch with Soroban (CRITICAL)
+  - Issue 2: Pool size undersized (MEDIUM)
+  - Issue 3: Missing TCP keepalive (LOW)
+  - Issue 4: Server selection timeout too tight (MEDIUM)
+  Recommended Action: Increase pool sizes & timeouts; add keepalive
+
+ISSUE 3: Multi-Asset i128 Conversion (soroban.ts)
+  Status:    ⚠ BROKEN FOR EDGE CASES
+  Severity:  CRITICAL
+  Priority:  Phase 1-2
+  Sub-Issues: 4
+  - Issue 1: Signed integer handling broken (CRITICAL)
+  - Issue 2: No boundary value tests (MEDIUM)
+  - Issue 3: Missing field validation (MEDIUM)
+  - Issue 4: Fallback to zero on missing data (MEDIUM)
+  Recommended Action: Fix i128 signed int + add validation + add tests
+
+ISSUE 4: Settlement Simulation Without Submission (treasury.ts)
+  Status:    ✓ CORRECTLY IMPLEMENTED
+  Severity:  LOW
+  Priority:  Phase 4
+  Sub-Issues: 4
+  - Issue 1: Authorization boundary not required (LOW)
+  - Issue 2: No rate limiting (MEDIUM)
+  - Issue 3: Stale simulation possible (LOW - mitigated)
+  - Issue 4: Test coverage gap (LOW)
+  Recommended Action: Add integration tests; optional rate limiting
+
+================================================================================
+PRIORITY MATRIX
+================================================================================
+
+CRITICAL (Do First)
+  1. Fix i128 signed integer handling (soroban.ts line 43-52)
+  2. Increase MongoDB socket timeout to 60s (mongo.ts line 197)
+
+HIGH (Do Soon)
+  3. Increase MongoDB pool sizes (mongo.ts lines 185-189)
+  4. Add i128 boundary value tests (soroban.test.ts)
+  5. Add settlement simulation response validation (soroban.ts line 256-261)
+  6. Add TCP keepalive to MongoDB (mongo.ts line 208)
+
+MEDIUM (Next Sprint)
+  7. Add ledger continuity check (indexer.ts line 282-310)
+  8. Add simulation endpoint integration tests (treasury.test.ts)
+
+LOW (Polish)
+  9. Add rate limiting to simulation (treasury.ts line 449)
+
+================================================================================
+STATISTICS
+================================================================================
+
+Total Issues Found:        8 sub-issues across 4 components
+Critical Issues:           2 (i128 signed, socket timeout)
+High Priority Issues:      4
+Test Coverage Gaps:        5 areas
+Lines to Change:          ~100
+New Tests to Add:         ~20
+Estimated Dev Time:       8-10 hours
+Estimated Test Time:      2-3 hours
+Total Project Time:       10-13 hours
+
+================================================================================
+KEY RECOMMENDATIONS
+================================================================================
+
+IMMEDIATE ACTIONS:
+  1. Review this analysis for correctness
+  2. Prioritize Phase 1 & 2 fixes (critical & high)
+  3. Schedule 10-13 hours for implementation + testing
+
+CODE CHANGES NEEDED:
+  - mongo.ts:           5 lines (pool tuning)
+  - soroban.ts:        15 lines (i128 fix + validation)
+  - indexer.ts:        15 lines (continuity check)
+  - treasury.ts:        5 lines (optional rate limit)
+  - Various tests:     50+ lines
+
+TESTING REQUIRED:
+  - Unit tests for all changes
+  - Integration tests for simulation endpoint
+  - Load testing (50 req/sec, verify 0% timeout rate)
+  - Boundary value tests for i128
+
+DEPLOYMENT:
+  - All changes are backward-compatible
+  - MongoDB pool changes require service restart
+  - i128 fix is in-service deployment
+  - No database migration needed
+
+================================================================================
+HOW TO USE THESE DOCUMENTS
+================================================================================
+
+For Managers:
+  → Read FOUR_ISSUES_SUMMARY.md (10 min)
+
+For Developers (Implementing Fixes):
+  → Read FOUR_ISSUES_QUICK_REFERENCE.md (15 min)
+  → Then read FOUR_ISSUES_FIXES.md (20 min)
+  → Refer to line numbers and copy-paste ready fixes
+
+For Code Reviewers:
+  → Read FOUR_ISSUES_ANALYSIS.md (30 min)
+  → Then read FOUR_ISSUES_FIXES.md (20 min)
+  → Check test coverage in FIXES.md
+
+For Test Engineers:
+  → Read FOUR_ISSUES_ANALYSIS.md focusing on "Test Coverage" sections
+  → Read FOUR_ISSUES_FIXES.md for recommended test cases
+
+For Project Leads:
+  → Read FOUR_ISSUES_INDEX.md for navigation
+  → Review checklist and statistics
+  → Use to estimate timeline and resource allocation
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. START HERE: Read FOUR_ISSUES_INDEX.md
+2. EXEC SUMMARY: Read FOUR_ISSUES_SUMMARY.md
+3. DEEP DIVE: Read FOUR_ISSUES_ANALYSIS.md
+4. IMPLEMENT: Read FOUR_ISSUES_FIXES.md + QUICK_REFERENCE.md
+5. VERIFY: Use deployment checklist in FIXES.md
+
+================================================================================
+DOCUMENT LOCATIONS
+================================================================================
+
+All analysis documents are in: /workspaces/COMEBACKHERE/
+
+Files:
+  - FOUR_ISSUES_INDEX.md (this file provides an overview)
+  - FOUR_ISSUES_SUMMARY.md (10 min overview)
+  - FOUR_ISSUES_ANALYSIS.md (30 min deep dive)
+  - FOUR_ISSUES_QUICK_REFERENCE.md (15 min quick reference)
+  - FOUR_ISSUES_FIXES.md (20 min implementation guide)
+
+Files to Modify (after reading analysis):
+  - src/db/mongo.ts (lines 184-208)
+  - src/lib/soroban.ts (lines 43-52, 256-261)
+  - src/indexer.ts (lines 282-310)
+  - src/routes/treasury.ts (line 449)
+  - src/tests/soroban.test.ts (add tests)
+  - src/tests/treasury.test.ts (add tests)
+
+================================================================================
+ANALYSIS COMPLETE
+================================================================================
+
+Generated: 2025-01-24
+Ready for: Implementation, Code Review, Load Testing
+Status: All issues documented, gaps identified, fixes specified
+Next Action: Begin Phase 1 (Critical) fixes
+

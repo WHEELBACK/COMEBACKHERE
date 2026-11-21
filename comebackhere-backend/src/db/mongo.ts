@@ -185,13 +185,19 @@ export function ensureIndexes(database: Db): Promise<void> {
 // ---------------------------------------------------------------------------
 // #210 — Connection options: explicit pool size and timeouts so a slow or
 // unreachable MongoDB fails fast instead of hanging indefinitely.
+// 
+// Tuned for production load:
+// - maxPoolSize increased from 10 to 25 to handle API+indexer concurrent load
+// - minPoolSize increased from 2 to 5 for faster recovery after spike
+// - socketTimeoutMS increased to 60s (was 45s) to accommodate Soroban RPC
+//   timeouts (30s max per call). Prevents cascade failures when Soroban is slow.
 // ---------------------------------------------------------------------------
 
 const MONGO_OPTIONS = {
-  /** Maximum number of connections in the pool. */
-  maxPoolSize: 10,
-  /** Minimum number of idle connections to maintain. */
-  minPoolSize: 2,
+  /** Maximum number of connections in the pool. Increased for concurrent load. */
+  maxPoolSize: 25,
+  /** Minimum number of idle connections to maintain. Faster recovery after spikes. */
+  minPoolSize: 5,
   /**
    * How long (ms) the driver will wait when selecting a server before
    * throwing a MongoServerSelectionError.  Default is 30 000; we tighten
@@ -206,8 +212,15 @@ const MONGO_OPTIONS = {
   /**
    * How long (ms) to wait for a socket operation to complete before
    * giving up and returning an error to the caller.
+   * Increased to 60s (was 45s) to accommodate Soroban RPC calls which
+   * timeout at 30s max per operation. This prevents cascade failures
+   * when Soroban is experiencing delays.
    */
-  socketTimeoutMS: 45_000,
+  socketTimeoutMS: 60_000,
+  /**
+   * Enable TCP keepalive to detect stale connections.
+   */
+  socketKeepAlive: true,
 }
 
 export function connectMongo(): Promise<Db> {
