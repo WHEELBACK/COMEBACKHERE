@@ -193,3 +193,145 @@ describe("processIndexerBatch — reorg deduplication", () => {
     expect(count2).toBe(0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// processIndexerBatch — high-load edge cases (#1067 / #1068)
+// ---------------------------------------------------------------------------
+describe("processIndexerBatch — high-load edge cases", () => {
+  const CONTRACT_ID = "CONTRACT_TEST"
+
+  it("returns 0 and performs no writes for an empty event batch", async () => {
+    const db = makeDatabase(makeMockCursor())
+    const client = makeMockClient([], 200)
+
+    const count = await processIndexerBatch(client, CONTRACT_ID, db)
+    expect(count).toBe(0)
+    expect((db as any)._settlements.updateOne).not.toHaveBeenCalled()
+  })
+
+  it("skips malformed events without throwing and still processes valid ones", async () => {
+    const valid = makeEvent({ pagingToken: "tok-valid", txHash: "txv", eventType: "settlement_proposed", settlementId: 1 })
+    // Malformed: missing topic / value accessors entirely
+    const malformed = {
+      pagingToken: "tok-bad",
+      txHash: "txb",
+      ledger: 100,
+      topic: [],
+      value: {},
+    } as unknown as ReturnType<typeof makeEvent>
+
+    const db = makeDatabase(makeMockCursor())
+    const client = makeMockClient([malformed, valid])
+
+    let count: number | undefined
+    await expect(
+      (async () => {
+        count = await processIndexerBatch(client, CONTRACT_ID, db)
+      })(),
+    ).resolves.not.toThrow()
+
+    expect(count).toBe(1)
+    expect((db as any)._settlements.updateOne).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not throw when the cursor document is missing or corrupt", async () => {
+    const event = makeEvent({ pagingToken: "tok-c1", txHash: "txc1", eventType: "settlement_proposed", settlementId: 1 })
+    const db = makeDatabase(makeMockCursor())
+    // Corrupt cursor: findOne returns null
+    ;(db as any)._cursors.findOne.mockResolvedValueOnce(null)
+    const client = makeMockClient([event])
+
+    let count: number | undefined
+    await expect(
+      (async () => {
+        count = await processIndexerBatch(client, CONTRACT_ID, db)
+      })(),
+    ).resolves.not.toThrow()
+
+    expect(count).toBe(1)
+  })
+
+  it("tolerates a corrupt processed_event_ids field (non-array)", async () => {
+    const event = makeEvent({ pagingToken: "tok-c2", txHash: "txc2", eventType: "settlement_proposed", settlementId: 2 })
+    const db = makeDatabase(makeMockCursor())
+    ;(db as any)._cursors.findOne.mockResolvedValueOnce({
+      _id: "treasury_settlement_events",
+      paging_token: null,
+      last_ledger: 0,
+      processed_event_ids: "not-an-array",
+      updated_at: new Date(),
+    })
+    const client = makeMockClient([event])
+
+    let count: number | undefined
+    await expect(
+      (async () => {
+        count = await processIndexerBatch(client, CONTRACT_ID, db)
+      })(),
+    ).resolves.not.toThrow()
+
+    expect(count).toBe(1)
+  })
+
+  it("deduplicates repeated paging tokens within a single batch", async () => {
+    const first = makeEvent({ pagingToken: "tok-dup", txHash: "txd1", eventType: "settlement_proposed", settlementId: 1 })
+    const second = makeEvent({ pagingToken: "tok-dup", txHash: "txd2", eventType: "settlement_proposed", settlementId: 2 })
+    const db = makeDatabase(makeMockCursor())
+    const client = makeMockClient([first, second])
+
+    const count = await processIndexerBatch(client, CONTRACT_ID, db)
+    expect(count).toBe(1)
+    expect((db as any)._settlements.updateOne).toHaveBeenCalledTimes(1)
+  })
+
+  it("degrades gracefully when the RPC getEvents call fails", async () => {
+    const db = makeDatabase(makeMockCursor())
+    const client = makeMockClient([])
+    ;(client.getEvents as any).mockRejectedValueOnce(new Error("RPC unavailable"))
+
+    let count: number | undefined
+    await expect(
+      (async () => {
+        count = await processIndexerBatch(client, CONTRACT_ID, db)
+      })(),
+    ).resolves.not.toThrow()
+
+    expect(count).toBe(0)
+    expect((db as any)._settlements.updateOne).not.toHaveBeenCalled()
+  })
+
+  it("degrades gracefully when the settlements write fails", async () => {
+    const event = makeEvent({ pagingToken: "tok-w1", txHash: "txw1", eventType: "settlement_proposed", settlementId: 1 })
+    const db = makeDatabase(makeMockCursor())
+    ;(db as any)._settlements.updateOne.mockRejectedValueOnce(new Error("write conflict"))
+    const client = makeMockClient([event])
+
+    let count: number | undefined
+    await expect(
+      (async () => {
+        count = await processIndexerBatch(client, CONTRACT_ID, db)
+      })(),
+    ).resolves.not.toThrow()
+
+    // The failed event must not be counted as processed
+    expect(count).toBe(0)
+  })
+
+  it("handles a large batch without throwing", async () => {
+    const events = Array.from({ length: 500 }, (_, i) =>
+      makeEvent({ pagingToken: `tok-${i}`, txHash: `tx-${i}`, eventType: "settlement_proposed", settlementId: i + 1 }),
+    )
+    const db = makeDatabase(makeMockCursor())
+    const client = makeMockClient(events)
+
+    let count: number | undefined
+    await expect(
+      (async () => {
+        count = await processIndexerBatch(client, CONTRACT_ID, db)
+      })(),
+    ).resolves.not.toThrow()
+
+    expect(count).toBe(500)
+    expect((db as any)._settlements.updateOne).toHaveBeenCalledTimes(500)
+  })
+})
