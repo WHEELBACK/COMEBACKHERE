@@ -12,22 +12,41 @@ const EVENT_TYPES = new Set(["address_allowed", "address_allowed_until", "addres
 type ComplianceRpcEvent = Awaited<ReturnType<SorobanRpc.Server["getEvents"]>>["events"][number]
 
 function symbol(topic: xdr.ScVal[] | undefined, index: number): string {
-  return topic?.[index]?.sym()?.toString() ?? ""
+  try {
+    return topic?.[index]?.sym()?.toString() ?? ""
+  } catch {
+    return ""
+  }
 }
 
 function address(value: xdr.ScVal | undefined): string {
-  return value?.address()?.toString() ?? ""
+  try {
+    return value?.address()?.toString() ?? ""
+  } catch {
+    return ""
+  }
 }
 
 function eventAddress(event: ComplianceRpcEvent, eventType: string): string {
-  return address(eventType === "address_cleared" || eventType === "address_allowed_until"
-    ? event.value?.vec()?.[0]
-    : event.value)
+  try {
+    return address(eventType === "address_cleared" || eventType === "address_allowed_until"
+      ? event.value?.vec()?.[0]
+      : event.value)
+  } catch {
+    return ""
+  }
 }
 
 function eventExpiry(event: ComplianceRpcEvent, eventType: string): number | null {
   if (eventType !== "address_allowed_until") return null
-  return Number(event.value?.vec()?.[1]?.u64()?.toString() ?? 0) || null
+  try {
+    const raw = event.value?.vec()?.[1]?.u64()?.toString()
+    if (raw === undefined) return null
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+  } catch {
+    return null
+  }
 }
 
 export function complianceEventId(event: ComplianceRpcEvent, eventType: string, addressValue: string): string {
@@ -35,8 +54,19 @@ export function complianceEventId(event: ComplianceRpcEvent, eventType: string, 
 }
 
 async function loadCursor(database: Awaited<ReturnType<typeof connectMongo>>) {
-  return (await getCursorsCollection(database).findOne({ _id: CURSOR_ID })) ?? {
-    _id: CURSOR_ID, paging_token: null, last_ledger: 0, updated_at: new Date(), processed_event_ids: [],
+  const existing = await getCursorsCollection(database).findOne({ _id: CURSOR_ID })
+  if (!existing) {
+    return {
+      _id: CURSOR_ID, paging_token: null, last_ledger: 0, updated_at: new Date(), processed_event_ids: [] as string[],
+    }
+  }
+  return {
+    ...existing,
+    paging_token: typeof existing.paging_token === "string" ? existing.paging_token : null,
+    last_ledger: Number.isFinite(existing.last_ledger) && existing.last_ledger > 0 ? existing.last_ledger : 0,
+    processed_event_ids: Array.isArray(existing.processed_event_ids)
+      ? existing.processed_event_ids.filter((id): id is string => typeof id === "string")
+      : [],
   }
 }
 
@@ -46,7 +76,7 @@ export async function processComplianceIndexerBatch(
   database: Awaited<ReturnType<typeof connectMongo>>,
 ): Promise<number> {
   const cursor = await loadCursor(database)
-  const seen = new Set(cursor.processed_event_ids ?? [])
+  const seen = new Set(cursor.processed_event_ids)
   const startLedger = cursor.last_ledger > 0 ? cursor.last_ledger : undefined
   const response = await client.getEvents({
     startLedger,
@@ -60,19 +90,20 @@ export async function processComplianceIndexerBatch(
   let lastToken = cursor.paging_token
 
   for (const event of response.events ?? []) {
+    // Advance the cursor for every event we observe, even ones we skip, so a
+    // malformed or unknown event can never wedge the indexer in a retry loop.
+    lastToken = event.pagingToken ?? lastToken
     const eventType = symbol(event.topic, 0)
     if (!EVENT_TYPES.has(eventType)) continue
     const parsed = tryParseEvent(event, (e) => ({
       addressValue: eventAddress(e, eventType), status: complianceStatusForEvent(eventType), expiresAt: eventExpiry(e, eventType),
     }))
-    if (!parsed) {
-      lastToken = event.pagingToken ?? lastToken
+    if (!parsed || !parsed.addressValue) {
       logger.warn({ eventType, pagingToken: event.pagingToken }, "Skipping malformed compliance event")
       continue
     }
     const { addressValue } = parsed
     const id = complianceEventId(event, eventType, addressValue)
-    lastToken = event.pagingToken ?? lastToken
     if (seen.has(id)) continue
     const record: ComplianceAuditRecord = {
       event_id: id,
@@ -93,17 +124,20 @@ export async function processComplianceIndexerBatch(
     processed++
   }
 
+  const latestLedger = Number.isFinite(response.latestLedger) && (response.latestLedger ?? 0) > 0
+    ? (response.latestLedger as number)
+    : cursor.last_ledger
   await getCursorsCollection(database).updateOne(
     { _id: CURSOR_ID },
     {
-      $set: { paging_token: lastToken, last_ledger: response.latestLedger ?? cursor.last_ledger, updated_at: new Date() },
+      $set: { paging_token: lastToken, last_ledger: latestLedger, updated_at: new Date() },
       ...(newIds.length ? { $push: { processed_event_ids: { $each: newIds, $slice: -1000 } } } : {}),
     },
     { upsert: true },
   )
   indexerLedgerLag.set(
     { indexer: "compliance" },
-    Math.max(0, (response.latestLedger ?? cursor.last_ledger) - (response.events?.at(-1)?.ledger ?? response.latestLedger ?? cursor.last_ledger)),
+    Math.max(0, latestLedger - (response.events?.at(-1)?.ledger ?? latestLedger)),
   )
   return processed
 }
@@ -120,9 +154,15 @@ export function startComplianceIndexer(): void {
     // Skip overlapping polls: a slow batch must not stack concurrent DB work.
     if (tickInFlight) return
     tickInFlight = true
-    try { await processComplianceIndexerBatch(client, contractId, await connectMongo()) }
-    catch (err) { logger.error({ errorName: err instanceof Error ? err.name : "UnknownError" }, "Compliance indexer failed") }
-    finally { tickInFlight = false }
+    try {
+      const database = await connectMongo()
+      await processComplianceIndexerBatch(client, contractId, database)
+    } catch (err) {
+      logger.error(
+        { errorName: err instanceof Error ? err.name : "UnknownError", errorMessage: err instanceof Error ? err.message : String(err) },
+        "Compliance indexer failed",
+      )
+    } finally { tickInFlight = false }
   }
   void tick()
   timer = setInterval(() => void tick(), POLL_INTERVAL_MS)

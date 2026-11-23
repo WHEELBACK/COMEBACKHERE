@@ -3,6 +3,8 @@ import type { RequestHandler } from "express"
 import { ForbiddenError, ServiceMisconfiguredError, UnauthorizedError } from "../lib/errors.js"
 
 const MAX_ADMIN_KEY_LENGTH = 512
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/
 
 /** Constant-time comparison; hashing first equalises lengths so none leaks. */
 export function safeKeyEquals(supplied: string, configured: string): boolean {
@@ -11,9 +13,17 @@ export function safeKeyEquals(supplied: string, configured: string): boolean {
   return timingSafeEqual(a, b)
 }
 
+/** Rejects keys that are empty, whitespace-only, oversized or contain control characters. */
+export function isWellFormedKey(key: string): boolean {
+  if (key.length === 0 || key.length > MAX_ADMIN_KEY_LENGTH) return false
+  if (key.trim().length === 0) return false
+  if (CONTROL_CHARACTER_PATTERN.test(key)) return false
+  return true
+}
+
 export const requireAdmin: RequestHandler = (req, res, next) => {
   const configuredKey = process.env.ADMIN_KEY
-  if (!configuredKey) {
+  if (!configuredKey || !isWellFormedKey(configuredKey)) {
     next(new ServiceMisconfiguredError("ADMIN_KEY is not configured"))
     return
   }
@@ -23,7 +33,7 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
     next(new UnauthorizedError("Admin credentials are required"))
     return
   }
-  if (suppliedKey.length > MAX_ADMIN_KEY_LENGTH || !safeKeyEquals(suppliedKey, configuredKey)) {
+  if (!isWellFormedKey(suppliedKey) || !safeKeyEquals(suppliedKey, configuredKey)) {
     next(new ForbiddenError("Admin credentials are invalid"))
     return
   }
