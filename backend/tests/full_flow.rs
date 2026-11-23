@@ -11,7 +11,7 @@
 //! ```
 
 use axum::{
-    http::StatusCode,
+    http::{header, StatusCode},
     routing::{get, post},
     Json, Router,
 };
@@ -246,4 +246,192 @@ async fn full_lifecycle_health_create_pay_refund() {
     let chain = chain.lock().unwrap();
     assert_eq!(chain.next_id, 2, "exactly one invoice was created");
     assert_eq!(chain.status, 4, "invoice ended in RefundRequested");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth flow (issue #1065)
+//
+// Exercises the auth-service wiring through the real `build_router` so that
+// regressions in the challenge/verify middleware or the protected-route guard
+// are caught end-to-end.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A protected route that only authenticated callers may reach.
+const PROTECTED_ROUTE: &str = "/auth/me";
+
+/// Request a challenge for `account` and return the challenge payload.
+async fn request_challenge(server: &TestServer, account: &str) -> Value {
+    let resp = server
+        .post("/auth/challenge")
+        .json(&json!({ "account": account }))
+        .await;
+    assert_eq!(
+        resp.status_code(),
+        StatusCode::OK,
+        "challenge request should succeed"
+    );
+    resp.json::<Value>()
+}
+
+/// Sign a challenge the way a wallet would: the mock signer derives a
+/// deterministic signature from the challenge nonce, so the backend's verifier
+/// (which recomputes the same value) accepts it.
+fn sign_challenge(challenge: &str) -> String {
+    format!("sig:{challenge}")
+}
+
+/// Authenticate with a signed challenge and return the bearer token.
+async fn authenticate(server: &TestServer, account: &str, challenge: &str, signature: &str) -> Value {
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "account": account,
+            "challenge": challenge,
+            "signature": signature,
+        }))
+        .await;
+    assert_eq!(
+        resp.status_code(),
+        StatusCode::OK,
+        "verify should succeed for a valid signature"
+    );
+    resp.json::<Value>()
+}
+
+#[tokio::test]
+async fn auth_flow_challenge_sign_authenticate_and_access_protected_route() {
+    let (mock_addr, _chain) = spawn_mock_dependencies().await;
+    let server = spawn_backend(mock_addr).await;
+
+    // ── 1. Obtain a challenge ───────────────────────────────────────────────
+    let challenge_body = request_challenge(&server, MERCHANT).await;
+    let challenge = challenge_body["challenge"]
+        .as_str()
+        .expect("challenge response must include a challenge string")
+        .to_string();
+    assert!(!challenge.is_empty(), "challenge must not be empty");
+    assert_eq!(challenge_body["account"], MERCHANT);
+
+    // ── 2. Sign it and authenticate ─────────────────────────────────────────
+    let signature = sign_challenge(&challenge);
+    let auth_body = authenticate(&server, MERCHANT, &challenge, &signature).await;
+    let token = auth_body["token"]
+        .as_str()
+        .expect("verify response must include a bearer token")
+        .to_string();
+    assert!(!token.is_empty(), "token must not be empty");
+
+    // ── 3. Access a protected route with the token ──────────────────────────
+    let protected = server
+        .get(PROTECTED_ROUTE)
+        .add_header(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        )
+        .await;
+    assert_eq!(
+        protected.status_code(),
+        StatusCode::OK,
+        "authenticated request should reach the protected route"
+    );
+    let protected_body: Value = protected.json();
+    assert_eq!(protected_body["account"], MERCHANT);
+}
+
+#[tokio::test]
+async fn auth_flow_rejects_tampered_signature() {
+    let (mock_addr, _chain) = spawn_mock_dependencies().await;
+    let server = spawn_backend(mock_addr).await;
+
+    let challenge_body = request_challenge(&server, MERCHANT).await;
+    let challenge = challenge_body["challenge"].as_str().unwrap().to_string();
+
+    // A signature that does not match the challenge must be rejected.
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "account": MERCHANT,
+            "challenge": challenge,
+            "signature": "sig:tampered",
+        }))
+        .await;
+    assert_eq!(
+        resp.status_code(),
+        StatusCode::UNAUTHORIZED,
+        "tampered signature must be rejected"
+    );
+
+    // And no token should be issued.
+    let body: Value = resp.json();
+    assert!(
+        body.get("token").is_none(),
+        "rejected verification must not return a token"
+    );
+}
+
+#[tokio::test]
+async fn auth_flow_rejects_expired_challenge() {
+    let (mock_addr, _chain) = spawn_mock_dependencies().await;
+    let server = spawn_backend(mock_addr).await;
+
+    let challenge_body = request_challenge(&server, MERCHANT).await;
+    let challenge = challenge_body["challenge"].as_str().unwrap().to_string();
+
+    // Wait past the challenge TTL, then attempt to verify.
+    let ttl_secs = challenge_body["expires_in_seconds"]
+        .as_u64()
+        .unwrap_or(300);
+    tokio::time::sleep(std::time::Duration::from_secs(ttl_secs + 1)).await;
+
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "account": MERCHANT,
+            "challenge": challenge,
+            "signature": sign_challenge(&challenge),
+        }))
+        .await;
+    assert_eq!(
+        resp.status_code(),
+        StatusCode::UNAUTHORIZED,
+        "expired challenge must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn auth_flow_rejects_missing_credentials() {
+    let (mock_addr, _chain) = spawn_mock_dependencies().await;
+    let server = spawn_backend(mock_addr).await;
+
+    // No Authorization header at all.
+    let no_header = server.get(PROTECTED_ROUTE).await;
+    assert_eq!(
+        no_header.status_code(),
+        StatusCode::UNAUTHORIZED,
+        "protected route must reject requests without credentials"
+    );
+
+    // Malformed bearer token.
+    let bad_token = server
+        .get(PROTECTED_ROUTE)
+        .add_header(
+            header::AUTHORIZATION,
+            "Bearer not-a-real-token".parse().unwrap(),
+        )
+        .await;
+    assert_eq!(
+        bad_token.status_code(),
+        StatusCode::UNAUTHORIZED,
+        "protected route must reject invalid tokens"
+    );
+
+    // Verify without a challenge must also fail.
+    let missing_challenge = server
+        .post("/auth/verify")
+        .json(&json!({ "account": MERCHANT, "signature": "sig:whatever" }))
+        .await;
+    assert!(
+        missing_challenge.status_code().is_client_error(),
+        "verify without a challenge must be rejected"
+    );
 }

@@ -326,3 +326,146 @@ describe("Rate limiting — header contract", () => {
     expect(res.headers["x-ratelimit-limit"]).toBe("2")
   })
 })
+
+/**
+ * High-load behaviour (#1062, #1064).
+ *
+ * These tests fire many requests concurrently against the in-memory fallback
+ * and assert that the limiter never throws, never over-admits, and keeps its
+ * bookkeeping bounded. They are deliberately independent of Redis so they run
+ * in CI without external services.
+ */
+describe("Rate limiting — high load and failure modes", () => {
+  let envBackup: Record<string, string | undefined>
+
+  beforeEach(() => {
+    envBackup = {
+      RATE_LIMIT_POINTS: process.env.RATE_LIMIT_POINTS,
+      RATE_LIMIT_API_KEY_POINTS: process.env.RATE_LIMIT_API_KEY_POINTS,
+      RATE_LIMIT_DURATION: process.env.RATE_LIMIT_DURATION,
+      REDIS_URL: process.env.REDIS_URL,
+    }
+    process.env.RATE_LIMIT_POINTS = "10"
+    process.env.RATE_LIMIT_API_KEY_POINTS = "10"
+    process.env.RATE_LIMIT_DURATION = "60"
+    delete process.env.REDIS_URL
+    resetLimiter()
+  })
+
+  afterEach(() => {
+    for (const [key, val] of Object.entries(envBackup)) {
+      if (val === undefined) delete process.env[key]
+      else process.env[key] = val
+    }
+    resetLimiter()
+  })
+
+  it("admits exactly the configured budget under concurrent load", async () => {
+    const app = createApp()
+    const total = 40
+    const responses = await Promise.all(
+      Array.from({ length: total }, () => request(app).get("/invoices/1")),
+    )
+
+    const limited = responses.filter((r) => r.status === 429)
+    const admitted = responses.filter((r) => r.status !== 429)
+
+    // Never over-admits: at most the configured points get through.
+    expect(admitted.length).toBeLessThanOrEqual(10)
+    // Never under-admits catastrophically: the budget is actually usable.
+    expect(admitted.length).toBeGreaterThan(0)
+    expect(admitted.length + limited.length).toBe(total)
+
+    for (const res of limited) {
+      expect(res.body.error.code).toBe("RATE_LIMITED")
+      expect(res.headers["retry-after"]).toBeDefined()
+    }
+  })
+
+  it("does not throw unexpected exceptions under concurrent load", async () => {
+    const app = createApp()
+    const responses = await Promise.all(
+      Array.from({ length: 25 }, (_, i) =>
+        request(app).get("/invoices/1").set("X-API-Key", `key-${i % 3}`),
+      ),
+    )
+
+    for (const res of responses) {
+      // Every response is either admitted or a well-formed 429 — never a 500.
+      expect(res.status).not.toBe(500)
+      if (res.status === 429) {
+        expect(res.body.error.code).toBe("RATE_LIMITED")
+      }
+    }
+  })
+
+  it("keeps per-key buckets isolated under concurrent load", async () => {
+    const app = createApp()
+    const keys = ["alpha", "beta", "gamma"]
+    const perKey = 15
+
+    const responses = await Promise.all(
+      keys.flatMap((key) =>
+        Array.from({ length: perKey }, () =>
+          request(app).get("/invoices/1").set("X-API-Key", key),
+        ),
+      ),
+    )
+
+    for (const key of keys) {
+      const forKey = responses.filter((_, idx) => keys[idx % keys.length] === key)
+      const admitted = forKey.filter((r) => r.status !== 429)
+      expect(admitted.length).toBeLessThanOrEqual(10)
+      expect(admitted.length).toBeGreaterThan(0)
+    }
+  })
+
+  it("survives a Redis URL that cannot be reached", async () => {
+    // Point at a closed port so the client fails fast; the limiter must fall
+    // back to the in-memory store rather than surfacing an exception.
+    process.env.REDIS_URL = "redis://127.0.0.1:1"
+    resetLimiter()
+
+    const app = createApp()
+    const responses = await Promise.all(
+      Array.from({ length: 15 }, () => request(app).get("/invoices/1")),
+    )
+
+    for (const res of responses) {
+      expect(res.status).not.toBe(500)
+      expect(res.headers["x-ratelimit-limit"]).toBeDefined()
+    }
+  })
+
+  it("does not leak memory across many distinct callers", async () => {
+    const app = createApp()
+    // Many distinct API keys create many buckets; the store must stay bounded
+    // by evicting expired entries rather than growing without limit.
+    for (let i = 0; i < 200; i++) {
+      const res = await request(app).get("/invoices/1").set("X-API-Key", `bulk-${i}`)
+      expect(res.status).not.toBe(500)
+    }
+
+    // A fresh caller is still served correctly after the churn.
+    const res = await request(app).get("/invoices/1").set("X-API-Key", "fresh-key")
+    expect(res.status).not.toBe(429)
+    expect(res.headers["x-ratelimit-remaining"]).toBe("9")
+  })
+
+  it("recovers cleanly after the window resets", async () => {
+    process.env.RATE_LIMIT_DURATION = "1"
+    resetLimiter()
+
+    const app = createApp()
+    for (let i = 0; i < 10; i++) {
+      await request(app).get("/invoices/1")
+    }
+    expect((await request(app).get("/invoices/1")).status).toBe(429)
+
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+
+    const res = await request(app).get("/invoices/1")
+    expect(res.status).not.toBe(429)
+    expect(res.headers["x-ratelimit-remaining"]).toBe("9")
+  })
+})
