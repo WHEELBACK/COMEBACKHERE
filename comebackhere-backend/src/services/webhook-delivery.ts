@@ -16,6 +16,7 @@
 
 import { connectMongo } from "../db/mongo.js"
 import { getWebhookRetryConfig, type WebhookRetryConfig } from "../lib/env.js"
+import { validateWebhookEndpoint } from "./webhook-http.js"
 import {
   webhookDeadLetterVolume,
   webhookDeliveryAttempts,
@@ -81,6 +82,67 @@ export const DEFAULT_MAX_ATTEMPTS = 5
 export const BASE_DELAY_MS = 1_000
 export const MAX_DELAY_MS = 60_000
 export const DEFAULT_JITTER_RATIO = 0.2
+/** Hard cap on the serialized payload size accepted for delivery (1 MiB). */
+export const MAX_PAYLOAD_BYTES = 1_048_576
+/** Maximum number of deferred jobs retained in memory while shutting down. */
+export const MAX_DEFERRED_JOBS = 1_000
+/** Maximum number of attempt history entries retained per delivery. */
+export const MAX_ATTEMPT_HISTORY = 50
+
+/** Error raised when a delivery input fails boundary validation. */
+export class WebhookValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "WebhookValidationError"
+  }
+}
+
+/**
+ * Sanitizes a correlation ID before it is forwarded as `X-Request-Id`.
+ * Strips control characters and header-injection sequences, trims, and caps
+ * the length. Returns undefined when nothing usable remains.
+ */
+export function sanitizeCorrelationId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined
+  // Drop CR/LF and other control characters that could split headers.
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, "").trim()
+  if (cleaned === "") return undefined
+  return cleaned.slice(0, 128)
+}
+
+/** Validates the endpoint and payload before a delivery attempt. */
+export function validateDeliveryInput(endpoint: string, payload: WebhookPayload): void {
+  if (typeof endpoint !== "string" || endpoint.trim() === "") {
+    throw new WebhookValidationError("Webhook endpoint must be a non-empty string")
+  }
+  if (!validateWebhookEndpoint(endpoint)) {
+    throw new WebhookValidationError("Webhook endpoint failed URL validation")
+  }
+  if (!payload || typeof payload !== "object") {
+    throw new WebhookValidationError("Webhook payload must be an object")
+  }
+  if (typeof payload.idempotency_key !== "string" || payload.idempotency_key.trim() === "") {
+    throw new WebhookValidationError("Webhook payload requires an idempotency_key")
+  }
+  if (typeof payload.event_type !== "string" || payload.event_type.trim() === "") {
+    throw new WebhookValidationError("Webhook payload requires an event_type")
+  }
+  let serialized: string
+  try {
+    serialized = JSON.stringify(payload)
+  } catch {
+    throw new WebhookValidationError("Webhook payload is not serializable")
+  }
+  if (Buffer.byteLength(serialized, "utf8") > MAX_PAYLOAD_BYTES) {
+    throw new WebhookValidationError("Webhook payload exceeds maximum allowed size")
+  }
+}
+
+/** Trims an attempt history array to the most recent MAX_ATTEMPT_HISTORY entries. */
+function boundAttemptHistory(history: WebhookAttemptRecord[]): WebhookAttemptRecord[] {
+  if (history.length <= MAX_ATTEMPT_HISTORY) return history
+  return history.slice(history.length - MAX_ATTEMPT_HISTORY)
+}
 
 // ---------------------------------------------------------------------------
 // Internal: single HTTP post with a timeout
@@ -109,8 +171,9 @@ export async function postWebhook(
     "X-COMEBACKHERE-Event-Id": payload.event_id,
     "X-COMEBACKHERE-Delivery-Id": payload.delivery_id,
   }
-  if (correlationId && correlationId.trim() !== "") {
-    headers["X-Request-Id"] = correlationId
+  const safeCorrelationId = sanitizeCorrelationId(correlationId)
+  if (safeCorrelationId) {
+    headers["X-Request-Id"] = safeCorrelationId
   }
 
   return sendWebhookRequest(endpoint, headers, JSON.stringify(payload), fetchFn, timeoutMs, signal)
@@ -163,8 +226,9 @@ export async function deliverWebhook(
     randomFn = Math.random,
     attemptHistory = [],
   } = options
+  const safeCorrelationId = sanitizeCorrelationId(correlationId)
   const record: WebhookDeliveryRecord = {
-    idempotency_key: payload.idempotency_key,
+    idempotency_key: payload?.idempotency_key ?? "",
     endpoint,
     payload,
     status: "pending",
@@ -172,10 +236,25 @@ export async function deliverWebhook(
     last_attempt_at: null,
     last_status_code: null,
     last_error: null,
-    request_id: correlationId ?? null,
-    attempt_history: attemptHistory,
+    request_id: safeCorrelationId ?? null,
+    attempt_history: boundAttemptHistory([...attemptHistory]),
   }
   const startedAt = Date.now()
+
+  // Validate inputs up front; a rejected payload must never reach the network.
+  try {
+    validateDeliveryInput(endpoint, payload)
+  } catch (err) {
+    record.status = "failed"
+    record.last_error = err instanceof Error ? err.message : String(err)
+    webhookDeliveryOutcomes.inc({ status: "failed" })
+    webhookDeliveryDuration.observe({ status: "failed" }, (Date.now() - startedAt) / 1_000)
+    logger.error(
+      { requestId: record.request_id, errorName: err instanceof Error ? err.name : "UnknownError" },
+      "webhook delivery rejected by input validation",
+    )
+    return record
+  }
 
   for (let attempt = startAttempt; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) {
@@ -183,7 +262,14 @@ export async function deliverWebhook(
       return record
     }
 
-    onAttempt?.(attempt + 1)
+    try {
+      onAttempt?.(attempt + 1)
+    } catch (err) {
+      logger.error(
+        { errorName: err instanceof Error ? err.name : "UnknownError" },
+        "webhook onAttempt callback threw",
+      )
+    }
     webhookDeliveryAttempts.inc()
     if (attempt > 0) webhookDeliveryRetries.inc()
     record.attempts = attempt + 1
@@ -195,9 +281,12 @@ export async function deliverWebhook(
       error: null,
     }
     record.attempt_history.push(attemptRecord)
+    if (record.attempt_history.length > MAX_ATTEMPT_HISTORY) {
+      record.attempt_history = boundAttemptHistory(record.attempt_history)
+    }
 
     try {
-      const statusCode = await postWebhook(endpoint, payload, fetchFn, undefined, correlationId, signal)
+      const statusCode = await postWebhook(endpoint, payload, fetchFn, undefined, safeCorrelationId, signal)
       record.last_status_code = statusCode
       attemptRecord.status_code = statusCode
 
@@ -217,9 +306,17 @@ export async function deliverWebhook(
     }
 
     if (attempt !== maxAttempts - 1) {
-      const exponential = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attempt))
-      const jitterMultiplier = 1 - jitterRatio + randomFn() * 2 * jitterRatio
-      await delayFn(Math.min(maxDelayMs, Math.max(0, Math.round(exponential * jitterMultiplier))))
+      try {
+        const exponential = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attempt))
+        const jitterMultiplier = 1 - jitterRatio + randomFn() * 2 * jitterRatio
+        await delayFn(Math.min(maxDelayMs, Math.max(0, Math.round(exponential * jitterMultiplier))))
+      } catch (err) {
+        // A failing sleep must not abort the retry loop; continue immediately.
+        logger.error(
+          { errorName: err instanceof Error ? err.name : "UnknownError" },
+          "webhook retry delay failed",
+        )
+      }
     }
   }
 
@@ -458,7 +555,12 @@ export class WebhookDeliveryQueue {
     attempts = 0,
     attemptHistory: WebhookAttemptRecord[] = [],
   ): Promise<WebhookDeliveryRecord> | null {
-    const job: WebhookDeliveryJob = { endpoint, payload, attempts, attempt_history: attemptHistory }
+    const job: WebhookDeliveryJob = {
+      endpoint,
+      payload,
+      attempts,
+      attempt_history: boundAttemptHistory([...attemptHistory]),
+    }
 
     if (!this.accepting) {
       logger.warn("Webhook queue closed; delivery deferred for retry after restart")
@@ -467,6 +569,11 @@ export class WebhookDeliveryQueue {
         this.persist([job])
       } else {
         this.deferred.push(job)
+        if (this.deferred.length > MAX_DEFERRED_JOBS) {
+          // Bound memory: drop the oldest deferred jobs beyond the cap.
+          const dropped = this.deferred.splice(0, this.deferred.length - MAX_DEFERRED_JOBS)
+          logger.warn({ dropped: dropped.length }, "Webhook deferred queue exceeded cap; oldest jobs dropped")
+        }
       }
       return null
     }
@@ -563,17 +670,28 @@ export class WebhookDeliveryQueue {
   }
 
   listDeadLetters(limit = 100): Promise<WebhookDeadLetterRecord[]> {
-    return this.deadLetterStore.list(Math.max(1, Math.min(100, limit)))
+    const bounded = Number.isFinite(limit) ? Math.floor(limit) : 100
+    return this.deadLetterStore.list(Math.max(1, Math.min(100, bounded)))
   }
 
   /** Replays a dead letter, retaining it unless the delivery succeeds. */
   async replayDeadLetter(idempotencyKey: string): Promise<WebhookDeliveryRecord | null> {
+    if (typeof idempotencyKey !== "string" || idempotencyKey.trim() === "") return null
     const deadLetter = await this.deadLetterStore.find(idempotencyKey)
     if (!deadLetter) return null
     const delivery = this.enqueue(deadLetter.endpoint, deadLetter.payload, 0, deadLetter.attempt_history)
     if (!delivery) return null
     const result = await delivery
-    if (result.status === "delivered") await this.deadLetterStore.delete(idempotencyKey)
+    if (result.status === "delivered") {
+      try {
+        await this.deadLetterStore.delete(idempotencyKey)
+      } catch (err) {
+        logger.error(
+          { errorName: err instanceof Error ? err.name : "UnknownError" },
+          "Failed to delete replayed webhook dead letter",
+        )
+      }
+    }
     return result
   }
 

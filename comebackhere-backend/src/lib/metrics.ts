@@ -83,6 +83,35 @@ export function gauge(name: string, help: string) {
   }
 }
 
+export const authRequestOutcomes = new Counter({
+  name: "auth_request_outcomes_total",
+  help: "Auth request outcomes by operation and result",
+  labelNames: ["operation", "outcome"],
+  registers: [metricsRegistry],
+})
+
+export const authValidationFailures = new Counter({
+  name: "auth_validation_failures_total",
+  help: "Auth request validation failures by operation and reason",
+  labelNames: ["operation", "reason"],
+  registers: [metricsRegistry],
+})
+
+export const authDbQueryDuration = new Histogram({
+  name: "auth_db_query_duration_seconds",
+  help: "Auth-service database query latency in seconds",
+  labelNames: ["operation", "status"],
+  buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [metricsRegistry],
+})
+
+export const authCacheEvictions = new Counter({
+  name: "auth_cache_evictions_total",
+  help: "Auth-service cache evictions by cache and reason",
+  labelNames: ["cache", "reason"],
+  registers: [metricsRegistry],
+})
+
 export function metricsEnabled(): boolean {
   return process.env.METRICS_ENABLED?.toLowerCase() !== "false"
 }

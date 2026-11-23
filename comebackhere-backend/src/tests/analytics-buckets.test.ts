@@ -158,6 +158,105 @@ describe("GET /api/analytics/metrics?bucket=", () => {
     expect(res.body).toHaveProperty("invoices")
     expect(res.body).not.toHaveProperty("series")
   })
+
+  it("returns an empty series when the aggregation yields no rows", async () => {
+    mockAggregate([])
+
+    const res = await request(app).get(
+      `/api/analytics/metrics?bucket=month&start_date=${ts("2026-01-01T00:00:00Z")}&end_date=${ts("2026-01-01T00:00:00Z")}`,
+    )
+
+    expect(res.status).toBe(200)
+    expect(res.body.series).toEqual([{ period: "2026-01-01", count: 0, volume: 0 }])
+  })
+
+  it("400 with a consistent error envelope when start_date is after end_date", async () => {
+    mockAggregate([])
+
+    const res = await request(app).get(
+      `/api/analytics/metrics?bucket=day&start_date=${ts("2026-02-01T00:00:00Z")}&end_date=${ts("2026-01-01T00:00:00Z")}`,
+    )
+
+    expect(res.status).toBe(400)
+    expect(res.body).toHaveProperty("error")
+    expect(typeof res.body.error).toBe("string")
+    expect(res.body.error.length).toBeGreaterThan(0)
+  })
+
+  it("400 with a consistent error envelope for non-numeric dates", async () => {
+    mockAggregate([])
+
+    const res = await request(app).get(
+      "/api/analytics/metrics?bucket=day&start_date=not-a-date&end_date=also-bad",
+    )
+
+    expect(res.status).toBe(400)
+    expect(res.body).toHaveProperty("error")
+    expect(typeof res.body.error).toBe("string")
+  })
+
+  it("400 with a consistent error envelope when the bucket count is oversized", async () => {
+    mockAggregate([])
+
+    const res = await request(app).get(
+      `/api/analytics/metrics?bucket=day&start_date=${ts("1970-01-01T00:00:00Z")}&end_date=${ts("2026-01-01T00:00:00Z")}`,
+    )
+
+    expect(res.status).toBe(400)
+    expect(res.body).toHaveProperty("error")
+    expect(res.body.error).toMatch(/Range too large/)
+  })
+
+  it("survives concurrent requests under simulated load without unhandled exceptions", async () => {
+    const unhandled = vi.fn()
+    process.on("unhandledRejection", unhandled)
+
+    try {
+      const aggregate = mockAggregate([
+        { _id: new Date("2026-01-02T00:00:00Z"), count: 5, volume: 1_000 },
+      ])
+
+      const requests = Array.from({ length: 25 }, (_, i) =>
+        request(app).get(
+          `/api/analytics/metrics?bucket=day&start_date=${ts("2026-01-01T00:00:00Z")}&end_date=${ts("2026-01-03T00:00:00Z")}&merchant=${MERCHANT}&token=USDC&_=${i}`,
+        ),
+      )
+
+      const responses = await Promise.all(requests)
+
+      for (const res of responses) {
+        expect(res.status).toBe(200)
+        expect(res.body.series).toEqual([
+          { period: "2026-01-01", count: 0, volume: 0 },
+          { period: "2026-01-02", count: 5, volume: 1_000 },
+          { period: "2026-01-03", count: 0, volume: 0 },
+        ])
+      }
+
+      expect(aggregate).toHaveBeenCalledTimes(25)
+      expect(unhandled).not.toHaveBeenCalled()
+    } finally {
+      process.off("unhandledRejection", unhandled)
+    }
+  })
+
+  it("returns a 500 error envelope instead of throwing when the aggregation fails", async () => {
+    const aggregate = vi.fn(() => ({
+      toArray: async () => {
+        throw new Error("simulated aggregation failure")
+      },
+    }))
+    vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
+    vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue({ aggregate } as any)
+
+    const res = await request(app).get(
+      `/api/analytics/metrics?bucket=day&start_date=${ts("2026-01-01T00:00:00Z")}&end_date=${ts("2026-01-02T00:00:00Z")}`,
+    )
+
+    expect(res.status).toBeGreaterThanOrEqual(500)
+    expect(res.body).toHaveProperty("error")
+    expect(typeof res.body.error).toBe("string")
+  })
 })
 
 describe("bucket helpers", () => {

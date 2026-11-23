@@ -73,6 +73,84 @@ interface MemoryCacheEntry {
 
 const _memoryCache = new Map<string, MemoryCacheEntry>()
 
+/** Default cap on the number of live entries in the in-process cache. */
+export const DEFAULT_MEMORY_CACHE_MAX_ENTRIES = 10_000
+
+let _memoryCacheMaxEntries = DEFAULT_MEMORY_CACHE_MAX_ENTRIES
+let _memoryCacheEvictions = 0
+
+function resolveMaxEntries(): number {
+  const raw = process.env.MEMORY_CACHE_MAX_ENTRIES
+  if (raw === undefined) return DEFAULT_MEMORY_CACHE_MAX_ENTRIES
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MEMORY_CACHE_MAX_ENTRIES
+  return parsed
+}
+
+_memoryCacheMaxEntries = resolveMaxEntries()
+
+/**
+ * Override the maximum number of entries held by the in-process cache.
+ * Values <= 0 or non-finite fall back to the default cap.
+ */
+export function setMemoryCacheMaxEntries(maxEntries: number): void {
+  _memoryCacheMaxEntries =
+    Number.isFinite(maxEntries) && maxEntries > 0
+      ? Math.floor(maxEntries)
+      : DEFAULT_MEMORY_CACHE_MAX_ENTRIES
+  enforceMemoryCacheBounds()
+}
+
+/** Returns the configured maximum number of entries for the in-process cache. */
+export function getMemoryCacheMaxEntries(): number {
+  return _memoryCacheMaxEntries
+}
+
+/** Returns the number of entries currently held by the in-process cache. */
+export function getMemoryCacheSize(): number {
+  return _memoryCache.size
+}
+
+/** Returns the cumulative number of entries evicted due to the size cap. */
+export function getMemoryCacheEvictions(): number {
+  return _memoryCacheEvictions
+}
+
+/** Snapshot of in-process cache metrics for observability. */
+export function getMemoryCacheMetrics(): {
+  size: number
+  maxEntries: number
+  evictions: number
+} {
+  return {
+    size: _memoryCache.size,
+    maxEntries: _memoryCacheMaxEntries,
+    evictions: _memoryCacheEvictions,
+  }
+}
+
+/** Resets cache metrics counters (intended for tests). */
+export function resetMemoryCacheMetrics(): void {
+  _memoryCacheEvictions = 0
+}
+
+/**
+ * Evict expired entries and, if still over the cap, drop the oldest entries
+ * (Map preserves insertion order) until the cache fits within the bound.
+ */
+function enforceMemoryCacheBounds(): void {
+  pruneExpiring(_memoryCache, 1_000)
+  if (_memoryCache.size <= _memoryCacheMaxEntries) return
+  const overflow = _memoryCache.size - _memoryCacheMaxEntries
+  let removed = 0
+  for (const key of _memoryCache.keys()) {
+    if (removed >= overflow) break
+    _memoryCache.delete(key)
+    removed += 1
+  }
+  _memoryCacheEvictions += removed
+}
+
 /** Returns the cached value for `key` if present and not yet expired. */
 export function memoryCacheGet<T>(key: string): T | null {
   const entry = _memoryCache.get(key)
@@ -87,7 +165,7 @@ export function memoryCacheGet<T>(key: string): T | null {
 /** Stores `value` under `key`; the TTL is a safety net for changes nobody invalidates. */
 export function memoryCacheSet(key: string, value: unknown, ttlMs: number): void {
   _memoryCache.set(key, { value, expiresAt: Date.now() + ttlMs })
-  pruneExpiring(_memoryCache, 1_000)
+  enforceMemoryCacheBounds()
 }
 
 /**

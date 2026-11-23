@@ -82,6 +82,32 @@ export class ServiceMisconfiguredError extends AppError {
 }
 
 /**
+ * A failure inside the reporting engine (aggregation, rendering, export).
+ * Defaults to 500; pass 503 when the engine is temporarily unavailable
+ * (e.g. saturated under high load) so callers can retry.
+ */
+export class ReportingEngineError extends AppError {
+  constructor(
+    message = "Reporting engine failed to process the request",
+    status = 500,
+    details: unknown = null,
+  ) {
+    super(status, "REPORTING_ENGINE_ERROR", message, details)
+  }
+}
+
+/**
+ * Caller-supplied input failed validation before reaching the reporting
+ * engine. Uses a stable code distinct from the generic VALIDATION_ERROR so
+ * clients can branch on it.
+ */
+export class InvalidInputError extends AppError {
+  constructor(message = "Invalid input", details: FieldIssue[] | null = null) {
+    super(400, "INVALID_INPUT", message, details)
+  }
+}
+
+/**
  * A Soroban contract returned a numbered error (`Error(Contract, #N)`).
  * `contractCode` is the numeric variant documented in docs/error-codes.md.
  */
@@ -110,6 +136,15 @@ export function asyncHandler<Req extends Request = Request>(
   fn: (req: Req, res: Response, next: NextFunction) => Promise<unknown>,
 ): RequestHandler {
   return (req, res, next) => {
-    fn(req as Req, res, next).catch(next)
+    // Guard against synchronous throws as well as rejected promises so every
+    // failure reaches the central error handler exactly once.
+    let result: Promise<unknown>
+    try {
+      result = Promise.resolve(fn(req as Req, res, next))
+    } catch (err) {
+      next(err)
+      return
+    }
+    result.catch(next)
   }
 }

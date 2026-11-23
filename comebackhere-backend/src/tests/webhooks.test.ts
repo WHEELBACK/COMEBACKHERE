@@ -27,6 +27,12 @@ import {
 } from "../services/webhooks.js"
 import { createPinnedLookup, resolvePublicAddress, sendWebhookRequest } from "../services/webhook-http.js"
 import { lookup as dnsLookup } from "node:dns/promises"
+import {
+  verifyInboundWebhook,
+  validateWebhookPayload,
+  MAX_WEBHOOK_BODY_BYTES,
+  WEBHOOK_MAX_CLOCK_SKEW_SECONDS,
+} from "../services/webhook-security.js"
 
 vi.mock("node:dns/promises", () => ({
   lookup: vi.fn().mockResolvedValue([{ address: "8.8.8.8", family: 4 }]),
@@ -506,5 +512,204 @@ describe("webhook request destination safety", () => {
     lookup("merchant.example", {}, callback)
 
     expect(callback).toHaveBeenCalledWith(null, "1.1.1.1", 4)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Inbound verification hardening (#1061)
+// ---------------------------------------------------------------------------
+
+describe("verifyInboundWebhook — authentication hardening", () => {
+  const nowSeconds = 1_700_000_000
+  const body = '{"event":"settlement_executed","settlement_id":1}'
+
+  const signedHeaders = (overrides: Record<string, string | undefined> = {}) => {
+    const timestamp = String(nowSeconds)
+    const signature = signPayload(TEST_SECRET, `${timestamp}.${body}`)
+    const headers: Record<string, string | undefined> = {
+      [WEBHOOK_TIMESTAMP_HEADER]: timestamp,
+      [WEBHOOK_SIGNATURE_HEADER]: signature,
+      ...overrides,
+    }
+    return headers
+  }
+
+  it("accepts a correctly signed, fresh request", () => {
+    const result = verifyInboundWebhook(TEST_SECRET, body, signedHeaders(), { nowSeconds })
+    expect(result.ok).toBe(true)
+  })
+
+  it("rejects a request with no signature header", () => {
+    const result = verifyInboundWebhook(
+      TEST_SECRET,
+      body,
+      signedHeaders({ [WEBHOOK_SIGNATURE_HEADER]: undefined }),
+      { nowSeconds },
+    )
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/missing signature/)
+  })
+
+  it("rejects a request with no timestamp header", () => {
+    const result = verifyInboundWebhook(
+      TEST_SECRET,
+      body,
+      signedHeaders({ [WEBHOOK_TIMESTAMP_HEADER]: undefined }),
+      { nowSeconds },
+    )
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/missing timestamp/)
+  })
+
+  it("rejects a malformed (non-hex) signature", () => {
+    const result = verifyInboundWebhook(
+      TEST_SECRET,
+      body,
+      signedHeaders({ [WEBHOOK_SIGNATURE_HEADER]: "zzzz-not-hex" }),
+      { nowSeconds },
+    )
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/malformed signature/)
+  })
+
+  it("rejects a signature of the wrong length", () => {
+    const result = verifyInboundWebhook(
+      TEST_SECRET,
+      body,
+      signedHeaders({ [WEBHOOK_SIGNATURE_HEADER]: "abcd" }),
+      { nowSeconds },
+    )
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/malformed signature/)
+  })
+
+  it("rejects a non-numeric timestamp", () => {
+    const result = verifyInboundWebhook(
+      TEST_SECRET,
+      body,
+      signedHeaders({ [WEBHOOK_TIMESTAMP_HEADER]: "not-a-number" }),
+      { nowSeconds },
+    )
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/malformed timestamp/)
+  })
+
+  it("rejects an expired timestamp outside the allowed clock skew", () => {
+    const stale = String(nowSeconds - WEBHOOK_MAX_CLOCK_SKEW_SECONDS - 1)
+    const signature = signPayload(TEST_SECRET, `${stale}.${body}`)
+    const result = verifyInboundWebhook(
+      TEST_SECRET,
+      body,
+      { [WEBHOOK_TIMESTAMP_HEADER]: stale, [WEBHOOK_SIGNATURE_HEADER]: signature },
+      { nowSeconds },
+    )
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/expired/)
+  })
+
+  it("rejects a timestamp too far in the future", () => {
+    const future = String(nowSeconds + WEBHOOK_MAX_CLOCK_SKEW_SECONDS + 1)
+    const signature = signPayload(TEST_SECRET, `${future}.${body}`)
+    const result = verifyInboundWebhook(
+      TEST_SECRET,
+      body,
+      { [WEBHOOK_TIMESTAMP_HEADER]: future, [WEBHOOK_SIGNATURE_HEADER]: signature },
+      { nowSeconds },
+    )
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/expired/)
+  })
+
+  it("rejects a body that exceeds the maximum allowed size", () => {
+    const oversized = "x".repeat(MAX_WEBHOOK_BODY_BYTES + 1)
+    const result = verifyInboundWebhook(TEST_SECRET, oversized, signedHeaders(), { nowSeconds })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/too large/)
+  })
+
+  it("rejects a tampered body even with a valid-looking signature", () => {
+    const headers = signedHeaders()
+    const result = verifyInboundWebhook(TEST_SECRET, `${body} `, headers, { nowSeconds })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/signature mismatch/)
+  })
+
+  it("rejects when no secret is configured", () => {
+    const result = verifyInboundWebhook("", body, signedHeaders(), { nowSeconds })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/secret/)
+  })
+
+  it("rejects a replayed request whose timestamp has aged out", () => {
+    // A captured request replayed after the skew window must fail.
+    const capturedTimestamp = String(nowSeconds)
+    const signature = signPayload(TEST_SECRET, `${capturedTimestamp}.${body}`)
+    const headers = {
+      [WEBHOOK_TIMESTAMP_HEADER]: capturedTimestamp,
+      [WEBHOOK_SIGNATURE_HEADER]: signature,
+    }
+
+    expect(verifyInboundWebhook(TEST_SECRET, body, headers, { nowSeconds }).ok).toBe(true)
+    const replay = verifyInboundWebhook(TEST_SECRET, body, headers, {
+      nowSeconds: nowSeconds + WEBHOOK_MAX_CLOCK_SKEW_SECONDS + 5,
+    })
+    expect(replay.ok).toBe(false)
+    expect(replay.reason).toMatch(/expired/)
+  })
+
+  it("rejects a replay signed with a different secret", () => {
+    const headers = signedHeaders()
+    const result = verifyInboundWebhook("attacker-secret-aaaaaaaaaaaaaaaaaaaa", body, headers, { nowSeconds })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/signature mismatch/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Strict payload schema (#1061)
+// ---------------------------------------------------------------------------
+
+describe("validateWebhookPayload — strict schema", () => {
+  it("accepts a well-formed payload", () => {
+    const result = validateWebhookPayload({ event: "settlement_executed", settlement_id: 1 })
+    expect(result.ok).toBe(true)
+  })
+
+  it("rejects a payload that is not an object", () => {
+    for (const bad of [null, undefined, "string", 42, []]) {
+      const result = validateWebhookPayload(bad as unknown)
+      expect(result.ok).toBe(false)
+    }
+  })
+
+  it("rejects a payload missing the event field", () => {
+    const result = validateWebhookPayload({ settlement_id: 1 })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/event/)
+  })
+
+  it("rejects an event name that is not a string", () => {
+    const result = validateWebhookPayload({ event: 123 })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/event/)
+  })
+
+  it("rejects unknown top-level fields", () => {
+    const result = validateWebhookPayload({ event: "test", __proto__polluted: true })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/unknown field/)
+  })
+
+  it("rejects prototype-pollution style keys", () => {
+    const payload = JSON.parse('{"event":"test","__proto__":{"admin":true}}') as Record<string, unknown>
+    const result = validateWebhookPayload(payload)
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/unknown field/)
+  })
+
+  it("rejects an oversized payload", () => {
+    const result = validateWebhookPayload({ event: "test", blob: "x".repeat(MAX_WEBHOOK_BODY_BYTES) })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toMatch(/too large/)
   })
 })
