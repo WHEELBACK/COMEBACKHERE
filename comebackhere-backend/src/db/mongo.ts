@@ -135,6 +135,31 @@ export interface IndexerGapRecord {
 export const DEFAULT_PAGE_SIZE = 20
 export const MAX_PAGE_SIZE = 100
 
+/**
+ * #1064 — Upper bound on documents returned by auth-service queries. Keeps
+ * unbounded scans from inflating memory under peak load.
+ */
+export const MAX_AUTH_QUERY_RESULTS = 500
+
+/**
+ * #1064 — Server-side time limit (ms) for auth-service queries so a slow
+ * query cannot pin a pool connection indefinitely.
+ */
+export const AUTH_QUERY_MAX_TIME_MS = 5_000
+
+/** Clamp a caller-supplied limit into [1, MAX_AUTH_QUERY_RESULTS]. */
+export function clampAuthQueryLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_PAGE_SIZE
+  const truncated = Math.trunc(limit)
+  if (truncated < 1) return 1
+  return Math.min(truncated, MAX_AUTH_QUERY_RESULTS)
+}
+
+/** Options applied to every auth-service read query. */
+export function authQueryOptions(limit?: number): { maxTimeMS: number; limit: number } {
+  return { maxTimeMS: AUTH_QUERY_MAX_TIME_MS, limit: clampAuthQueryLimit(limit) }
+}
+
 let client: MongoClient | null = null
 let db: Db | null = null
 let connecting: Promise<Db> | null = null
@@ -166,6 +191,11 @@ export function ensureIndexes(database: Db): Promise<void> {
     { collection: "merchant_api_keys", keys: { key_id: 1 }, unique: true },
     { collection: "merchant_api_keys", keys: { merchant_address: 1 } },
     { collection: "merchant_api_keys", keys: { key_hash: 1 } },
+    // #1064 — auth-service hot paths: lookup by hash (auth), list by merchant,
+    // and revocation sweeps filtered on both.
+    { collection: "merchant_api_keys", keys: { key_hash: 1, revoked_at: 1 } },
+    { collection: "merchant_api_keys", keys: { merchant_address: 1, revoked_at: 1 } },
+    { collection: "merchant_api_keys", keys: { last_used_at: -1 } },
   ]
 
   const creating = Promise.all(
@@ -300,6 +330,46 @@ export function getIndexerGapsCollection(database: Db): Collection<IndexerGapRec
 
 export function getComplianceAuditCollection(database: Db): Collection<ComplianceAuditRecord> {
   return database.collection<ComplianceAuditRecord>("compliance_audit")
+}
+
+export function getMerchantApiKeysCollection(database: Db): Collection<MerchantApiKeyRecord> {
+  return database.collection<MerchantApiKeyRecord>("merchant_api_keys")
+}
+
+/**
+ * #1064 — Batch `last_used_at` updates for API keys. Instead of one write per
+ * authenticated request, callers accumulate key ids and flush them in a single
+ * `bulkWrite`, cutting write amplification and memory churn under peak load.
+ */
+export async function flushApiKeyLastUsed(
+  database: Db,
+  keyIds: readonly string[],
+  usedAt: Date = new Date(),
+): Promise<number> {
+  if (keyIds.length === 0) return 0
+  const uniqueIds = Array.from(new Set(keyIds)).slice(0, MAX_AUTH_QUERY_RESULTS)
+  if (uniqueIds.length === 0) return 0
+
+  try {
+    const result = await getMerchantApiKeysCollection(database).bulkWrite(
+      uniqueIds.map((key_id) => ({
+        updateOne: {
+          filter: { key_id },
+          update: { $set: { last_used_at: usedAt } },
+        },
+      })),
+      { ordered: false },
+    )
+    return result.modifiedCount ?? 0
+  } catch (error) {
+    // Usage tracking is best-effort: never fail an authenticated request
+    // because the timestamp write failed.
+    logger.warn(
+      { errorName: error instanceof Error ? error.name : "UnknownError", count: uniqueIds.length },
+      "Failed to batch-update API key last_used_at",
+    )
+    return 0
+  }
 }
 
 export async function closeMongo(): Promise<void> {

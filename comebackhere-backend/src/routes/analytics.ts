@@ -42,6 +42,14 @@ const MAX_BUCKETS = 1000
 const SETTLED_STATUSES = ["Paid", "Released"]
 const DAY_MS = 86_400_000
 
+/** Raised when the invoice aggregation fails; mapped to a 503 by the route. */
+export class AnalyticsAggregationError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = "AnalyticsAggregationError"
+  }
+}
+
 /** Range used when start_date is omitted: 30 days, 12 weeks or 12 months. */
 const DEFAULT_RANGE_MS: Record<Bucket, number> = {
   day: 30 * DAY_MS,
@@ -49,8 +57,15 @@ const DEFAULT_RANGE_MS: Record<Bucket, number> = {
   month: 365 * DAY_MS,
 }
 
+function isValidDate(value: unknown): value is Date {
+  return value instanceof Date && !Number.isNaN(value.getTime())
+}
+
 /** Start of the UTC bucket containing `date`. */
 export function truncateUtc(date: Date, bucket: Bucket): Date {
+  if (!isValidDate(date)) {
+    throw new RangeError("truncateUtc received an invalid date")
+  }
   const y = date.getUTCFullYear()
   const m = date.getUTCMonth()
   const d = date.getUTCDate()
@@ -76,10 +91,14 @@ function periodKey(date: Date): string {
 
 /** Every bucket start from `start` to `end` inclusive. */
 export function listPeriods(start: Date, end: Date, bucket: Bucket): string[] {
+  if (!isValidDate(start) || !isValidDate(end)) {
+    throw new RangeError("listPeriods received an invalid date range")
+  }
   const periods: string[] = []
+  if (start > end) return periods
   for (let cur = truncateUtc(start, bucket); cur <= end; cur = nextBucket(cur, bucket)) {
     periods.push(periodKey(cur))
-    if (periods.length > MAX_BUCKETS) break
+    if (periods.length >= MAX_BUCKETS) break
   }
   return periods
 }
@@ -97,36 +116,61 @@ export async function buildSeries(options: {
 }): Promise<SeriesPoint[]> {
   const { bucket, start, end, merchant, token } = options
 
+  if (!isValidDate(start) || !isValidDate(end)) {
+    throw new RangeError("buildSeries received an invalid date range")
+  }
+  if (start > end) {
+    throw new RangeError("buildSeries start must be before end")
+  }
+
   const match: Record<string, unknown> = { created_at: { $gte: start, $lte: end } }
   if (merchant) match.merchant_address = merchant
   if (token) match.token = token
 
-  const db = await connectMongo()
-  const rows = await getInvoicesCollection(db)
-    .aggregate<{ _id: Date; count: number; volume: number }>([
-      { $match: match },
-      {
-        $group: {
-          _id: {
-            $dateTrunc: {
-              date: "$created_at",
-              unit: bucket,
-              timezone: BUCKET_TIMEZONE,
-              ...(bucket === "week" ? { startOfWeek: "monday" } : {}),
+  const periods = listPeriods(start, end, bucket)
+
+  let rows: Array<{ _id: Date | null; count?: number; volume?: number }> = []
+  try {
+    const db = await connectMongo()
+    rows = await getInvoicesCollection(db)
+      .aggregate<{ _id: Date | null; count: number; volume: number }>([
+        { $match: match },
+        {
+          $group: {
+            _id: {
+              $dateTrunc: {
+                date: "$created_at",
+                unit: bucket,
+                timezone: BUCKET_TIMEZONE,
+                ...(bucket === "week" ? { startOfWeek: "monday" } : {}),
+              },
+            },
+            count: { $sum: 1 },
+            volume: {
+              $sum: { $cond: [{ $in: ["$status", SETTLED_STATUSES] }, "$amount", 0] },
             },
           },
-          count: { $sum: 1 },
-          volume: {
-            $sum: { $cond: [{ $in: ["$status", SETTLED_STATUSES] }, "$amount", 0] },
-          },
         },
-      },
-      { $sort: { _id: 1 } },
-    ])
-    .toArray()
+        { $sort: { _id: 1 } },
+      ])
+      .toArray()
+  } catch (error) {
+    // Surface a typed error so the route can return a consistent envelope
+    // instead of letting the driver exception bubble up under load.
+    throw new AnalyticsAggregationError("Failed to aggregate invoice series", { cause: error })
+  }
 
-  const byPeriod = new Map(rows.map((r) => [periodKey(new Date(r._id)), r]))
-  return listPeriods(start, end, bucket).map((period) => ({
+  const byPeriod = new Map<string, { count: number; volume: number }>()
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || row._id === null || row._id === undefined) continue
+    const key = periodKey(new Date(row._id))
+    if (Number.isNaN(new Date(row._id).getTime())) continue
+    const count = Number.isFinite(row.count) ? Number(row.count) : 0
+    const volume = Number.isFinite(row.volume) ? Number(row.volume) : 0
+    byPeriod.set(key, { count, volume })
+  }
+
+  return periods.map((period) => ({
     period,
     count: byPeriod.get(period)?.count ?? 0,
     volume: byPeriod.get(period)?.volume ?? 0,
@@ -201,24 +245,45 @@ router.get("/metrics", validateQuery(analyticsQuerySchema), async (req: Request,
           ? new Date(query.start_date * 1000)
           : new Date(end.getTime() - DEFAULT_RANGE_MS[query.bucket])
 
+      if (!isValidDate(start) || !isValidDate(end)) {
+        res.status(400).json({ error: "start_date and end_date must be valid timestamps" })
+        return
+      }
       if (start > end) {
         res.status(400).json({ error: "start_date must be before end_date" })
         return
       }
-      if (listPeriods(start, end, query.bucket).length > MAX_BUCKETS) {
+      // Compute the bucket count once; listPeriods caps at MAX_BUCKETS so a
+      // range that would exceed the cap is rejected before any DB work.
+      const periods = listPeriods(start, end, query.bucket)
+      if (periods.length >= MAX_BUCKETS) {
         res.status(400).json({
           error: `Range too large: at most ${MAX_BUCKETS} ${query.bucket} buckets per request`,
         })
         return
       }
 
-      const series = await buildSeries({
-        bucket: query.bucket,
-        start,
-        end,
-        merchant: query.merchant,
-        token: query.token,
-      })
+      let series: SeriesPoint[]
+      try {
+        series = await buildSeries({
+          bucket: query.bucket,
+          start,
+          end,
+          merchant: query.merchant,
+          token: query.token,
+        })
+      } catch (error) {
+        if (error instanceof AnalyticsAggregationError) {
+          res.locals.logger.error(
+            { errorName: error.name, cause: error.cause instanceof Error ? error.cause.name : undefined },
+            "Analytics aggregation failed",
+          )
+          res.status(503).json({ error: "Analytics temporarily unavailable" })
+          return
+        }
+        throw error
+      }
+
       res.json({
         bucket: query.bucket,
         timezone: BUCKET_TIMEZONE,
@@ -261,6 +326,10 @@ router.get("/metrics", validateQuery(analyticsQuerySchema), async (req: Request,
       { errorName: error instanceof Error ? error.name : "UnknownError" },
       "Analytics metrics request failed",
     )
+    if (error instanceof RangeError) {
+      res.status(400).json({ error: error.message })
+      return
+    }
     res.status(500).json({ error: "Failed to fetch analytics metrics" })
   }
 })

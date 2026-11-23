@@ -15,6 +15,7 @@ import { nativeToScVal, SorobanRpc, SorobanDataBuilder, xdr } from "stellar-sdk"
 import request from "supertest"
 import { createApp } from "../app.js"
 import { callComplianceOp } from "../routes/compliance.js"
+import { processComplianceEvents } from "../services/complianceIndexer.js"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -346,5 +347,121 @@ describe("POST /compliance/block", () => {
       .send({ address: VALID_ADDRESS })
     expect(res.status).toBe(503)
     expect(res.body.error.message).toMatch(/misconfiguration/i)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unit tests: processComplianceEvents (indexer hardening, #1067 / #1068)
+// ---------------------------------------------------------------------------
+
+type IndexerEvent = {
+  ledger: number
+  txHash: string
+  topic: xdr.ScVal[]
+  value: xdr.ScVal
+}
+
+function makeEvent(overrides: Partial<IndexerEvent> = {}): IndexerEvent {
+  return {
+    ledger: 100,
+    txHash: "tx-hash-1",
+    topic: [
+      nativeToScVal("allow_address", { type: "symbol" }),
+      nativeToScVal(VALID_ADDRESS, { type: "address" }),
+    ],
+    value: nativeToScVal(VALID_ADDRESS, { type: "address" }),
+    ...overrides,
+  }
+}
+
+describe("processComplianceEvents", () => {
+  it("returns an empty result and preserves the cursor for an empty batch", async () => {
+    const result = await processComplianceEvents([], "cursor-0")
+
+    expect(result.processed).toBe(0)
+    expect(result.skipped).toBe(0)
+    expect(result.errors).toHaveLength(0)
+    expect(result.cursor).toBe("cursor-0")
+  })
+
+  it("processes a well-formed batch and advances the cursor", async () => {
+    const events = [makeEvent({ ledger: 100 }), makeEvent({ ledger: 101, txHash: "tx-hash-2" })]
+
+    const result = await processComplianceEvents(events, "cursor-0")
+
+    expect(result.processed).toBe(2)
+    expect(result.skipped).toBe(0)
+    expect(result.errors).toHaveLength(0)
+    expect(result.cursor).toBe("101")
+  })
+
+  it("skips malformed events without throwing and still advances the cursor", async () => {
+    const events = [
+      makeEvent({ ledger: 100 }),
+      // Missing topic entirely
+      { ledger: 101, txHash: "bad-1", topic: [], value: xdr.ScVal.scvVoid() } as IndexerEvent,
+      // Non-symbol topic
+      makeEvent({
+        ledger: 102,
+        txHash: "bad-2",
+        topic: [nativeToScVal(42, { type: "u32" })],
+      }),
+      // Null-ish value
+      { ledger: 103, txHash: "bad-3", topic: makeEvent().topic, value: null as any },
+    ]
+
+    const result = await processComplianceEvents(events, "cursor-0")
+
+    expect(result.processed).toBe(1)
+    expect(result.skipped).toBe(3)
+    expect(result.errors).toHaveLength(3)
+    for (const err of result.errors) {
+      expect(err).toMatchObject({ ledger: expect.any(Number) })
+    }
+    // Cursor must still advance past skipped events so they are not re-fetched forever.
+    expect(result.cursor).toBe("103")
+  })
+
+  it("degrades gracefully when the RPC fetch throws", async () => {
+    const fetchEvents = vi.fn().mockRejectedValue(new Error("RPC unavailable"))
+
+    const result = await processComplianceEvents([], "cursor-0", { fetchEvents })
+
+    expect(result.processed).toBe(0)
+    expect(result.skipped).toBe(0)
+    expect(result.errors).toHaveLength(1)
+    expect(result.errors[0].message).toMatch(/RPC unavailable/)
+    // Cursor must not advance on a transport failure so the batch is retried.
+    expect(result.cursor).toBe("cursor-0")
+  })
+
+  it("does not advance the cursor when every event in the batch is malformed", async () => {
+    const events = [
+      { ledger: 200, txHash: "bad-a", topic: [], value: xdr.ScVal.scvVoid() } as IndexerEvent,
+      { ledger: 201, txHash: "bad-b", topic: [], value: xdr.ScVal.scvVoid() } as IndexerEvent,
+    ]
+
+    const result = await processComplianceEvents(events, "cursor-0")
+
+    expect(result.processed).toBe(0)
+    expect(result.skipped).toBe(2)
+    expect(result.errors).toHaveLength(2)
+    expect(result.cursor).toBe("cursor-0")
+  })
+
+  it("reports a consistent error shape for every failure", async () => {
+    const events = [
+      { ledger: 300, txHash: "bad-c", topic: [], value: xdr.ScVal.scvVoid() } as IndexerEvent,
+    ]
+
+    const result = await processComplianceEvents(events, "cursor-0")
+
+    expect(result.errors[0]).toEqual(
+      expect.objectContaining({
+        ledger: 300,
+        txHash: "bad-c",
+        message: expect.any(String),
+      }),
+    )
   })
 })

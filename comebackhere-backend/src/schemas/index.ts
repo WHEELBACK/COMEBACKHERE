@@ -54,6 +54,68 @@ export const merchantApiKeySchema = z.object({
 export const merchantApiKeyIdSchema = z.object({ keyId: z.string().uuid("keyId must be a UUID") })
 export const webhookDeliveryIdSchema = z.object({ deliveryId: z.string().uuid("deliveryId must be a UUID") })
 
+const MAX_IDEMPOTENCY_KEY_LEN = 256
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]+$/
+
+/**
+ * Validates an idempotency key used by webhook delivery/replay flows.
+ * Keys must be non-empty, bounded in length, and restricted to a safe
+ * character set to prevent header/query injection and log forging.
+ */
+export function validateIdempotencyKey(value: unknown): boolean {
+  if (typeof value !== "string") return false
+  if (value.length === 0 || value.length > MAX_IDEMPOTENCY_KEY_LEN) return false
+  return IDEMPOTENCY_KEY_PATTERN.test(value)
+}
+
+const idempotencyKey = z
+  .string()
+  .min(1, "idempotency_key is required")
+  .max(MAX_IDEMPOTENCY_KEY_LEN, `idempotency_key must not exceed ${MAX_IDEMPOTENCY_KEY_LEN} characters`)
+  .regex(IDEMPOTENCY_KEY_PATTERN, "idempotency_key is invalid")
+  .refine(validateIdempotencyKey, "idempotency_key is invalid")
+
+const MAX_WEBHOOK_DATA_KEYS = 64
+const MAX_WEBHOOK_DATA_KEY_LEN = 128
+
+const webhookDataRecord = z
+  .record(z.string().min(1).max(MAX_WEBHOOK_DATA_KEY_LEN), z.unknown())
+  .refine(
+    (record) => Object.keys(record).length <= MAX_WEBHOOK_DATA_KEYS,
+    `data must not contain more than ${MAX_WEBHOOK_DATA_KEYS} keys`,
+  )
+
+export const webhookEventTypes = [
+  "invoice.created",
+  "invoice.paid",
+  "invoice.cancelled",
+  "settlement.created",
+  "settlement.executed",
+  "settlement.held",
+  "dispute.raised",
+  "dispute.resolved",
+] as const
+
+export const webhookPayloadSchema = z
+  .object({
+    event_type: z.enum(webhookEventTypes, { message: "event_type is invalid" }),
+    event_id: z.string().uuid("event_id must be a UUID"),
+    delivery_id: z.string().uuid("delivery_id must be a UUID"),
+    idempotency_key: idempotencyKey,
+    timestamp: z
+      .number({ message: "timestamp must be a positive Unix timestamp" })
+      .int("timestamp must be a positive Unix timestamp")
+      .positive("timestamp must be a positive Unix timestamp"),
+    invoice_id: z.string().min(1).max(256).optional(),
+    settlement_id: z.string().min(1).max(256).optional(),
+    data: webhookDataRecord.optional(),
+  })
+  .strict()
+  .refine((payload) => payload.invoice_id !== undefined || payload.settlement_id !== undefined, {
+    message: "either invoice_id or settlement_id is required",
+  })
+=======
+
 export const invoiceIdParamSchema = z.object({
   id: z.string().regex(/^\d+$/, "id must be a positive integer"),
 })

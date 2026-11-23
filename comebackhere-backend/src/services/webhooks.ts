@@ -30,6 +30,12 @@ import {
   webhookDeliveryOutcomes,
 } from "../lib/metrics.js"
 import { sendWebhookRequest } from "./webhook-http.js"
+import { parseWebhookUrl, resolvePublicAddress } from "./webhook-url.js"
+import { validateIdempotencyKey } from "../lib/idempotency.js"
+import { ValidationError, ForbiddenError } from "../lib/errors.js"
+
+/** Maximum serialized payload size accepted for outbound delivery (bytes). */
+export const MAX_WEBHOOK_PAYLOAD_BYTES = 256 * 1024
 
 /** The header name sent on every outbound webhook request. */
 export const WEBHOOK_SIGNATURE_HEADER = "X-COMEBACKHERE-Signature"
@@ -102,9 +108,13 @@ export function verifySignature(
   signature: string,
 ): boolean {
   try {
-    if (!/^[0-9a-f]{64}$/i.test(signature)) return false
+    if (typeof signature !== "string" || !/^[0-9a-f]{64}$/i.test(signature)) return false
     const actualBuf = Buffer.from(signature, "hex")
-    const candidates = Array.isArray(secret) ? secret : [secret]
+    if (actualBuf.length !== 32) return false
+    const candidates = (Array.isArray(secret) ? secret : [secret]).filter(
+      (candidate): candidate is string => typeof candidate === "string" && candidate.length > 0,
+    )
+    if (candidates.length === 0) return false
     let valid = false
     for (const candidate of candidates) {
       const expectedBuf = Buffer.from(signPayload(candidate, rawBody), "hex")
@@ -115,6 +125,31 @@ export function verifySignature(
   } catch {
     return false
   }
+}
+
+/**
+ * Validate and resolve the outbound endpoint before every delivery attempt.
+ *
+ * Enforces HTTPS-only, rejects embedded credentials, and blocks private,
+ * loopback, and link-local targets (SSRF protection). The resolved public
+ * address is returned so the transport can pin DNS to it.
+ */
+async function resolveEndpoint(url: string): Promise<{ url: URL; address: string }> {
+  const parsed = parseWebhookUrl(url)
+  if (!parsed) {
+    throw new ValidationError("Webhook endpoint URL is invalid or not allowed")
+  }
+  if (parsed.protocol !== "https:") {
+    throw new ValidationError("Webhook endpoint must use HTTPS")
+  }
+  if (parsed.username || parsed.password) {
+    throw new ValidationError("Webhook endpoint must not contain credentials")
+  }
+  const address = await resolvePublicAddress(parsed.hostname)
+  if (!address) {
+    throw new ForbiddenError("Webhook endpoint resolves to a disallowed address")
+  }
+  return { url: parsed, address }
 }
 
 /**
@@ -138,16 +173,27 @@ export async function dispatchWebhook(
 ): Promise<WebhookDeliveryResult> {
   const secret = signingSecret ?? process.env.WEBHOOK_SIGNING_SECRET
   if (!secret) {
-    throw new Error(
+    throw new ValidationError(
       "Webhook signing secret is not configured. " +
         "Set WEBHOOK_SIGNING_SECRET or pass signingSecret explicitly.",
     )
+  }
+
+  const endpoint = await resolveEndpoint(url)
+
+  if (payload.idempotency_key !== undefined && !validateIdempotencyKey(payload.idempotency_key)) {
+    throw new ValidationError("Webhook payload contains an invalid idempotency_key")
   }
 
   const eventId = options.eventId ?? payload.event_id ?? randomUUID()
   const deliveryId = options.deliveryId ?? (options.replayOf ? randomUUID() : payload.delivery_id ?? eventId)
   const deliveredPayload: WebhookPayload = { ...payload, event_id: eventId, delivery_id: deliveryId }
   const rawBody = JSON.stringify(deliveredPayload)
+  if (Buffer.byteLength(rawBody, "utf8") > MAX_WEBHOOK_PAYLOAD_BYTES) {
+    throw new ValidationError(
+      `Webhook payload exceeds maximum size of ${MAX_WEBHOOK_PAYLOAD_BYTES} bytes`,
+    )
+  }
   const timestamp = Math.floor(Date.now() / 1000).toString()
   const signature = signPayload(secret, `${timestamp}.${rawBody}`)
   const legacySignature = signPayload(secret, rawBody)
@@ -172,7 +218,9 @@ export async function dispatchWebhook(
     if (previousSignature) headers[WEBHOOK_PREVIOUS_SIGNATURE_HEADER] = previousSignature
     if (options.correlationId) headers["X-Request-Id"] = options.correlationId
     webhookDeliveryAttempts.inc()
-    status = await sendWebhookRequest(url, headers, rawBody, fetchImpl)
+    status = await sendWebhookRequest(endpoint.url.toString(), headers, rawBody, fetchImpl, {
+      address: endpoint.address,
+    })
     if (status < 200 || status >= 300) failure = `HTTP ${status}`
     return {
       url,
@@ -238,7 +286,7 @@ async function persistWebhookAttempt(attempt: {
       delivery_id: attempt.deliveryId,
       merchant_address: attempt.merchantAddress,
       endpoint: attempt.endpoint,
-      payload: deliveredPayload,
+      payload: attempt.payload,
       status: replay.status,
       attempts: 1,
       last_status_code: attempt.status,
