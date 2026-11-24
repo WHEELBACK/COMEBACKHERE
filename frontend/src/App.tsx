@@ -1,6 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 
 const THEME_STORAGE_KEY = 'theme';
+
+// Analytics dashboard charts pull in Chart.js / Recharts (~300KB+). Load them
+// on demand so they stay out of the initial bundle.
+const AnalyticsDashboard = lazy(() => import('./components/analytics/AnalyticsDashboard'));
 
 type Theme = 'light' | 'dark';
 
@@ -30,6 +34,28 @@ function applyTheme(theme: Theme) {
   } else {
     root.classList.remove('dark');
   }
+}
+
+function AnalyticsSkeleton() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label="Loading analytics dashboard"
+      className="space-y-4"
+    >
+      <div className="h-6 w-48 animate-pulse rounded bg-gray-200 dark:bg-gray-700" />
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {[0, 1, 2, 3].map((index) => (
+          <div
+            key={index}
+            className="h-64 animate-pulse rounded-lg bg-gray-200 dark:bg-gray-700"
+          />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function App() {
@@ -81,6 +107,11 @@ function App() {
           {theme === 'dark' ? 'Light mode' : 'Dark mode'}
         </button>
       </header>
+      <main className="px-4 py-6">
+        <Suspense fallback={<AnalyticsSkeleton />}>
+          <AnalyticsDashboard />
+        </Suspense>
+      </main>
     </div>
   );
 }
