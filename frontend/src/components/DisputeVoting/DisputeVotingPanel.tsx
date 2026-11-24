@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Dispute, DisputeOutcome } from '../../types/dispute'
 import { useDisputes } from '../../hooks/useDisputes'
+import { EmptyState, EmptyStateIcon } from '../EmptyState/EmptyState'
 import './DisputeVotingPanel.css'
 
 const CURRENT_SIGNER = import.meta.env.VITE_SIGNER_1 ?? ''
@@ -41,15 +42,15 @@ function DisputeCard({ dispute, onVote }: { dispute: Dispute; onVote: (id: numbe
     setErr(null)
     try {
       await onVote(dispute.settlement_id, vote)
-    } catch (e: any) {
-      setErr(e.message)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'Unknown error')
     } finally {
       setVoting(false)
     }
   }
 
   return (
-    <div className="dispute-card">
+    <div className={`dispute-card${resolved ? ' dispute-card--finalized' : ''}`}>
       <div className="dispute-card__header">
         <span className="dispute-card__id">Settlement #{dispute.settlement_id}</span>
         {resolved && <OutcomeBadge outcome={dispute.outcome!} />}
@@ -69,7 +70,15 @@ function DisputeCard({ dispute, onVote }: { dispute: Dispute; onVote: (id: numbe
         </div>
       </div>
 
-      {!resolved && (
+      {/* When the outcome is finalized, show a clear status notice instead of
+          vote buttons. The buttons are not rendered at all so that there is no
+          possibility of submitting a now-meaningless vote transaction. */}
+      {resolved ? (
+        <div className="dispute-card__finalized-notice" role="status" aria-live="polite">
+          <span className="dispute-card__finalized-icon" aria-hidden="true">✓</span>
+          Outcome finalized — voting is closed for this dispute.
+        </div>
+      ) : (
         <div className="dispute-card__actions" role="group" aria-label={`Vote on settlement #${dispute.settlement_id}`}>
           <button
             className="vote-btn vote-btn--claimant"
@@ -96,8 +105,12 @@ function DisputeCard({ dispute, onVote }: { dispute: Dispute; onVote: (id: numbe
   )
 }
 
-export default function DisputeVotingPanel() {
-  const { disputes, loading, error, voteDispute } = useDisputes()
+function formatTime(date: Date): string {
+  return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+export default function DisputeVotingPanel({ onNavigateToSettlements }: { onNavigateToSettlements?: () => void } = {}) {
+  const { disputes, loading, error, voteDispute, lastUpdated, weightChanged } = useDisputes()
 
   if (loading && disputes.length === 0) return <div className="dispute-panel"><p>Loading disputes...</p></div>
   if (error && disputes.length === 0) return <div className="dispute-panel"><p className="dispute-panel__error">Error: {error}</p></div>
@@ -107,8 +120,35 @@ export default function DisputeVotingPanel() {
 
   return (
     <div className="dispute-panel">
-      <h2 className="dispute-panel__title">Dispute Resolution</h2>
-      {open.length === 0 && resolved.length === 0 && <p>No disputes found.</p>}
+      <div className="dispute-panel__header">
+        <h2 className="dispute-panel__title">Dispute Resolution</h2>
+
+        {/* Real-time update indicator */}
+        <div className="dispute-panel__live" aria-live="polite" aria-atomic="true">
+          {weightChanged && (
+            <span className="dispute-panel__update-badge" role="status">
+              ● Weights updated
+            </span>
+          )}
+          {lastUpdated && (
+            <span className="dispute-panel__last-updated">
+              Last synced: {formatTime(lastUpdated)}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {open.length === 0 && resolved.length === 0 && (
+        <EmptyState
+          icon={<EmptyStateIcon />}
+          title="No Active Disputes"
+          description="There are no open or resolved disputes. All settlements are running normally."
+          action={onNavigateToSettlements ? {
+            label: 'View Settlements',
+            onClick: onNavigateToSettlements,
+          } : undefined}
+        />
+      )}
       {open.length > 0 && (
         <section>
           <h3 className="dispute-panel__section-title">Open Disputes</h3>

@@ -1,8 +1,10 @@
+import { useState, useEffect } from "react";
 import { Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import StatsCard from "./StatsCard";
 import NetworkSelector from "./NetworkSelector";
 import { useTheme } from "../../theme";
+import { useWalletAddress } from "../../hooks/useWalletAddress";
 import "./DashboardLayout.css";
 
 const stats = [
@@ -13,11 +15,18 @@ const stats = [
 
 export default function DashboardLayout() {
   const { theme, toggleTheme } = useTheme();
+  const [statsLoading, setStatsLoading] = useState(true);
+  const connectedAddress = useWalletAddress();
   const nextTheme = theme === "dark" ? "light" : "dark";
+
+  useEffect(() => {
+    const t = setTimeout(() => setStatsLoading(false), 1000);
+    return () => clearTimeout(t);
+  }, []);
 
   return (
     <div className="dashboard">
-      <Sidebar />
+      <Sidebar connectedAddress={connectedAddress} />
       <main className="dashboard-main" role="main">
         <header className="dashboard-header" role="banner">
           <h2 className="dashboard-heading">Overview</h2>

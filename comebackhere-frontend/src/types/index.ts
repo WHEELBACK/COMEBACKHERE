@@ -5,6 +5,8 @@ export enum InvoiceStatus {
   Cancelled = "Cancelled",
   RefundRequested = "RefundRequested",
   Released = "Released",
+  /** Invoice is blocked because its underlying settlement is on hold. */
+  OnHold = "OnHold",
 }
 
 export type TransactionEventType =
@@ -41,4 +43,9 @@ export interface PaymentResult {
   success: boolean
   transaction_hash?: string
   error?: string
+}
+
+export interface SignerInfo {
+  address: string
+  weight: number
 }

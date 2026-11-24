@@ -1,6 +1,0 @@
-[workspace]
-members = [
-    "invoice",
-    "api-integration-tests",
-]
-resolver = "2"

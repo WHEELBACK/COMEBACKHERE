@@ -31,17 +31,38 @@ Set these via environment variables or in a `.env.mainnet` file. Scripts will fa
 4. Verify WASM hashes match the deployment issue.
 5. Submit deployment transactions through the approved signer.
 6. Record transaction hashes and deployed contract IDs.
-7. Update backend production secrets with:
-   - `INVOICE_CONTRACT_ID`
-   - `TREASURY_CONTRACT_ID`
-   - `COMPLIANCE_CONTRACT_ID`
-8. Run backend `GET /health/rpc` and a low-value end-to-end invoice payment smoke test.
+7. Deploy and initialize the compliance contract:
+   - Deploy the compliance WASM to Soroban mainnet.
+   - Call `initialize` with the protocol admin address.
+   - Populate the initial allowlist with the admin, treasury signers, and any pre-approved merchants by calling `allow_address` for each.
+   - Record the `COMPLIANCE_CONTRACT_ID` in the ceremony log.
+8. Deploy and initialize the invoice contract:
+   - Deploy the invoice WASM to Soroban mainnet.
+   - Call `initialize` with the protocol admin address and the deployed compliance contract address.
+   - Configure the grace window via `set_grace_window` if the default is not appropriate.
+   - Record the `INVOICE_CONTRACT_ID` in the ceremony log.
+9. Deploy and initialize the treasury contract:
+   - Deploy the treasury WASM to Soroban mainnet.
+   - Call `initialize` with the protocol admin address, the list of initial signers and their weights, and the required approval threshold.
+   - Record the `TREASURY_CONTRACT_ID` in the ceremony log.
+10. Update backend production secrets with:
+    - `INVOICE_CONTRACT_ID`
+    - `TREASURY_CONTRACT_ID`
+    - `COMPLIANCE_CONTRACT_ID`
+11. Run backend `GET /health/rpc` and a low-value end-to-end invoice payment smoke test.
+
+## Compliance-Specific Admin Key Handling
+
+- The compliance contract's admin keypair **must** be distinct from the invoice and treasury admin keypairs where possible to limit blast radius in the event of key compromise.
+- The compliance admin key must be stored in a separate KMS key or hardware wallet from other contract admin keys.
+- During signing ceremony, the compliance `initialize` and `allow_address` transactions should be signed and submitted **before** the invoice contract is initialized, because the invoice contract references the compliance contract at initialization time.
 
 ## Abort Conditions
 
 - Any signer mismatch
 - Any WASM hash mismatch
 - Soroban RPC health degraded across all configured endpoints
+- Compliance contract initialization fails or `is_allowed` returns unexpected results for the initial allowlist
 - Any failed low-value payment smoke test
 
 ---
@@ -55,7 +76,7 @@ upgrade, or modify mainnet contracts.
 ### Signer Roles
 
 | Role | Count | Responsibility |
-|------|-------|----------------|
+| ------ | ------- | ---------------- |
 | **Lead Deployer** | 1 | Prepares the deployment issue, builds release artifacts, submits the deployment transaction after all approvals are collected. Does NOT hold sole signing authority. |
 | **Security Reviewer** | 1–2 | Reviews the target commit for security vulnerabilities, verifies WASM hashes match the audited source, and signs off on the security checklist. |
 | **Treasury Signer** | 2+ | Holds custody of treasury signing keys. Must independently verify artifact hashes before co-signing the deployment transaction. |
@@ -101,6 +122,185 @@ that itself meets the current threshold.
 6. **Revocation** — If a signer is compromised or departs the organization,
    their key must be removed via a signed `set_signer` transaction within 24
    hours. The remaining signers must meet quorum to execute this.
+
+### Signer Loss or Compromise Recovery
+
+This is the procedure for the scenario the rest of this document does not
+cover: a signer's key is lost or compromised, and the remaining signers can
+no longer reach the current `Threshold` even with every one of them
+approving.
+
+On-chain, `set_signer` and `update_threshold` (see
+`COMEBACKHERE-contracts/contracts/treasury/src/lib.rs`) are gated by
+`check_admin` — the single stored admin address — not by a live
+signer-quorum vote. The contract itself does not require any treasury
+signer's approval weight to execute either call. The multi-sig protection
+around this recovery path is therefore an off-chain ceremony control (the
+procedure below), the same way the rest of this document's governance
+model is enforced by process rather than by the contract.
+
+#### Recovery procedure
+
+1. **Freeze the treasury.** Call `pause(admin)` immediately to block new
+   `propose_settlement` / `approve_settlement` / `execute_settlement` calls
+   while recovery is in progress.
+2. **Convene an emergency ceremony.** Use the same [Signer
+   Roles](#signer-roles) as a deployment ceremony — Lead Deployer, remaining
+   Treasury Signers, and a Ceremony Witness at minimum — and record
+   identities and the reason for recovery in the ceremony log, per
+   [Ceremony](#ceremony).
+3. **Lower the threshold first if needed.** Compute the total weight of the
+   signers that remain trusted (excluding the lost/compromised signer). If
+   that total is below the current threshold (`get_threshold`), call
+   `update_threshold(admin, new_threshold)` to bring the threshold to at or
+   below the remaining trusted weight **before** revoking the compromised
+   signer. Doing this out of order — revoking the signer first — can leave
+   the treasury unable to reach quorum for any settlement, including the one
+   that would restore a working signer set.
+4. **Revoke the lost/compromised signer.** Call
+   `set_signer(admin, compromised_signer, 0)`. A weight of `0` removes that
+   signer's ability to approve settlements; there is no separate "remove"
+   call.
+5. **Onboard a replacement signer, if any.** Call
+   `set_signer(admin, new_signer, weight)` for the replacement key,
+   generated and custodied per [Key Custody
+   Requirements](#key-custody-requirements) (hardware wallet, distinct
+   geography, no shared custody).
+6. **Restore the threshold.** Once the replacement signer is onboarded and
+   the trusted total weight supports it, call `update_threshold` again to
+   return to (or set) the desired threshold.
+7. **Unpause.** Call `unpause(admin)` once the signer set and threshold are
+   consistent.
+8. **Record the recovery** in the deployment/ceremony log: old and new
+   signer addresses, old and new threshold values, and the transaction hash
+   for every `pause` / `update_threshold` / `set_signer` / `unpause` call.
+
+#### Minimum remaining signers needed
+
+Steps 1–7 need only the admin key's signature on-chain — `set_signer` and
+`update_threshold` do not check treasury-signer approval weight. What
+actually requires signer participation is this project's governance policy:
+under the default configuration (**3-of-5 by weight**, minimum quorum 3), an
+emergency ceremony still needs the same ceremony quorum as a normal
+deployment — **3 signers** (Treasury Signer role, 2+, plus Lead
+Deployer/Witness) — to independently verify and attest to the recovery
+before the admin key is used.
+
+A **single** lost or compromised signer (5 → 4 remaining) can always be
+recovered under the default model, since 4 remaining signers still clear the
+3-signer ceremony quorum. If **two or more** signers are lost or compromised
+at once, fewer than 3 trusted signers remain, the ceremony quorum itself
+cannot be met, and recovery is gated solely by the admin key — a residual
+single point of failure. Treat that case as a severity-1 incident (see
+[Abort Conditions](#abort-conditions)) requiring out-of-band verification of
+every remaining signer's identity before the admin proceeds.
+
+---
+
+## Admin Key Rotation
+
+All three contracts — invoice, treasury, and compliance — support a two-step
+`transfer_admin` / `accept_admin` pattern. The change is atomic and safe: the
+current admin nominates a new admin, and only that nominee can complete the
+transfer. The old admin retains full privileges until `accept_admin` is called,
+preventing accidental lockout from a typo or a key that nobody can sign for.
+
+### When to rotate
+
+- The admin key is moving to a hardware wallet or multisig.
+- The admin key holder is leaving the organization.
+- Routine annual rotation per the [Key Custody Requirements](#key-custody-requirements).
+- A key compromise is suspected (use the [Signer Loss or Compromise Recovery](#signer-loss-or-compromise-recovery) procedure to pause first).
+
+### Rotation procedure
+
+This procedure applies identically to the invoice, treasury, and compliance
+contracts. Run it once per contract that needs its admin rotated.
+
+1. **Prepare the new key.** Generate and custody the new admin keypair per
+   [Key Custody Requirements](#key-custody-requirements). Record the new
+   public key in a deployment issue and collect the required ceremony
+   approvals before proceeding.
+
+2. **Nominate the new admin (Step 1).** Call `transfer_admin` with the
+   current admin keypair:
+
+   ```sh
+   soroban contract invoke \
+     --id $CONTRACT_ID \
+     --source-account $CURRENT_ADMIN_SECRET \
+     --network mainnet \
+     -- transfer_admin \
+     --admin $CURRENT_ADMIN_ADDRESS \
+     --new_admin $NEW_ADMIN_ADDRESS
+   ```
+
+   This stores `NEW_ADMIN_ADDRESS` as the pending admin but does **not**
+   change the active admin yet. The current admin keeps all privileges.
+   Record the transaction hash in the ceremony log.
+
+   > For the treasury contract the parameter name is `admin`; for invoice and
+   > compliance it is `caller`. Check the relevant ABI snapshot under `abis/`
+   > if unsure.
+
+3. **Verify the nomination on-chain.** Confirm the pending admin was recorded
+   correctly before the new key signs anything:
+
+   ```sh
+   soroban contract invoke \
+     --id $CONTRACT_ID \
+     --source-account $CURRENT_ADMIN_SECRET \
+     --network mainnet \
+     -- get_pending_admin
+   ```
+
+   *(If the contract does not expose a `get_pending_admin` read function,
+   verify via the Soroban RPC `getLedgerEntries` using the `PendingAdmin`
+   storage key.)*
+
+4. **Accept the transfer (Step 2).** Sign with the **new** admin keypair:
+
+   ```sh
+   soroban contract invoke \
+     --id $CONTRACT_ID \
+     --source-account $NEW_ADMIN_SECRET \
+     --network mainnet \
+     -- accept_admin \
+     --new_admin $NEW_ADMIN_ADDRESS
+   ```
+
+   On success the new admin is active, the old admin loses all privileges
+   immediately, and the pending nomination is cleared. Record the transaction
+   hash in the ceremony log.
+
+5. **Smoke-test the new admin.** Call a low-impact admin-only function (e.g.
+   `get_threshold` for treasury, or `get_grace_window` for invoice) and
+   confirm the call succeeds under the new key. Then attempt the same call
+   with the old key and confirm it returns `Unauthorized`.
+
+6. **Revoke the old key.** Remove the old admin keypair from KMS / the
+   hardware wallet and confirm it cannot be used to sign Stellar transactions.
+
+7. **Record the rotation** in the deployment/ceremony log: old and new admin
+   addresses, the contract(s) rotated, transaction hashes for both
+   `transfer_admin` and `accept_admin`, and the identity of all ceremony
+   participants.
+
+### Safety properties
+
+- **No lockout risk.** If `accept_admin` is never called, the current admin
+  keeps full control. Overwriting a pending nomination with a new
+  `transfer_admin` call is allowed, so a mistaken nomination can be corrected
+  without deploying a new contract.
+- **Immediate revocation.** The old admin loses all privileges the moment
+  `accept_admin` is executed — not after a delay or a separate revoke step.
+- **Pause before rotating under compromise.** If the admin key may already be
+  in unauthorized hands, call `pause(admin)` from a still-trusted session
+  before starting the rotation so no settlements can be manipulated during the
+  window between nomination and acceptance.
+- **Events.** Both steps emit on-chain events (`admin_transfer_initiated` and
+  `admin_transfer_accepted`) that can be indexed by the backend and monitored
+  for unexpected rotations.
 
 ---
 
@@ -236,10 +436,260 @@ ceremony. The Ceremony Witness records each step.
 
 ### Emergency Rollback
 
-If a critical issue is discovered after deployment:
+If a critical issue is discovered after a deployment partially or fully
+succeeds, follow this procedure.
 
-1. The Lead Deployer opens an emergency deployment issue
-2. If the contracts support pause: execute `pause` via multi-sig to halt
-   operations immediately
-3. Follow the standard ceremony process for any corrective deployment
-4. Document the incident in a post-mortem within 48 hours
+#### What rollback does and does not do
+
+**Soroban contracts cannot be un-deployed.** Any contract that was submitted
+to the Stellar ledger during the failed deployment remains on-chain and is
+accessible by anyone with its contract ID. Rollback only restores the local
+`artifacts/addresses.json` address registry so that downstream services
+(backend, frontend) can be pointed back at the previous known-good deployment.
+
+#### Scripted rollback
+
+`scripts/deploy_mainnet.sh` backs up `artifacts/addresses.json` to
+`artifacts/addresses.json.bak` before overwriting it with new contract IDs.
+To restore the previous address registry:
+
+```sh
+scripts/deploy_mainnet.sh --rollback
+```
+
+The script will:
+
+1. Confirm that `artifacts/addresses.json.bak` exists (created during the
+   previous successful deployment).
+2. Save the current (potentially corrupt) `addresses.json` as a timestamped
+   forensic copy (e.g., `addresses.json.rollback-20260101T120000Z`).
+3. Restore `artifacts/addresses.json` from the backup.
+4. Print a detailed summary of contract-level implications and next steps.
+
+If no backup file exists (e.g., this was the first ever deployment), the
+script exits with an error and provides manual recovery instructions.
+
+#### Manual recovery when no backup is available
+
+If `artifacts/addresses.json.bak` does not exist, reconstruct
+`artifacts/addresses.json` from the on-chain deployment ceremony record:
+
+1. Open the deployment issue for the last known-good deployment.
+2. Locate the recorded contract IDs (invoice, treasury, compliance) and
+   transaction hashes.
+3. Manually write `artifacts/addresses.json` using the structure defined in
+   `artifacts/addresses.json.example`.
+4. Commit the restored file and open a PR referencing the incident.
+
+#### Procedure after rollback
+
+1. The Lead Deployer opens an emergency deployment issue documenting:
+   - The partial or failed deployment's contract IDs
+   - Which contracts were deployed but not initialized
+   - The rollback timestamp and the restored address set
+2. If any contract supports `pause`: execute `pause` via multi-sig to halt
+   operations on the abandoned contract immediately.
+3. Reconfigure backend production secrets to use the restored (previous)
+   contract IDs from `artifacts/addresses.json`.
+4. Follow the standard ceremony process for any corrective redeployment.
+5. Document the incident in a post-mortem within 48 hours.
+
+---
+
+## Upgrades and Migrations
+
+Soroban supports in-place contract upgrades: the WASM bytecode is replaced
+while the contract address, instance storage, and persistent storage remain
+intact. No redeployment or re-initialization is needed. The upgrade mechanism
+is a protocol-level host function — no proxy pattern is required.
+
+All upgrades follow the same multi-sig governance process described in the
+[Multi-Sig Governance Model](#multi-sig-governance-model) section above and
+require a full signing ceremony.
+
+### How WASM Upgrades Work
+
+Upgrading a contract replaces the executable code identified by the contract
+address. The contract must expose an `upgrade` function that calls
+`env.deployer().update_current_contract_wasm(new_wasm_hash)`. The new WASM
+must be uploaded to the ledger before the upgrade transaction is submitted.
+
+A `SYSTEM` contract event is emitted automatically on upgrade with:
+
+- `topics = ["executable_update", old_executable, new_executable]`
+- `data = []`
+
+Backend services that monitor contract events can use this to detect upgrades.
+Each protocol contract also emits an application-level `upgraded` event whose
+data is the uploaded Wasm hash.
+
+### Upgrade Procedure
+
+1. **Open an upgrade issue** — Include the target contract(s), target commit
+   SHA, reason for upgrade, and expected WASM hashes.
+2. **Collect multi-sig approvals** — Follow the same approval process as
+   initial deployment.
+3. **Build and verify artifacts** from a clean checkout:
+
+   ```sh
+   git clone --branch <TAG> --depth 1 <REPO_URL>
+   cd COMEBACKHERE-contracts/
+   cargo build --target wasm32-unknown-unknown --release
+   sha256sum target/wasm32-unknown-unknown/release/comebackhere_*.wasm
+   ```
+
+4. **Upload new WASM to the ledger** (does not affect the live contract):
+
+   ```sh
+   stellar contract upload \
+     --source-account <ADMIN_KEY> \
+     --wasm target/wasm32-unknown-unknown/release/<CONTRACT>.wasm \
+     --network mainnet
+   # Outputs: <NEW_WASM_HASH>
+   ```
+
+5. **Invoke the upgrade function** through the standard ceremony process:
+
+   ```sh
+    # Invoice
+    INVOICE_WASM_HASH=$(stellar contract upload --source-account "$ADMIN_KEY" \
+       --wasm target/wasm32-unknown-unknown/release/comebackhere_invoice.wasm --network mainnet)
+    stellar contract invoke --id "$INVOICE_CONTRACT_ID" --source-account "$ADMIN_KEY" \
+       --network mainnet -- upgrade --new_wasm_hash "$INVOICE_WASM_HASH"
+
+    # Treasury
+    TREASURY_WASM_HASH=$(stellar contract upload --source-account "$ADMIN_KEY" \
+       --wasm target/wasm32-unknown-unknown/release/comebackhere_treasury.wasm --network mainnet)
+    stellar contract invoke --id "$TREASURY_CONTRACT_ID" --source-account "$ADMIN_KEY" \
+       --network mainnet -- upgrade --new_wasm_hash "$TREASURY_WASM_HASH"
+
+    # Compliance
+    COMPLIANCE_WASM_HASH=$(stellar contract upload --source-account "$ADMIN_KEY" \
+       --wasm target/wasm32-unknown-unknown/release/comebackhere_compliance.wasm --network mainnet)
+    stellar contract invoke --id "$COMPLIANCE_CONTRACT_ID" --source-account "$ADMIN_KEY" \
+       --network mainnet -- upgrade --new_wasm_hash "$COMPLIANCE_WASM_HASH"
+   ```
+
+6. **Verify** the upgrade by querying contract state and running the
+   post-ceremony smoke test.
+7. **Record** the new WASM hash and transaction hash in the upgrade issue.
+
+The contract address does not change. Update `INVOICE_CONTRACT_ID`,
+`TREASURY_CONTRACT_ID`, or `COMPLIANCE_CONTRACT_ID` in backend secrets only
+if a new contract was deployed rather than upgraded in-place.
+
+### Upgrade Authorization
+
+Each contract's `upgrade(new_wasm_hash)` entrypoint loads the stored admin and
+requires that address to authorize the call. This is a single-key on-chain
+authorization; the treasury signer threshold does not gate contract upgrades.
+The multi-sig process described above is currently an off-chain governance
+control. A compromised admin key could bypass that process, so maintainers
+should consider moving upgrade authorization to the treasury multisig in a
+future change before relying on these entrypoints for mainnet governance.
+
+The on-chain authorization pattern is:
+
+```rust
+pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+    let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+    admin.require_auth();
+    env.deployer().update_current_contract_wasm(new_wasm_hash);
+}
+```
+
+The `--source-account` used to invoke `upgrade` must match the contract's
+stored admin address. The compliance contract admin key must be used for
+compliance contract upgrades; the treasury admin key for treasury upgrades.
+
+### Storage Migration
+
+If an upgrade changes a stored data structure (adds, removes, or renames
+fields), old ledger entries written by the previous version must be handled
+explicitly. Reading an old entry with a new incompatible type causes the host
+to trap with `Error(Object, UnexpectedSize)`.
+
+#### Recommended pattern: versioned enum
+
+Wrap each stored type in a versioned enum so old and new layouts can coexist:
+
+```rust
+#[contracttype]
+pub struct DataV1 { a: i64, b: i64 }
+
+#[contracttype]
+pub struct DataV2 { a: i64, b: i64, c: Option<i64> }
+
+#[contracttype]
+pub enum Data {
+    V1(DataV1),
+    V2(DataV2),
+}
+
+impl Data {
+    pub fn into_v2(self) -> DataV2 {
+        match self {
+            Data::V1(v1) => DataV2 { a: v1.a, b: v1.b, c: None },
+            Data::V2(v2) => v2,
+        }
+    }
+}
+```
+
+Reads call `into_v2()` to up-convert lazily; writes always store `Data::V2`.
+
+#### Lazy vs eager migration
+
+| Strategy | When to use | Risk |
+| -------- | ----------- | ---- |
+| **Lazy** (convert on read) | Default choice; large or unbounded datasets | None at upgrade time; old entries persist until accessed |
+| **Eager** (batch rewrite via admin function) | Small, bounded datasets where old version branches must be retired | Hits instruction limits if record count is large; contract is in mixed-version state during the migration window |
+
+Lazy migration is preferred for COMEBACKHERE contracts. Old entries are
+up-converted the first time they are read after the upgrade and written back
+in the new format. No explicit migration transaction is required.
+
+If an eager migration is necessary (e.g., to retire old version branches),
+scope it to a dedicated `migrate(ids: Vec<u32>)` admin function that processes
+a bounded batch per transaction, and gate it behind the same admin
+authorization as `upgrade`.
+
+### Upgrade Abort Conditions
+
+- WASM hash of the uploaded artifact does not match the upgrade issue
+- Admin authorization check fails
+- Post-upgrade smoke test fails or contract returns unexpected state
+- Any signer mismatch during the ceremony
+
+If the upgrade transaction has not been submitted, abort by closing the upgrade
+issue without submitting. Once submitted, the upgrade cannot be rolled back
+directly — follow the Emergency Rollback procedure above and schedule a
+corrective upgrade through the full ceremony process.
+
+### Upgrade Checklist
+
+#### Pre-Upgrade (Lead Deployer, 24–48 hours before)
+
+- [ ] Open a GitHub upgrade issue with target contract(s), commit SHA, and
+      reason for upgrade
+- [ ] Build WASM artifacts from a clean checkout and compute SHA-256 hashes
+- [ ] Post hashes in the upgrade issue and tag required signers
+- [ ] Identify any storage structure changes in the diff and document the
+      migration strategy in the upgrade issue
+- [ ] Confirm Soroban mainnet RPC health
+
+#### Upgrade Execution (All signers, synchronous)
+
+- [ ] Roll call — confirm identity of all signers
+- [ ] Each signer independently verifies WASM hashes match the upgrade issue
+- [ ] Upload new WASM with `stellar contract upload`; confirm the returned hash
+- [ ] Invoke `upgrade` with the new WASM hash through the approved signer
+- [ ] Wait for transaction confirmation; record transaction hash
+- [ ] Run post-upgrade smoke test
+- [ ] Record transaction hash in the upgrade issue
+
+#### Post-Upgrade (Lead Deployer, within 24 hours)
+
+- [ ] Update `abis/` with new contract metadata
+- [ ] Open a PR to update ABI snapshots and any configuration references
+- [ ] Notify the team that the upgrade is live

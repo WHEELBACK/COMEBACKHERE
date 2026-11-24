@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useSettlements } from '../hooks/useSettlements'
 import { useTheme } from '../theme'
 import { Settlement, SignerInfo } from '../types'
+import { SettlementListSkeleton } from './Skeleton'
 
 const SIGNERS: SignerInfo[] = [
   { address: import.meta.env.VITE_SIGNER_1 ?? '', weight: 1 },
@@ -48,7 +49,7 @@ export function SettlementApproval() {
   )
 
   if (loading && settlements.length === 0) {
-    return <div style={styles.container}><p>Loading settlements...</p></div>
+    return <div style={styles.container}><SettlementListSkeleton /></div>
   }
 
   if (error && settlements.length === 0) {

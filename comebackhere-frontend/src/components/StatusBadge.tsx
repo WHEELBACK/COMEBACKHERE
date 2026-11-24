@@ -1,20 +1,13 @@
 import type { InvoiceStatus } from "../types"
+import { statusBadgeClass, statusLabel } from "../utils/invoiceStatus"
 
 interface StatusBadgeProps {
   status: InvoiceStatus
 }
 
-const statusColors: Record<string, string> = {
-  Pending: "badge badge--pending",
-  Paid: "badge badge--paid",
-  Expired: "badge badge--expired",
-  Cancelled: "badge badge--cancelled",
-  RefundRequested: "badge badge--refund-requested",
-  Released: "badge badge--released",
-}
-
 export function StatusBadge({ status }: StatusBadgeProps) {
+  const label = statusLabel(status)
   return (
-    <span className={statusColors[status] ?? "badge"} role="status" aria-label={`Invoice status: ${status}`}>{status}</span>
+    <span className={statusBadgeClass(status)} role="status" aria-label={`Invoice status: ${label}`}>{label}</span>
   )
 }

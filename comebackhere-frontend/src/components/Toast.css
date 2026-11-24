@@ -75,3 +75,16 @@
     transform: translateX(0);
   }
 }
+
+/* Respect the OS "reduce motion" setting (WCAG 2.3.3). Toasts still appear
+   and disappear, they just don't slide in or out. */
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+    transition: none;
+  }
+
+  .toast--exiting {
+    transform: none;
+  }
+}

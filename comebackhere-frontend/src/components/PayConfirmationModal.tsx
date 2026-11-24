@@ -1,6 +1,10 @@
+import { useEffect } from "react"
+import { useWallet } from "../hooks/useWallet"
+import { useFocusTrap } from "../hooks/useFocusTrap"
 import type { Invoice } from "../types"
 import { StatusBadge } from "./StatusBadge"
 import { CopyableText } from "./CopyableText"
+import { formatAmount, USDC_DECIMALS } from "../utils/format"
 
 interface PayConfirmationModalProps {
   invoice: Invoice
@@ -15,9 +19,30 @@ export function PayConfirmationModal({
   onCancel,
   submitting,
 }: PayConfirmationModalProps) {
+  const modalRef = useFocusTrap({ onClose: onCancel, disabled: submitting })
+  const { connected } = useWallet()
+
+  // Close the dialog if the wallet disconnects while it is open.
+  useEffect(() => {
+    if (!connected && !submitting) onCancel()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected])
+
   return (
-    <div className="modal-overlay" onClick={onCancel} role="presentation">
-      <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="pay-confirm-title">
+    <div
+      className="modal-overlay"
+      onClick={onCancel}
+      role="presentation"
+    >
+      <div
+        ref={modalRef}
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pay-confirm-title"
+        tabIndex={-1}
+      >
         <h2 id="pay-confirm-title">Confirm Payment</h2>
         <p className="modal-desc">
           You are about to pay this invoice. Please review the details before
@@ -30,8 +55,8 @@ export function PayConfirmationModal({
             <span className="detail-value">#<CopyableText text={String(invoice.id)} label="Copy invoice ID" /></span>
           </div>
           <div className="detail-row">
-            <span className="detail-label">Amount (USDC)</span>
-            <span className="detail-value">{invoice.gross_usdc}</span>
+            <span className="detail-label">Amount</span>
+            <span className="detail-value">{formatAmount(invoice.gross_usdc, USDC_DECIMALS, "USDC")}</span>
           </div>
           <div className="detail-row">
             <span className="detail-label">Merchant</span>
@@ -59,8 +84,16 @@ export function PayConfirmationModal({
             onClick={onConfirm}
             disabled={submitting}
             aria-label={submitting ? "Submitting payment" : "Confirm payment"}
+            aria-busy={submitting}
           >
-            {submitting ? "Submitting..." : "Confirm Payment"}
+            {submitting ? (
+              <>
+                <span className="spinner" aria-hidden="true"></span>
+                Submitting...
+              </>
+            ) : (
+              "Confirm Payment"
+            )}
           </button>
         </div>
       </div>

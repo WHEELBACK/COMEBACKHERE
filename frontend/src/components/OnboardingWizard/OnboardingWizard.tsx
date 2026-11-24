@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./OnboardingWizard.css";
 
 type Step = "wallet" | "verify" | "invoice" | "dashboard";
@@ -30,16 +30,94 @@ interface OnboardingWizardProps {
   onComplete: () => void;
 }
 
+interface WizardState {
+  currentStep: number;
+  walletAddress: string;
+  verified: boolean;
+  invoiceAmount: string;
+  invoiceRecipient: string;
+  invoiceCreated: boolean;
+}
+
+const STORAGE_KEY = "comebackhere_onboarding_state";
+
+function loadState(): WizardState {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      return JSON.parse(stored);
+    }
+  } catch (e) {
+    console.error("Failed to load wizard state:", e);
+  }
+  return {
+    currentStep: 0,
+    walletAddress: "",
+    verified: false,
+    invoiceAmount: "",
+    invoiceRecipient: "",
+    invoiceCreated: false,
+  };
+}
+
+function saveState(state: WizardState) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    console.error("Failed to save wizard state:", e);
+  }
+}
+
 export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
-  const [currentStep, setCurrentStep] = useState(0);
-  const [walletAddress, setWalletAddress] = useState("");
-  const [verified, setVerified] = useState(false);
-  const [invoiceAmount, setInvoiceAmount] = useState("");
-  const [invoiceRecipient, setInvoiceRecipient] = useState("");
-  const [invoiceCreated, setInvoiceCreated] = useState(false);
+  const initialState = loadState();
+  const [currentStep, setCurrentStep] = useState(initialState.currentStep);
+  const [walletAddress, setWalletAddress] = useState(initialState.walletAddress);
+  const [verified, setVerified] = useState(initialState.verified);
+  const [invoiceAmount, setInvoiceAmount] = useState(initialState.invoiceAmount);
+  const [invoiceRecipient, setInvoiceRecipient] = useState(initialState.invoiceRecipient);
+  const [invoiceCreated, setInvoiceCreated] = useState(initialState.invoiceCreated);
   const [error, setError] = useState<string | null>(null);
 
+  // Persist state to localStorage whenever it changes
+  useEffect(() => {
+    const state: WizardState = {
+      currentStep,
+      walletAddress,
+      verified,
+      invoiceAmount,
+      invoiceRecipient,
+      invoiceCreated,
+    };
+    saveState(state);
+  }, [currentStep, walletAddress, verified, invoiceAmount, invoiceRecipient, invoiceCreated]);
+
   const step = STEPS[currentStep];
+
+  // Validation functions for each step
+  function validateWalletStep(): boolean {
+    return walletAddress.length > 0;
+  }
+
+  function validateVerifyStep(): boolean {
+    return verified;
+  }
+
+  function validateInvoiceStep(): boolean {
+    return invoiceCreated;
+  }
+
+  function canProceedToNext(): boolean {
+    switch (currentStep) {
+      case 0: // wallet
+        return validateWalletStep();
+      case 1: // verify
+        return validateVerifyStep();
+      case 2: // invoice
+        return validateInvoiceStep();
+      default:
+        return true;
+    }
+  }
 
   function handleConnectWallet() {
     setError(null);
@@ -48,7 +126,11 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
         .getPublicKey()
         .then((key: string) => {
           setWalletAddress(key);
-          setCurrentStep(1);
+          // Only advance when coming from this step — do not jump forward if
+          // the user navigated back to re-inspect their wallet address.
+          if (currentStep === 0) {
+            setCurrentStep(1);
+          }
         })
         .catch(() => setError("Failed to connect wallet. Is Freighter installed?"));
     } else {
@@ -67,7 +149,10 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
       return;
     }
     setVerified(true);
-    setCurrentStep(2);
+    // Only advance when coming from this step.
+    if (currentStep === 1) {
+      setCurrentStep(2);
+    }
   }
 
   function handleCreateInvoice() {
@@ -82,16 +167,58 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
       return;
     }
     setInvoiceCreated(true);
-    setCurrentStep(3);
+    // Only advance when coming from this step.
+    if (currentStep === 2) {
+      setCurrentStep(3);
+    }
+  }
+
+  function handleNext() {
+    if (!canProceedToNext()) {
+      switch (currentStep) {
+        case 0: // wallet
+          setError("Please connect your wallet to proceed.");
+          break;
+        case 1: // verify
+          setError("Please verify your address to proceed.");
+          break;
+        case 2: // invoice
+          setError("Please create an invoice to proceed.");
+          break;
+      }
+      return;
+    }
+    setError(null);
+    if (currentStep < STEPS.length - 1) {
+      setCurrentStep((prev) => prev + 1);
+    } else {
+      handleGoToDashboard();
+    }
   }
 
   function handleGoToDashboard() {
+    // Clear saved state on completion
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch (e) {
+      console.error("Failed to clear wizard state:", e);
+    }
     onComplete();
   }
 
+  /**
+   * Navigate to the previous step.
+   *
+   * All data entered on later steps is preserved in component state and in
+   * localStorage so that the user can come back to those steps without losing
+   * their progress. The wizard only clears state when the entire flow is
+   * completed successfully.
+   */
   function handleBack() {
     setError(null);
-    setCurrentStep((prev) => Math.max(0, prev - 1));
+    if (currentStep > 0) {
+      setCurrentStep((prev) => prev - 1);
+    }
   }
 
   function renderStepContent() {
@@ -216,10 +343,32 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
         </div>
 
         <div className="wizard-footer">
-          {currentStep > 0 && currentStep < STEPS.length - 1 && (
-            <button className="wizard-btn wizard-btn--secondary" onClick={handleBack}>
+          {/* Back button is shown on every step after the first */}
+          {currentStep > 0 && (
+            <button
+              type="button"
+              className="wizard-btn wizard-btn--secondary"
+              onClick={handleBack}
+              aria-label={`Go back to step ${currentStep} of ${STEPS.length}`}
+            >
               Back
             </button>
+          )}
+          {currentStep < STEPS.length - 1 && (
+            <button
+              type="button"
+              className="wizard-btn wizard-btn--primary"
+              onClick={handleNext}
+              disabled={!canProceedToNext()}
+              aria-label={`Proceed to step ${currentStep + 2} of ${STEPS.length}`}
+            >
+              Next
+            </button>
+          )}
+          {currentStep === STEPS.length - 1 && error && (
+            <p className="wizard-progress-info">
+              Step {currentStep + 1} of {STEPS.length}
+            </p>
           )}
         </div>
       </div>

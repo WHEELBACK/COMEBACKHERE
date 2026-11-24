@@ -1,0 +1,141 @@
+import { describe, it, expect } from "vitest"
+import request from "supertest"
+import { createApp } from "../app.js"
+
+describe("GET /api-docs/swagger.json — OpenAPI spec endpoint", () => {
+  const app = createApp()
+
+  it("returns 200 with Content-Type application/json", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    expect(res.status).toBe(200)
+    expect(res.headers["content-type"]).toMatch(/application\/json/)
+  })
+
+  it("returns a valid OpenAPI 3.0 object with required top-level fields", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    // Top-level OpenAPI object
+    expect(spec).toHaveProperty("openapi")
+    expect(spec.openapi).toMatch(/^3\.0\./)
+    expect(spec).toHaveProperty("info")
+    expect(spec).toHaveProperty("paths")
+  })
+
+  it("spec info block has title and version", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.info.title).toBe("COMEBACKHERE API")
+    expect(spec.info.version).toBeDefined()
+  })
+
+  it("spec covers the /invoices POST endpoint", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths).toHaveProperty("/invoices")
+    expect(spec.paths["/invoices"]).toHaveProperty("post")
+  })
+
+  it("spec covers invoice cancel and refund routes", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths["/invoices/{id}/cancel"]).toHaveProperty("post")
+    expect(spec.paths["/invoices/{id}/refund"]).toHaveProperty("post")
+  })
+
+  it("spec documents invoice cursor pagination", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths["/invoices"].get.parameters.map((parameter: { name: string }) => parameter.name)).toContain("cursor")
+    expect(spec.paths["/invoices"].get.responses["200"].content["application/json"].schema.properties)
+      .toHaveProperty("next_cursor")
+  })
+
+  it("spec covers webhook dead-letter inspection and replay", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths["/webhooks/dead-letters"]).toHaveProperty("get")
+    expect(spec.paths["/webhooks/dead-letters/{id}/replay"]).toHaveProperty("post")
+  })
+
+  it("spec covers the /invoices/{id} GET endpoint", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths).toHaveProperty("/invoices/{id}")
+    expect(spec.paths["/invoices/{id}"]).toHaveProperty("get")
+  })
+
+  it("spec covers the /invoices/{id}/events GET endpoint", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths).toHaveProperty("/invoices/{id}/events")
+    expect(spec.paths["/invoices/{id}/events"]).toHaveProperty("get")
+  })
+
+  it("spec covers the /disputes POST endpoint", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths).toHaveProperty("/disputes")
+    expect(spec.paths["/disputes"]).toHaveProperty("post")
+  })
+
+  it("documents the analytics route and every mounted application route", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const paths = res.body.paths
+    for (const path of [
+      "/invoices",
+      "/invoices/{id}",
+      "/invoices/export.csv",
+      "/disputes",
+      "/disputes/{id}",
+      "/disputes/{id}/vote",
+      "/api/analytics/metrics",
+      "/api/treasury/pending-settlements",
+    ]) {
+      expect(paths).toHaveProperty(path)
+    }
+    expect(paths["/api/analytics/metrics"]).toHaveProperty("get")
+  })
+
+  it("spec covers the dispute read endpoints", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+    expect(spec.paths["/disputes"]).toHaveProperty("get")
+    expect(spec.paths["/disputes/{id}"]).toHaveProperty("get")
+    expect(spec.paths["/disputes/{id}"].get.responses).toHaveProperty("404")
+    expect(spec.components.schemas).toHaveProperty("Dispute")
+  })
+
+  it("spec covers the /api/invoice/grace-window GET and POST endpoints", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths).toHaveProperty("/api/invoice/grace-window")
+    expect(spec.paths["/api/invoice/grace-window"]).toHaveProperty("get")
+    expect(spec.paths["/api/invoice/grace-window"]).toHaveProperty("post")
+  })
+
+  it("spec covers treasury pending-settlements endpoint", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.paths).toHaveProperty("/api/treasury/pending-settlements")
+    expect(spec.paths["/api/treasury/pending-settlements"]).toHaveProperty("get")
+  })
+
+  it("spec includes reusable ErrorResponse schema component", async () => {
+    const res = await request(app).get("/api-docs/swagger.json")
+    const spec = res.body
+
+    expect(spec.components?.schemas).toHaveProperty("ErrorResponse")
+    expect(spec.components.schemas.ErrorResponse.properties).toHaveProperty("error")
+  })
+})

@@ -6,6 +6,8 @@ export interface Settlement {
   approval_weight: number
   status: 'Pending' | 'Executed' | 'PartiallyExecuted' | 'OnHold' | 'Cancelled'
   hold_reason: string | null
+  proposed_tx_hash?: string
+  executed_tx_hash?: string
 }
 
 export interface SignerInfo {

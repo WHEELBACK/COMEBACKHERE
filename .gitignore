@@ -1,15 +1,212 @@
+# ── Secrets & environment ────────────────────────────────────────────────────
+# Environment files
 .env
+.env.local
 .env.mainnet
 .env.testnet
+.env.local
+.env.*.local
+
+# ── Deployed contract addresses (environment-specific) ───────────────────────
 artifacts/addresses.json
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+**/node_modules/
+
+# ── Build outputs ─────────────────────────────────────────────────────────────
+dist/
+build/
+out/
+**/dist/
+
+# ── Test artifacts ────────────────────────────────────────────────────────────
 coverage/
+**/coverage/
+
+# Vitest / Jest snapshots
+**/__snapshots__/
+**/*.snap
+
+# Playwright
+**/playwright-report/
+**/test-results/
+**/blob-report/
+**/playwright/.cache/
+
+# ── TypeScript cache ──────────────────────────────────────────────────────────
+*.tsbuildinfo
+**/tsconfig.tsbuildinfo
+
+# ── Vite cache ────────────────────────────────────────────────────────────────
+**/.vite/
+
+# ── Rust / Cargo build artifacts ─────────────────────────────────────────────
+**/target/
+
+# ── OS / editor noise ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.env.*.local
+
+# ── Deployment artefacts ───────────────────────────────────────────────────
+# Build output
+dist/
+build/
+out/
+
+# Dependencies
+node_modules/
+target/
+
+# Generated artifacts
+artifacts/addresses.json
+
+# ── Coverage / test snapshots ─────────────────────────────────────────────
+coverage/
+*.snap
+**/__snapshots__/
+playwright-report/
+test-results/
+
+# ── Rust build artefacts ───────────────────────────────────────────────────
+target/
+**/target/
+**/*.lock.bak
+
+# ── Node / JS build artefacts ─────────────────────────────────────────────
 node_modules/
 dist/
-*.log
-.DS_Store
-**/__snapshots__/
-*.snap
+.vite/
 *.tsbuildinfo
+
+# ── OS / editor noise ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Temporary / generated files ───────────────────────────────────────────
+*.tmp
+*.bak
+*.log
+
+# Test snapshots & reports
+**/test_snapshots/
+**/__snapshots__/
+**/*.snap
+**/*.snap.bak
+test-results/
+playwright-report/
+**/playwright-report/
+**/test-results/
+coverage/
+.nyc_output/
+**/test-results/
+**/allure-results/
+**/allure-report/
+
+# Vitest / Jest HTML reports and coverage artefacts
+vitest-report/
+html/
+lcov.info
+*.lcov
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.iml
+*.iws
+
+# TypeScript cache / incremental build info
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# Vite cache
+.vite/
+**/.vite/
+.vite-inspect/
+
+# Vitest / Jest output
+vitest-coverage/
+**/.vitest-cache/
+
+# Lock files — not committed (each sub-package manages its own lock locally)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Rust lock file (library crates do not commit Cargo.lock)
+Cargo.lock
+**/Cargo.lock.bak
+
+# Rust build artifacts
+**/*.wasm
+**/target/
+
+# Miscellaneous generated files
+*.local
 .turbo/
+.parcel-cache/
 .cache/
-tmp/
+
+# Playwright state
+playwright/.auth/
+
+# Playwright screenshots (generated during e2e runs)
+**/e2e/screenshots/
+
+# Editor session files
+*.swp
+*.swo
+*~
+
+# ── IDE-specific ──────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+# Coverage reports
+comebackhere-frontend/coverage/
+frontend/coverage/
+comebackhere-backend/coverage/
+
+# Playwright state
+playwright/.auth/
+
+# Playwright screenshots (generated during e2e runs)
+**/e2e/screenshots/
+
+# Playwright trace files and cache
+**/e2e/traces/
+**/playwright/.cache/
+
+# Vitest coverage directories (any nesting level)
+**/coverage/
+
+# Temporary patch / diff files
+*.orig
+*.rej

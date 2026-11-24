@@ -1,4 +1,61 @@
-import { MongoClient, type Db, type Collection } from "mongodb"
+import { MongoClient, type Db, type Collection, MongoServerSelectionError } from "mongodb"
+import { logger } from "../lib/logger.js"
+
+export type InvoiceStatus = "Pending" | "Paid" | "Expired" | "Cancelled" | "RefundRequested" | "Released"
+
+export interface LegacyInvoiceRecord {
+  invoice_id: string
+  merchant_address: string
+  token: string
+  amount: number
+  due_date: number
+  status: InvoiceStatus
+  created_at: Date
+  updated_at: Date
+}
+
+export interface InvoiceRecord {
+  invoice_id: string
+  merchant_address: string
+  token: string
+  amount: number
+  due_date: number
+  reference?: string
+  status: InvoiceStatus
+  created_at: Date
+  updated_at: Date
+}
+
+export interface MerchantApiKeyRecord {
+  key_id: string
+  merchant_address: string
+  key_hash: string
+  created_at: Date
+  revoked_at?: Date
+  last_used_at?: Date
+}
+
+export interface WebhookReplayRecord {
+  replay_id: string
+  request_id: string | null
+  attempted_at: Date
+  status: "delivered" | "failed"
+  status_code: number | null
+  error: string | null
+}
+
+export interface WebhookDeliveryHistoryRecord {
+  delivery_id: string
+  merchant_address: string
+  endpoint: string
+  payload: unknown
+  status: "delivered" | "failed"
+  attempts: number
+  last_status_code: number | null
+  last_error: string | null
+  created_at: Date
+  replays: WebhookReplayRecord[]
+}
 
 export interface SettlementRecord {
   id: number
@@ -14,34 +71,268 @@ export interface SettlementRecord {
   executed_tx_hash?: string
 }
 
+export type ComplianceAuditEventType = "address_allowed" | "address_allowed_until" | "address_blocked" | "address_cleared"
+export type ComplianceAuditStatus = "Allowed" | "AllowedUntil" | "Blocked" | "Cleared"
+
+export interface ComplianceAuditRecord {
+  event_id: string
+  event_type: ComplianceAuditEventType
+  address: string
+  status?: ComplianceAuditStatus
+  expires_at: number | null
+  ledger: number
+  ledger_closed_at: string | null
+  transaction_hash: string
+  contract_id: string
+  paging_token: string | null
+  created_at: Date
+}
+
 export interface IndexerCursor {
   _id: string
   paging_token: string | null
   last_ledger: number
   updated_at: Date
+  /** Event IDs already applied — used for reorg / replay deduplication. */
+  processed_event_ids?: string[]
+}
+
+/**
+ * One indexed invoice contract event. `event_id` is the Soroban event id and
+ * is unique, so replaying a ledger range is a no-op for events already seen.
+ * `applied` flips to true once the event's side effects have run; an event
+ * stored with `applied: false` (crash mid-apply) is re-applied on replay.
+ */
+export interface InvoiceEventRecord {
+  event_id: string
+  paging_token: string | null
+  event_type: string
+  invoice_id: string
+  ledger: number
+  ledger_closed_at: string
+  transaction_hash: string
+  contract_id: string
+  raw_topics: string[]
+  raw_value: string
+  applied: boolean
+  created_at: Date
+  applied_at?: Date
+}
+
+/** A ledger range the indexer skipped because the RPC node no longer retained it. */
+export interface IndexerGapRecord {
+  _id: string
+  indexer: string
+  contract_id: string
+  from_ledger: number
+  to_ledger: number
+  missing_ledgers: number
+  status: "open" | "backfilled" | "accepted"
+  detected_at: Date
+  resolved_at?: Date
+}
+
+export const DEFAULT_PAGE_SIZE = 20
+export const MAX_PAGE_SIZE = 100
+
+/**
+ * #1064 — Upper bound on documents returned by auth-service queries. Keeps
+ * unbounded scans from inflating memory under peak load.
+ */
+export const MAX_AUTH_QUERY_RESULTS = 500
+
+/**
+ * #1064 — Server-side time limit (ms) for auth-service queries so a slow
+ * query cannot pin a pool connection indefinitely.
+ */
+export const AUTH_QUERY_MAX_TIME_MS = 5_000
+
+/** Clamp a caller-supplied limit into [1, MAX_AUTH_QUERY_RESULTS]. */
+export function clampAuthQueryLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_PAGE_SIZE
+  const truncated = Math.trunc(limit)
+  if (truncated < 1) return 1
+  return Math.min(truncated, MAX_AUTH_QUERY_RESULTS)
+}
+
+/** Options applied to every auth-service read query. */
+export function authQueryOptions(limit?: number): { maxTimeMS: number; limit: number } {
+  return { maxTimeMS: AUTH_QUERY_MAX_TIME_MS, limit: clampAuthQueryLimit(limit) }
 }
 
 let client: MongoClient | null = null
 let db: Db | null = null
+let connecting: Promise<Db> | null = null
+const indexesByDb = new WeakMap<Db, Promise<void>>()
 
-export async function connectMongo(): Promise<Db> {
-  if (db) return db
+export function ensureIndexes(database: Db): Promise<void> {
+  const existing = indexesByDb.get(database)
+  if (existing) return existing
+
+  const indexes: Array<{ collection: string; keys: Record<string, 1 | -1>; unique?: boolean }> = [
+    { collection: "settlements", keys: { id: 1 }, unique: true },
+    { collection: "settlements", keys: { status: 1 } },
+    { collection: "invoices", keys: { invoice_id: 1 }, unique: true },
+    { collection: "invoices", keys: { status: 1 } },
+    { collection: "invoices", keys: { merchant_address: 1 } },
+    { collection: "invoices", keys: { status: 1, merchant_address: 1 } },
+    { collection: "invoices", keys: { created_at: -1 } },
+    { collection: "invoices", keys: { created_at: -1, invoice_id: -1 } },
+    // Reporting-engine: covering indexes for aggregate/group-by queries.
+    { collection: "invoices", keys: { status: 1, created_at: -1 } },
+    { collection: "invoices", keys: { merchant_address: 1, created_at: -1 } },
+    { collection: "invoices", keys: { token: 1, status: 1 } },
+    { collection: "settlements", keys: { merchant_address: 1, updated_at: -1 } },
+    { collection: "settlements", keys: { status: 1, updated_at: -1 } },
+    { collection: "settlements", keys: { token: 1, status: 1 } },
+    { collection: "compliance_audit", keys: { address: 1, event_type: 1, ledger: -1 } },
+    { collection: "compliance_audit", keys: { status: 1, ledger: -1 } },
+    { collection: "compliance_audit", keys: { created_at: -1 } },
+    { collection: "indexer_cursors", keys: { _id: 1 }, unique: true },
+    { collection: "invoice_events", keys: { event_id: 1 }, unique: true },
+    { collection: "invoice_events", keys: { invoice_id: 1, ledger: 1 } },
+    { collection: "webhook_pending_deliveries", keys: { _id: 1 }, unique: true },
+    { collection: "webhook_dead_letters", keys: { _id: 1 }, unique: true },
+    { collection: "webhook_dead_letters", keys: { failed_at: -1 } },
+    { collection: "compliance_audit", keys: { event_id: 1 }, unique: true },
+    { collection: "compliance_audit", keys: { address: 1, ledger: -1 } },
+    { collection: "compliance_audit", keys: { event_type: 1, ledger: -1 } },
+    { collection: "compliance_audit", keys: { ledger: -1 } },
+    { collection: "merchant_api_keys", keys: { key_id: 1 }, unique: true },
+    { collection: "merchant_api_keys", keys: { merchant_address: 1 } },
+    { collection: "merchant_api_keys", keys: { key_hash: 1 } },
+    // #1064 — auth-service hot paths: lookup by hash (auth), list by merchant,
+    // and revocation sweeps filtered on both.
+    { collection: "merchant_api_keys", keys: { key_hash: 1, revoked_at: 1 } },
+    { collection: "merchant_api_keys", keys: { merchant_address: 1, revoked_at: 1 } },
+    { collection: "merchant_api_keys", keys: { last_used_at: -1 } },
+  ]
+
+  const creating = Promise.all(
+    indexes.map(async ({ collection, keys, unique }) => {
+      const indexName = await database.collection(collection).createIndex(keys, unique ? { unique } : {})
+      logger.info({ collection, indexName }, "MongoDB index ensured")
+    }),
+  ).then(() => undefined)
+  const result = creating.catch((error: unknown) => {
+    indexesByDb.delete(database)
+    throw error
+  })
+  indexesByDb.set(database, result)
+  return result
+}
+
+// ---------------------------------------------------------------------------
+// #210 — Connection options: explicit pool size and timeouts so a slow or
+// unreachable MongoDB fails fast instead of hanging indefinitely.
+// 
+// Tuned for production load:
+// - maxPoolSize increased from 10 to 50 to handle API+indexer+reporting
+//   concurrent load under peak traffic.
+// - minPoolSize increased from 2 to 10 for faster recovery after spike
+// - maxIdleTimeMS bounds idle connection lifetime so the pool shrinks back
+//   after peak load instead of holding sockets open indefinitely.
+// - socketTimeoutMS increased to 60s (was 45s) to accommodate Soroban RPC
+//   timeouts (30s max per call). Prevents cascade failures when Soroban is slow.
+// ---------------------------------------------------------------------------
+
+const MONGO_OPTIONS = {
+  /** Maximum number of connections in the pool. Increased for concurrent load. */
+  maxPoolSize: 50,
+  /** Minimum number of idle connections to maintain. Faster recovery after spikes. */
+  minPoolSize: 10,
+  /**
+   * How long (ms) an idle connection may remain in the pool before being
+   * closed. Keeps the pool from holding excess sockets after peak load.
+   */
+  maxIdleTimeMS: 60_000,
+  /**
+   * How long (ms) a connection may be checked out of the pool before the
+   * driver logs a warning. Helps surface slow reporting queries.
+   */
+  waitQueueTimeoutMS: 15_000,
+  /**
+   * How long (ms) the driver will wait when selecting a server before
+   * throwing a MongoServerSelectionError.  Default is 30 000; we tighten
+   * it so startup failures are discovered quickly.
+   */
+  serverSelectionTimeoutMS: 5_000,
+  /**
+   * How long (ms) to wait for a new connection to be established.
+   * Prevents requests from hanging when all pool slots are busy.
+   */
+  connectTimeoutMS: 10_000,
+  /**
+   * How long (ms) to wait for a socket operation to complete before
+   * giving up and returning an error to the caller.
+   * Increased to 60s (was 45s) to accommodate Soroban RPC calls which
+   * timeout at 30s max per operation. This prevents cascade failures
+   * when Soroban is experiencing delays.
+   */
+  socketTimeoutMS: 60_000,
+  /**
+   * Enable TCP keepalive to detect stale connections.
+   */
+  socketKeepAlive: true,
+}
+
+export function connectMongo(): Promise<Db> {
+  if (db) return ensureIndexes(db).then(() => db!)
+  if (connecting) return connecting
+
+  connecting = connectMongoOnce().finally(() => {
+    connecting = null
+  })
+  return connecting
+}
+
+async function connectMongoOnce(): Promise<Db> {
 
   const uri = process.env.MONGODB_URI ?? "mongodb://localhost:27017"
   const dbName = process.env.MONGODB_DB ?? "comebackhere"
 
-  client = new MongoClient(uri)
-  await client.connect()
+  client = new MongoClient(uri, MONGO_OPTIONS)
+
+  try {
+    await client.connect()
+  } catch (err) {
+    client = null
+    // Provide a clear, actionable error message rather than letting the raw
+    // driver error bubble up silently.
+    const message =
+      err instanceof MongoServerSelectionError
+        ? `MongoDB unreachable at ${uri} — check that the server is running and MONGODB_URI is correct. ` +
+          `Original error: ${err.message}`
+        : `Failed to connect to MongoDB: ${err instanceof Error ? err.message : String(err)}`
+
+    logger.error({ errorName: err instanceof Error ? err.name : "UnknownError" }, "MongoDB connection failed")
+    // Re-throw so callers (routes, startup health-checks) can respond with 5xx.
+    throw Object.assign(new Error(message), { status: 503 })
+  }
+
   db = client.db(dbName)
 
-  const settlements = db.collection<SettlementRecord>("settlements")
-  await settlements.createIndex({ id: 1 }, { unique: true })
-  await settlements.createIndex({ status: 1 })
+  // Attach a top-level error handler so an unexpected mid-run topology
+  // failure is logged clearly rather than crashing the process silently.
+  client.on("error", (err: Error) => {
+    logger.error({ errorName: err.name }, "MongoDB client error")
+  })
 
-  const cursors = db.collection<IndexerCursor>("indexer_cursors")
-  await cursors.createIndex({ _id: 1 }, { unique: true })
+  client.on("close", () => {
+    logger.warn("MongoDB connection closed; subsequent requests will reconnect")
+    // Reset cached references so the next call to connectMongo() re-establishes
+    // the connection instead of returning a stale db handle.
+    db = null
+    client = null
+  })
+
+  await ensureIndexes(db)
 
   return db
+}
+
+export function getInvoicesCollection(database: Db): Collection<InvoiceRecord> {
+  return database.collection<InvoiceRecord>("invoices")
 }
 
 export function getSettlementsCollection(database: Db): Collection<SettlementRecord> {
@@ -52,10 +343,69 @@ export function getCursorsCollection(database: Db): Collection<IndexerCursor> {
   return database.collection<IndexerCursor>("indexer_cursors")
 }
 
+export function getInvoiceEventsCollection(database: Db): Collection<InvoiceEventRecord> {
+  return database.collection<InvoiceEventRecord>("invoice_events")
+}
+
+export function getIndexerGapsCollection(database: Db): Collection<IndexerGapRecord> {
+  return database.collection<IndexerGapRecord>("indexer_gaps")
+}
+
+export function getComplianceAuditCollection(database: Db): Collection<ComplianceAuditRecord> {
+  return database.collection<ComplianceAuditRecord>("compliance_audit")
+}
+
+export function getMerchantApiKeysCollection(database: Db): Collection<MerchantApiKeyRecord> {
+  return database.collection<MerchantApiKeyRecord>("merchant_api_keys")
+}
+
+/**
+ * #1064 — Batch `last_used_at` updates for API keys. Instead of one write per
+ * authenticated request, callers accumulate key ids and flush them in a single
+ * `bulkWrite`, cutting write amplification and memory churn under peak load.
+ */
+export async function flushApiKeyLastUsed(
+  database: Db,
+  keyIds: readonly string[],
+  usedAt: Date = new Date(),
+): Promise<number> {
+  if (keyIds.length === 0) return 0
+  const uniqueIds = Array.from(new Set(keyIds)).slice(0, MAX_AUTH_QUERY_RESULTS)
+  if (uniqueIds.length === 0) return 0
+
+  try {
+    const result = await getMerchantApiKeysCollection(database).bulkWrite(
+      uniqueIds.map((key_id) => ({
+        updateOne: {
+          filter: { key_id },
+          update: { $set: { last_used_at: usedAt } },
+        },
+      })),
+      { ordered: false },
+    )
+    return result.modifiedCount ?? 0
+  } catch (error) {
+    // Usage tracking is best-effort: never fail an authenticated request
+    // because the timestamp write failed.
+    logger.warn(
+      { errorName: error instanceof Error ? error.name : "UnknownError", count: uniqueIds.length },
+      "Failed to batch-update API key last_used_at",
+    )
+    return 0
+  }
+}
+
 export async function closeMongo(): Promise<void> {
   if (client) {
     await client.close()
     client = null
     db = null
   }
+}
+
+/** Exported for tests — resets the cached singleton so each test gets a fresh connection. */
+export function _resetMongoSingleton(): void {
+  client = null
+  db = null
+  connecting = null
 }

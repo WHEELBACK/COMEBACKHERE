@@ -10,10 +10,12 @@
 #
 # Optional:
 #   DEPLOYED_ADDRESSES_FILE — override output path (default: artifacts/addresses.json)
+#   DEPLOYED_ADDRESSES_ENV  — override shell env output path (default: artifacts/addresses.env)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_FILE="${DEPLOYED_ADDRESSES_FILE:-$ROOT_DIR/artifacts/addresses.json}"
+ENV_FILE="${DEPLOYED_ADDRESSES_ENV:-$ROOT_DIR/artifacts/addresses.env}"
 EXAMPLE_FILE="$ROOT_DIR/artifacts/addresses.json.example"
 
 : "${STELLAR_NETWORK:?STELLAR_NETWORK is required}"
@@ -46,6 +48,14 @@ with open(out_path, "w", encoding="utf-8", newline="\n") as handle:
 PY
 
 echo "Deployed addresses written to $OUT_FILE"
+
+echo "Writing shell exports to $ENV_FILE"
+cat > "$ENV_FILE" <<EOF
+export STELLAR_NETWORK="$STELLAR_NETWORK"
+export INVOICE_CONTRACT_ID="$INVOICE_CONTRACT_ID"
+export TREASURY_CONTRACT_ID="$TREASURY_CONTRACT_ID"
+export COMPLIANCE_CONTRACT_ID="$COMPLIANCE_CONTRACT_ID"
+EOF
 
 # ── Schema validation against addresses.json.example ─────────────────────────
 if [[ ! -f "$EXAMPLE_FILE" ]]; then

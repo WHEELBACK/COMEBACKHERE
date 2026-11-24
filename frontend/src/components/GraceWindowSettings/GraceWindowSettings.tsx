@@ -21,7 +21,7 @@ function formatDuration(seconds: number): string {
 
 function parseDurationInput(value: string, unit: "seconds" | "minutes" | "hours" | "days"): number | null {
   const n = Number(value)
-  if (!value || Number.isNaN(n) || n <= 0 || !Number.isInteger(n)) return null
+  if (!value || Number.isNaN(n) || n < 0 || !Number.isInteger(n)) return null
 
   switch (unit) {
     case "seconds":
@@ -81,7 +81,7 @@ export default function GraceWindowSettings() {
       const res = await fetch(`${API_BASE}/invoice/grace-window`)
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
-        throw new Error(body.error ?? `HTTP ${res.status}`)
+        throw new Error(body.error?.message ?? `HTTP ${res.status}`)
       }
       const data: { grace_window_seconds: number } = await res.json()
       setCurrentSeconds(data.grace_window_seconds)
@@ -98,9 +98,28 @@ export default function GraceWindowSettings() {
 
   const parsedSeconds = parseDurationInput(inputValue, inputUnit)
 
+  // Inline validation mirroring backend constraints
+  const getValidationError = (): string | null => {
+    if (!inputValue) {
+      return null // No error if field is empty (just disabled save)
+    }
+    if (parsedSeconds === null) {
+      return "Enter a valid non-negative integer duration"
+    }
+    return null
+  }
+
+  const validationError = getValidationError()
+
+  /** Non-blocking warning shown when the value is zero. */
+  const zeroWarning: string | null =
+    parsedSeconds === 0
+      ? "Setting the grace window to zero disables the waiting period entirely. Escrow can be released immediately after a refund request — make sure this is intentional."
+      : null
+
   const handleSave = async () => {
-    if (!parsedSeconds) {
-      setError("Enter a valid positive duration")
+    if (parsedSeconds === null) {
+      setError("Enter a valid non-negative integer duration")
       return
     }
 
@@ -116,7 +135,7 @@ export default function GraceWindowSettings() {
       })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) {
-        throw new Error(body.error ?? `HTTP ${res.status}`)
+        throw new Error(body.error?.message ?? `HTTP ${res.status}`)
       }
       setCurrentSeconds(body.grace_window_seconds)
       setSuccess(
@@ -134,7 +153,7 @@ export default function GraceWindowSettings() {
 
   const confirmMessage =
     parsedSeconds != null
-      ? `This will change the invoice grace window to ${formatDuration(parsedSeconds)} (${parsedSeconds} seconds) for all future escrow releases. Continue?`
+      ? `This will change the invoice grace window to ${parsedSeconds === 0 ? "zero seconds (no grace period)" : `${formatDuration(parsedSeconds)} (${parsedSeconds} seconds)`} for all future escrow releases. Continue?`
       : ""
 
   return (
@@ -159,13 +178,21 @@ export default function GraceWindowSettings() {
           <div className="grace-window-form__inputs">
             <input
               id="grace-window-value"
-              className="form-input grace-window-form__value"
+              className={`form-input grace-window-form__value${validationError ? " form-input--error" : ""}`}
               type="number"
               min="1"
               step="1"
               value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
+              onChange={(e) => {
+                setInputValue(e.target.value)
+                setError(null) // Clear backend errors when user starts typing
+              }}
               disabled={loading || saving}
+              aria-invalid={!!validationError}
+              aria-describedby={
+                validationError ? "grace-validation-error" :
+                zeroWarning ? "grace-zero-warning" : undefined
+              }
             />
             <select
               className="form-input grace-window-form__unit"
@@ -180,6 +207,21 @@ export default function GraceWindowSettings() {
               <option value="days">Days</option>
             </select>
           </div>
+          {validationError && (
+            <p id="grace-validation-error" className="form-error grace-window-form__inline-error">
+              {validationError}
+            </p>
+          )}
+          {zeroWarning && !validationError && (
+            <p
+              id="grace-zero-warning"
+              className="grace-window-form__zero-warning"
+              role="alert"
+              aria-live="polite"
+            >
+              ⚠ {zeroWarning}
+            </p>
+          )}
         </div>
 
         {parsedSeconds != null && currentSeconds != null && parsedSeconds !== currentSeconds && (

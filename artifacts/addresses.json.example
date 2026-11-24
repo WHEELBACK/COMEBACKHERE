@@ -3,15 +3,22 @@
   "contracts": [
     {
       "name": "invoice",
-      "address": "C..."
+      "address": "C...",
+      "admin": "G..."
     },
     {
       "name": "treasury",
-      "address": "C..."
+      "address": "C...",
+      "admin": "G..."
     },
     {
       "name": "compliance",
-      "address": "C..."
+      "address": "C...",
+      "admin": "G..."
     }
-  ]
+  ],
+  "adminKeySeparation": {
+    "enforced": true,
+    "exception": null
+  }
 }

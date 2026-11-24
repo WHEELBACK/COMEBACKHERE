@@ -1,0 +1,20 @@
+[package]
+name = "cbh"
+version = "0.1.0"
+edition = "2021"
+description = "COMEBACKHERE protocol CLI – pre-flight checks and config scaffolding"
+
+[[bin]]
+name = "cbh"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+anyhow = "1"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

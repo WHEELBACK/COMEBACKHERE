@@ -2,6 +2,23 @@
 
 This guide covers the most common problems developers encounter during local setup and how to resolve them.
 
+## Health and Metrics
+
+`GET /health` is a liveness check: it reports whether the backend process can
+serve requests and does not contact dependencies. `GET /health/ready` is a
+readiness check: it returns `200` only when MongoDB, Redis, and Soroban RPC
+respond within 1.5 seconds; otherwise it returns `503` with each dependency
+marked `ok` or `unavailable`.
+
+`GET /metrics` exposes Prometheus text metrics and is enabled by default. Set
+`METRICS_ENABLED=false` to disable the endpoint. Request latency is recorded in
+`http_request_duration_seconds` (route templates, method, and status code),
+indexer lag in `indexer_ledger_lag` (ledger count, labelled by indexer), and
+webhook outcomes in `webhook_delivery_total` (labelled by `delivered` or
+`failed`). Standard Node.js process metrics are also included. Logs are
+structured JSON; `LOG_LEVEL` controls verbosity, and `pino-pretty` is enabled
+only when `NODE_ENV=development`.
+
 ## Soroban RPC Connection Errors
 
 ### "Soroban RPC not reachable" or connection refused on port 8000
@@ -23,7 +40,7 @@ docker compose logs soroban
 **Common causes and fixes:**
 
 | Symptom | Cause | Fix |
-|---|---|---|
+| --- | --- | --- |
 | `connection refused` on `localhost:8000` | Container not started | Run `docker compose up -d` or `make dev` |
 | Container starts then immediately exits | Corrupted volume data | `docker compose down -v && docker compose up -d` |
 | `health: starting` stays for more than 60 seconds | Slow initial ledger catch-up | Wait up to 90 seconds; the healthcheck has a 30-second `start_period` and retries every 5 seconds |
@@ -159,6 +176,127 @@ brew services stop redis     # macOS
 
 Or remap the Docker Redis port as shown above.
 
+## Compromised SIGNER_SECRET_KEY — Incident Runbook
+
+If the `SIGNER_SECRET_KEY` used by the backend is suspected compromised,
+follow these steps immediately to limit damage and restore security.
+
+> **Scope:** This runbook covers the Stellar secret key stored in the
+> `SIGNER_SECRET_KEY` environment variable, which is used by multiple
+> backend routes (`threshold.ts`, `invoice-settings.ts`, `treasury.ts`,
+> `compliance.ts`, `invoices.ts`, `disputes.ts`, `release-escrow.ts`)
+> to sign contract calls.
+
+### Step 1 — Rotate the key
+
+Generate a new Stellar keypair:
+
+```sh
+# Using Stellar CLI
+stellar keys generate new-signer --network testnet
+NEW_PUBLIC_KEY=$(stellar keys address new-signer)
+NEW_SECRET_KEY=$(stellar keys show new-signer)
+```
+
+Or using the Stellar Laboratory:
+
+1. Go to https://laboratory.stellar.org/#account-creation
+2. Click **Generate** to create a new keypair
+3. Copy both the **Public Key** and **Secret Key**
+
+### Step 2 — Update the backend environment
+
+Replace `SIGNER_SECRET_KEY` in your deployment environment:
+
+```sh
+# For docker-compose deployments, update .env and restart
+echo "SIGNER_SECRET_KEY=$NEW_SECRET_KEY" >> .env
+docker compose restart backend
+```
+
+For cloud deployments (AWS, GCP, etc.), update the environment variable
+in your secrets manager and redeploy the backend service.
+
+### Step 3 — Register the new signer on-chain
+
+If the compromised key was registered as a treasury signer (not just the
+backend signing key), you must update the on-chain signer set.
+
+**Option A — Admin uses `set_signer` (if you have admin access):**
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT_ID \
+  --source $ADMIN_SECRET_KEY \
+  --rpc-url $SOROBAN_RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- set_signer \
+  --admin $ADMIN_PUBLIC_KEY \
+  --signer $NEW_PUBLIC_KEY \
+  --weight 1
+```
+
+Then remove the old signer:
+
+```sh
+soroban contract invoke \
+  --id $TREASURY_CONTRACT_ID \
+  --source $ADMIN_SECRET_KEY \
+  --rpc-url $SOROBAN_RPC_URL \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- set_signer \
+  --admin $ADMIN_PUBLIC_KEY \
+  --signer $OLD_PUBLIC_KEY \
+  --weight 0
+```
+
+**Option B — Multi-sig rotation (if admin key is also compromised):**
+
+Use `propose_signer_rotation` and `approve_signer_rotation` per the
+mainnet deployment guide (see [docs/MAINNET_DEPLOYMENT.md](./MAINNET_DEPLOYMENT.md)).
+
+### Step 4 — Verify no unauthorised transactions
+
+Check recent transactions signed by the compromised key:
+
+```sh
+# Search Horizon for recent transactions from the old signer's account
+curl "https://horizon-testnet.stellar.org/accounts/$OLD_PUBLIC_KEY/transactions?limit=50" | jq '.records[] | {id: .id, created_at: .created_at, memo: .memo}'
+```
+
+On mainnet, replace `horizon-testnet.stellar.org` with `horizon.stellar.org`.
+
+Look for:
+- Unexpected `execute_settlement` calls
+- Unauthorised `propose_settlement` or `approve_settlement` calls
+- Any `set_signer` or `update_threshold` changes
+
+If you find unauthorised transactions, escalate immediately to the governance
+team and consider pausing the affected contracts.
+
+### Step 5 — Audit and monitor
+
+1. **Review backend logs** for any requests processed with the compromised key:
+
+   ```sh
+   docker compose logs backend 2>&1 | grep -i "signer\|settlement\|treasury"
+   ```
+
+2. **Check webhook delivery logs** for any settlement events that may have
+   been triggered.
+
+3. **Monitor the account** for the next 24 hours for any delayed transactions.
+
+### Prevention
+
+- Rotate signing keys on a regular schedule (every 12 months recommended).
+- Store `SIGNER_SECRET_KEY` in a secrets manager, never in version control.
+- Use separate keys for different environments (testnet vs mainnet).
+- Enable transaction monitoring and alerting on the signer account.
+
+> **See also:** [docs/MAINNET_DEPLOYMENT.md](./MAINNET_DEPLOYMENT.md)
+> for the full signing ceremony and key rotation procedures.
+
 ## General Tips
 
 - **Reset everything**: `docker compose down -v && docker compose up -d && ./scripts/deploy_testnet.sh`
@@ -166,3 +304,496 @@ Or remap the Docker Redis port as shown above.
 - **Check service health**: `docker compose ps` shows healthcheck status for each service
 - **Verify RPC is responding**: `curl http://localhost:8000/health`
 - **Verify Redis is responding**: `docker compose exec redis redis-cli ping` (should return `PONG`)
+
+## Request Tracing with Correlation IDs
+
+Every request handled by `comebackhere-backend` carries a unique `X-Request-Id`
+header that is echoed back on the response. This ID is the primary key for
+tracing a single request across backend logs, the treasury indexer, and webhook
+delivery.
+
+### How it works
+
+- If your client already sets an `X-Request-Id` header the backend preserves
+  that value unchanged.
+- Otherwise the backend generates a new UUID v4 and attaches it to both the
+  request context (`res.locals.requestId`) and the response header.
+
+When the backend delivers webhook events to a merchant endpoint, the same
+`X-Request-Id` is forwarded as a header on the outbound POST (every retry
+included), so merchants can correlate a delivery with the original request in
+their own logs. It is also recorded as `request_id` on the webhook delivery
+record.
+
+### Filtering logs by correlation ID
+
+Capture the ID from a response and grep backend logs:
+
+```sh
+# Store the ID from a curl call
+REQUEST_ID=$(curl -si http://localhost:3000/invoices/1 | grep -i x-request-id | awk '{print $2}' | tr -d '\r')
+echo "Tracing request: $REQUEST_ID"
+
+# Filter Docker logs
+docker compose logs backend 2>&1 | grep "$REQUEST_ID"
+```
+
+### Supplying your own trace ID
+
+Pass an existing trace ID from your client or a distributed tracing system:
+
+```sh
+curl -H "X-Request-Id: my-trace-id-abc123" http://localhost:3000/invoices/1
+```
+
+The response will echo the same `X-Request-Id: my-trace-id-abc123` header,
+confirming the backend used your ID throughout the request lifecycle.
+# Development Environment Troubleshooting
+
+This guide covers the most common problems developers encounter during local setup and how to resolve them.
+
+## Soroban RPC Connection Errors
+
+### "Soroban RPC not reachable" or connection refused on port 8000
+
+The local Soroban sandbox is not running or has not finished starting.
+
+**Check the container status:**
+
+```sh
+docker compose ps
+```
+
+If the `soroban` service is not listed or shows `Restarting`, inspect its logs:
+
+```sh
+docker compose logs soroban
+```
+
+**Common causes and fixes:**
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `connection refused` on `localhost:8000` | Container not started | Run `docker compose up -d` or `make dev` |
+| Container starts then immediately exits | Corrupted volume data | `docker compose down -v && docker compose up -d` |
+| `health: starting` stays for more than 60 seconds | Slow initial ledger catch-up | Wait up to 90 seconds; the healthcheck has a 30-second `start_period` and retries every 5 seconds |
+| `ECONNREFUSED` from the backend but `curl localhost:8000` works | Backend is using the Docker network hostname (`soroban`) but running outside Docker | Set `SOROBAN_RPC_URL=http://localhost:8000` in the backend `.env` when running natively |
+
+### "Transaction simulation failed" or "contract not found"
+
+The contract IDs saved in your `.env` do not match what was deployed to the local sandbox.
+
+```sh
+# Redeploy contracts and capture fresh IDs
+cd COMEBACKHERE && ./scripts/deploy_testnet.sh
+
+# Update .env files with the new contract IDs printed by the script
+```
+
+If you previously ran `docker compose down -v`, all ledger state (including deployed contracts) was wiped. You must redeploy after every volume reset.
+
+### Wrong network passphrase
+
+When using the standalone sandbox the passphrase must be:
+
+```
+Standalone Network ; February 2025
+```
+
+Ensure both `VITE_NETWORK_PASSPHRASE` (frontend) and `NETWORK_PASSPHRASE` (Soroban CLI config) use this exact string. A mismatched passphrase causes silent transaction failures.
+
+## USDC Test-Asset Funding Failures
+
+### "USDC balance insufficient" during payment testing
+
+The local standalone sandbox does not come with pre-minted USDC. You need to either:
+
+1. **Use the Stellar Laboratory** to fund your testnet account (when using public testnet):
+
+   ```
+   https://laboratory.stellar.org/#create-account
+   ```
+
+2. **Mint test USDC locally** using the deploy script, which sets up a test USDC token contract with the address `CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4`.
+
+### Friendbot failures on testnet
+
+If Stellar Friendbot is down or rate-limiting your requests:
+
+```sh
+# Check if friendbot is responsive
+curl https://friendbot.stellar.org?addr=YOUR_PUBLIC_KEY
+```
+
+**Workarounds:**
+
+- Wait 60 seconds and retry; Friendbot rate-limits to roughly one request per account per minute.
+- Use a different testnet keypair: `soroban config identity generate dev2`
+- Switch to the local standalone sandbox instead of testnet, which does not require Friendbot.
+
+### "Token contract not found" when paying invoices
+
+The USDC contract ID in your `.env` must match the actual deployed test token. On the local sandbox, the deploy script outputs this ID. If you changed sandboxes or reset volumes, redeploy:
+
+```sh
+./scripts/deploy_testnet.sh
+# Copy the printed USDC_CONTRACT_ID into your .env files
+```
+
+## Docker Port Conflicts
+
+### "Bind for 0.0.0.0:8000: address already in use"
+
+Another process is already listening on port 8000 (or 11625, 11626, 6379, 3000, 5173).
+
+**Find what is using the port:**
+
+```sh
+# Linux
+sudo lsof -i :8000
+
+# macOS
+lsof -i :8000
+```
+
+**Fixes:**
+
+1. **Stop the conflicting process** if it is a leftover container or old dev server:
+
+   ```sh
+   docker compose down
+   # or kill the specific process
+   kill <PID>
+   ```
+
+2. **Remap ports** by creating or editing `docker-compose.override.yml` (this file is gitignored):
+
+   ```yaml
+   version: '3.8'
+   services:
+     soroban:
+       ports:
+         - "9000:8000"      # Soroban RPC on 9000 instead of 8000
+         - "11627:11626"
+         - "11628:11625"
+     redis:
+       ports:
+         - "6380:6379"      # Redis on 6380 instead of 6379
+   ```
+
+   Then update your `.env` files to use the new ports:
+
+   ```sh
+   SOROBAN_RPC_URL=http://localhost:9000
+   ```
+
+### Port conflicts between native and Docker services
+
+Running both `cargo run` (native backend) and the Docker `backend` service will conflict on port 3000. Pick one approach:
+
+- **Docker-only**: use `docker compose -f docker-compose.yml -f docker-compose.override.yml up`
+- **Native backend**: stop the Docker backend service: `docker compose stop backend`, then run `cargo run` directly.
+
+### Redis port conflict (6379)
+
+If you have a system Redis running:
+
+```sh
+# Check if system Redis is active
+systemctl status redis 2>/dev/null || brew services list 2>/dev/null | grep redis
+
+# Stop system Redis
+sudo systemctl stop redis   # Linux
+brew services stop redis     # macOS
+```
+
+Or remap the Docker Redis port as shown above.
+
+## Stale ABI Snapshots
+
+### CI failure: `abi-snapshot-hygiene`
+
+After modifying a contract interface (adding/removing a public function,
+changing a type, or editing `events.rs`), the ABI metadata files in `abis/`
+go out of sync with the source. The `abi-snapshot-hygiene` CI check detects
+this and fails with a message like:
+
+```text
+ABI snapshot hygiene check failed.
+abis/invoice.json does not match COMEBACKHERE-contracts/contracts/invoice/
+```
+
+**Fix:**
+
+```sh
+# Regenerate ABI snapshots from the canonical contract source
+make update-abi-snapshots
+# or
+just snapshot
+```
+
+Then verify the diff looks correct and commit the updated `abis/*.json` files
+alongside your contract changes:
+
+```sh
+git diff abis/
+git add abis/
+```
+
+> **Why this happens:** The `abis/` directory contains committed metadata
+> generated from `COMEBACKHERE-contracts/`. CI verifies that these files
+> are consistent with the contract source on every PR. If you edit a contract
+> but forget to regenerate the snapshots, the hygiene check fails.
+
+### How to avoid this in the future
+
+Run the verification command before pushing:
+
+```sh
+make check-abi-snapshots
+# or
+just check-snapshot
+```
+
+This prints a clear error if the snapshots are stale, letting you fix them
+locally before CI catches them.
+
+## General Tips
+
+- **Reset everything**: `docker compose down -v && docker compose up -d && ./scripts/deploy_testnet.sh`
+- **View all logs**: `docker compose logs -f`
+- **Check service health**: `docker compose ps` shows healthcheck status for each service
+- **Verify RPC is responding**: `curl http://localhost:8000/health`
+- **Verify Redis is responding**: `docker compose exec redis redis-cli ping` (should return `PONG`)
+
+## Request Tracing with Correlation IDs
+
+Every request handled by `comebackhere-backend` carries a unique `X-Request-Id`
+header that is echoed back on the response. This ID is the primary key for
+tracing a single request across backend logs, the treasury indexer, and webhook
+delivery.
+
+### How it works
+
+- If your client already sets an `X-Request-Id` header the backend preserves
+  that value unchanged.
+- Otherwise the backend generates a new UUID v4 and attaches it to both the
+  request context (`res.locals.requestId`) and the response header.
+
+When the backend delivers webhook events to a merchant endpoint, the same
+`X-Request-Id` is forwarded as a header on the outbound POST (every retry
+included), so merchants can correlate a delivery with the original request in
+their own logs. It is also recorded as `request_id` on the webhook delivery
+record.
+
+### Filtering logs by correlation ID
+
+Capture the ID from a response and grep backend logs:
+
+```sh
+# Store the ID from a curl call
+REQUEST_ID=$(curl -si http://localhost:3000/invoices/1 | grep -i x-request-id | awk '{print $2}' | tr -d '\r')
+echo "Tracing request: $REQUEST_ID"
+
+# Filter Docker logs
+docker compose logs backend 2>&1 | grep "$REQUEST_ID"
+```
+
+### Supplying your own trace ID
+
+Pass an existing trace ID from your client or a distributed tracing system:
+
+```sh
+curl -H "X-Request-Id: my-trace-id-abc123" http://localhost:3000/invoices/1
+```
+
+The response will echo the same `X-Request-Id: my-trace-id-abc123` header,
+confirming the backend used your ID throughout the request lifecycle.
+
+## Indexer Retention Gaps
+
+Soroban RPC nodes keep contract events only for a limited retention window
+(about 7 days by default on public nodes). If the invoice indexer is stopped,
+or falls behind, for longer than that window, its saved cursor points at
+ledgers the node no longer has and `getEvents` rejects the request.
+
+### How the indexer reacts
+
+When the resume ledger is older than the node's oldest retained ledger, the
+indexer:
+
+1. Logs an error such as
+   `[indexer] RETENTION GAP: ledgers 3000-4999 (2000 ledgers) are no longer retained by the RPC node; events in this range were NOT indexed.`
+2. Updates the metrics served at `GET /metrics`:
+
+   | Metric | Meaning |
+   | --- | --- |
+   | `indexer_retention_gaps_total{indexer="invoice"}` | Number of gaps detected |
+   | `indexer_retention_gap_ledgers_total{indexer="invoice"}` | Total ledgers skipped |
+   | `indexer_retention_gap_last_missing_ledgers{indexer="invoice"}` | Size of the most recent gap |
+
+3. Stores the missing range in the `indexer_gaps` Mongo collection with
+   `status: "open"`.
+4. Only then moves its cursor to the oldest retained ledger and continues.
+
+Alert on any increase of `indexer_retention_gaps_total`. Invoices whose events
+fell in the gap may show a stale status and their webhooks were not sent.
+
+### Recovering from a gap
+
+1. List the open gaps:
+
+   ```sh
+   mongosh "$MONGODB_URI" --eval 'db.indexer_gaps.find({ status: "open" })'
+   ```
+
+2. Find an RPC node that still retains the range: an archive RPC
+   (captive-core with a long `HISTORY_RETENTION_WINDOW`) or a provider
+   offering full history.
+3. Run a one-off indexer against that node, starting at the gap. Processing is
+   idempotent per event id, so overlapping ranges are safe to replay:
+
+   ```sh
+   # Point the one-off run's cursor at the start of the gap
+   mongosh "$MONGODB_URI" --eval '
+     db.indexer_cursors.updateOne(
+       { _id: "invoice_events" },
+       { $set: { paging_token: null, last_ledger: <from_ledger> } })'
+
+   SOROBAN_RPC_URL=<archive-rpc-url> INVOICE_CONTRACT_ID=... \
+     node dist/indexer.js
+   ```
+
+   Stop the main indexer while the backfill runs, and stop the backfill once
+   its logs show ledgers past `to_ledger`. Then restart the main indexer; it
+   continues from the saved cursor and skips events it has already applied.
+
+4. Mark the gap as resolved:
+
+   ```sh
+   mongosh "$MONGODB_URI" --eval '
+     db.indexer_gaps.updateOne(
+       { _id: "invoice:<from>-<to>" },
+       { $set: { status: "backfilled", resolved_at: new Date() } })'
+   ```
+
+   If no archive source is available, set `status: "accepted"` instead and
+   reconcile the affected invoices manually with
+   `stellar contract invoke ... -- get_invoice --invoice_id <id>`.
+
+### Preventing gaps
+
+- Keep indexer downtime well below the RPC node's retention window.
+- Watch `indexer_retention_gap_last_missing_ledgers` and indexer logs after
+  outages.
+- For self-hosted RPC, raise the event retention window if maintenance windows
+  are long.
+
+---
+
+## Freighter Wallet Troubleshooting
+
+This section covers the most common Freighter wallet issues end users encounter when paying invoices.
+
+### Freighter Extension Not Installed
+
+**Symptom:** "Install Freighter" button appears, or clicking "Connect Wallet" shows no wallet options.
+
+**Cause:** Freighter browser extension is not installed.
+
+**Fix:**
+1. Go to [https://www.freighter.app](https://www.freighter.app)
+2. Click "Install Freighter" for your browser (Chrome, Firefox, Edge, Safari)
+3. Follow the browser's installation prompts
+4. After installation, refresh the payment page in your browser
+5. Click "Connect Wallet" — Freighter should now appear
+
+### "Locked Wallet" Error
+
+**Symptom:** Freighter icon shows a lock, or you see "Wallet is locked" when trying to pay.
+
+**Cause:** Freighter is locked and requires your password to unlock.
+
+**Fix:**
+1. Click the Freighter icon in your browser toolbar (top-right corner)
+2. Enter your password in the unlock popup
+3. Click "Unlock"
+4. Return to the payment page and try again
+
+> After 15 minutes of inactivity, Freighter auto-locks for security. Simply unlock again to continue.
+
+### "Wrong Network Selected"
+
+**Symptom:** Payment fails with "network mismatch" or the Freighter popup shows "Testnet" or the wrong network.
+
+**Cause:** Freighter is connected to a different Stellar network than what the application uses.
+
+**Fix:**
+1. Click the Freighter icon in your browser toolbar
+2. Look for the network selector (usually at the top of the Freighter window)
+3. Select **"Mainnet"** (or the correct network for this application)
+4. Close Freighter and return to the payment page
+5. Try paying again
+
+> The application should display which network it's connected to (usually near the top of the page or in the wallet connection button).
+
+### Signature Request Never Appeared
+
+**Symptom:** After clicking "Pay," nothing happens; no Freighter popup appears.
+
+**Cause:** Browser popup permissions are blocked, or Freighter encountered an error.
+
+**Fix:**
+1. **Check popup blockers:**
+   - Look for a "blocked popups" icon in your browser's address bar
+   - Click it and select "Allow popups for this site"
+   - Try paying again
+
+2. **Refresh the page:**
+   - Refresh your browser tab (Ctrl+R or Cmd+R)
+   - Disconnect and reconnect your wallet
+   - Try paying again
+
+3. **Restart Freighter:**
+   - Click the Freighter icon
+   - Open Freighter's settings (gear icon, usually bottom-right)
+   - Scroll down and click "Clear Data" or "Lock"
+   - Unlock Freighter again and retry
+
+### Signature Request Rejected
+
+**Symptom:** A Freighter popup appeared, but you clicked "Reject" or the request timed out.
+
+**Cause:** You declined the transaction, or the request expired before you approved it.
+
+**Fix:**
+1. Return to the payment page or refresh it
+2. Click "Pay" again
+3. **When the Freighter popup appears**, carefully review the transaction details (amounts, recipient, etc.)
+4. Click **"Approve"** (not "Reject")
+5. Wait for the transaction to complete (usually 30 seconds–1 minute on Mainnet)
+
+### "Insufficient Balance"
+
+**Symptom:** Payment fails with "insufficient balance" even though your Freighter account shows enough funds.
+
+**Cause:** Your balance includes less than the full invoice amount (sometimes accounts display rounding or your balance is in a different asset).
+
+**Fix:**
+1. In Freighter, make sure your balance is displayed in **USDC** (the correct stablecoin)
+2. Confirm the amount shown in your Freighter account is at least the invoice amount
+3. If you just received funds, wait a few minutes for the balance to sync (Stellar has ~5-10 second block times)
+4. If the balance is still too low, you need to receive more funds or cancel this invoice and request a smaller amount
+
+### "Transaction Failed" After Approval
+
+**Symptom:** You approved the signature in Freighter, but the payment page shows "Transaction failed."
+
+**Cause:** The transaction was submitted to the Stellar network but could not be processed (insufficient fees, network congestion, or invalid transaction details).
+
+**Fix:**
+1. **Wait 1–2 minutes** to ensure the transaction settled
+2. Refresh the payment page — sometimes it shows as paid after a reload
+3. If still failed, contact the merchant or support; you may need to retry or request a new payment link
+
+---

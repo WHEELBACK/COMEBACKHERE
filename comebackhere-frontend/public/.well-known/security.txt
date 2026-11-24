@@ -1,0 +1,7 @@
+Contact: mailto:security@comebackhere.io
+Contact: https://github.com/WHEELBACK/COMEBACKHERE/blob/main/SECURITY.md
+Encryption: https://comebackhere.io/.well-known/pgp-key.txt
+Expires: 2027-08-27T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://comebackhere.io/.well-known/security.txt
+Policy: https://github.com/WHEELBACK/COMEBACKHERE/blob/main/SECURITY.md

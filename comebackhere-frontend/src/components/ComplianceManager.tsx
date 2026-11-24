@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useMemo, useState, useEffect } from "react"
 import {
   allowAddress,
   allowAddressUntil,
@@ -7,6 +7,8 @@ import {
   ComplianceStatus,
   ComplianceStatusResult,
   getAddressStatus,
+  getSignerAddress,
+  getRecentAddresses,
 } from "../utils/compliance"
 import { CopyableText } from "./CopyableText"
 
@@ -42,6 +44,16 @@ export function ComplianceManager() {
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [actionSubmitting, setActionSubmitting] = useState(false)
+  const [recentAddresses, setRecentAddresses] = useState<string[]>([])
+  const [showSuggestions, setShowSuggestions] = useState(false)
+
+  useEffect(() => {
+    const loadRecentAddresses = async () => {
+      const addresses = await getRecentAddresses()
+      setRecentAddresses(addresses)
+    }
+    loadRecentAddresses()
+  }, [])
 
   const addressValid = isValidStellarAddress(address)
   const expiryTimestamp = useMemo(() => {
@@ -49,6 +61,13 @@ export function ComplianceManager() {
     const parsed = new Date(expiry).getTime()
     return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null
   }, [expiry])
+
+  const filteredSuggestions = useMemo(() => {
+    if (!address.trim()) return []
+    return recentAddresses.filter((addr) =>
+      addr.toLowerCase().includes(address.toLowerCase())
+    )
+  }, [address, recentAddresses])
 
   const addOrUpdateManaged = (entry: ManagedAddress) => {
     setManaged((prev) => {
@@ -81,35 +100,30 @@ export function ComplianceManager() {
         expiresAt: result.expiresAt,
       })
       setMessage("Loaded current compliance status.")
-    } catch (err: any) {
-      setError(err?.message ?? "Failed to fetch address status")
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to fetch address status")
     } finally {
       setLoading(false)
     }
   }
 
   const submitAction = async (
-    action: () => Promise<{ success: boolean; error?: string; hash?: string }>,
+    action: (publicKey: string) => Promise<{ success: boolean; error?: string; hash?: string }>,
     successText: string
   ) => {
     setError(null)
     setMessage(null)
     setActionSubmitting(true)
     try {
-      const publicKey = (window as any).freighterApi
-        ? await (window as any).freighterApi.getAddress().then((res: any) => res.address)
-        : null
-      if (!publicKey) {
-        throw new Error("Connect your wallet to sign compliance updates.")
-      }
-      const result = await action()
+      const publicKey = await getSignerAddress()
+      const result = await action(publicKey)
       if (!result.success) {
         throw new Error(result.error ?? "Action failed")
       }
       setMessage(`${successText} Transaction hash: ${result.hash}`)
       await handleFetchStatus()
-    } catch (err: any) {
-      setError(err?.message ?? "Action failed")
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Action failed")
     } finally {
       setActionSubmitting(false)
     }
@@ -121,12 +135,10 @@ export function ComplianceManager() {
       return
     }
     await submitAction(
-      async () => {
-        if (expiryTimestamp) {
-          return allowAddressUntil(address.trim(), expiryTimestamp, await (window as any).freighterApi.getAddress().then((res: any) => res.address))
-        }
-        return allowAddress(address.trim(), await (window as any).freighterApi.getAddress().then((res: any) => res.address))
-      },
+      (publicKey) =>
+        expiryTimestamp
+          ? allowAddressUntil(address.trim(), expiryTimestamp, publicKey)
+          : allowAddress(address.trim(), publicKey),
       expiryTimestamp ? "Allowed address until expiry." : "Address allowed."
     )
   }
@@ -137,7 +149,7 @@ export function ComplianceManager() {
       return
     }
     await submitAction(
-      async () => blockAddress(address.trim(), await (window as any).freighterApi.getAddress().then((res: any) => res.address)),
+      (publicKey) => blockAddress(address.trim(), publicKey),
       "Address blocked."
     )
   }
@@ -148,7 +160,7 @@ export function ComplianceManager() {
       return
     }
     await submitAction(
-      async () => clearAddress(address.trim(), await (window as any).freighterApi.getAddress().then((res: any) => res.address)),
+      (publicKey) => clearAddress(address.trim(), publicKey),
       "Address cleared."
     )
   }
@@ -160,12 +172,70 @@ export function ComplianceManager() {
       <div className="compliance-form">
         <label>
           Stellar Address
-          <input
-            type="text"
-            placeholder="G..."
-            value={address}
-            onChange={(e) => setAddress(e.target.value)}
-          />
+          <div style={{ position: "relative" }}>
+            <input
+              type="text"
+              placeholder="G..."
+              value={address}
+              onChange={(e) => {
+                setAddress(e.target.value)
+                setShowSuggestions(true)
+              }}
+              onFocus={() => setShowSuggestions(true)}
+              onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+              autoComplete="off"
+            />
+            {showSuggestions && filteredSuggestions.length > 0 && (
+              <ul
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  left: 0,
+                  right: 0,
+                  background: "var(--color-surface)",
+                  border: "1px solid var(--color-border)",
+                  borderTop: "none",
+                  borderRadius: "0 0 var(--radius) var(--radius)",
+                  maxHeight: "200px",
+                  overflowY: "auto",
+                  margin: 0,
+                  padding: "8px 0",
+                  listStyle: "none",
+                  zIndex: 10,
+                }}
+              >
+                {filteredSuggestions.map((suggestion) => (
+                  <li key={suggestion}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAddress(suggestion)
+                        setShowSuggestions(false)
+                      }}
+                      style={{
+                        width: "100%",
+                        padding: "8px 12px",
+                        background: "none",
+                        border: "none",
+                        textAlign: "left",
+                        cursor: "pointer",
+                        color: "var(--color-text)",
+                        fontSize: "0.9rem",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = "var(--color-hover)"
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = "none"
+                      }}
+                    >
+                      {suggestion}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </label>
 
         <label>

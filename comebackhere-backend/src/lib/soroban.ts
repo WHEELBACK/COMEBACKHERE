@@ -9,9 +9,10 @@ import {
   SorobanRpc,
   xdr,
 } from "stellar-sdk"
+import { assertContractId, assertHolderAddress, assertMethodName } from "./soroban-input-guards.js"
 
 export type SorobanClient = {
-  getAccount: (publicKey: string) => Promise<Parameters<TransactionBuilder["constructor"]>[0]>
+  getAccount: (publicKey: string) => Promise<ConstructorParameters<typeof TransactionBuilder>[0]>
   simulateTransaction: (
     tx: Parameters<SorobanRpc.Server["simulateTransaction"]>[0],
   ) => ReturnType<SorobanRpc.Server["simulateTransaction"]>
@@ -23,6 +24,7 @@ export type SorobanClient = {
     params: Parameters<SorobanRpc.Server["getEvents"]>[0],
   ) => ReturnType<SorobanRpc.Server["getEvents"]>
   getLatestLedger: () => ReturnType<SorobanRpc.Server["getLatestLedger"]>
+  getHealth?: () => ReturnType<SorobanRpc.Server["getHealth"]>
 }
 
 export function buildSorobanClient(rpcUrl: string): SorobanClient {
@@ -34,11 +36,56 @@ export function buildSorobanClient(rpcUrl: string): SorobanClient {
     getTransaction: (hash) => server.getTransaction(hash),
     getEvents: (params) => server.getEvents(params),
     getLatestLedger: () => server.getLatestLedger(),
+    getHealth: () => server.getHealth(),
   }
 }
 
 export function getNetworkPassphrase(): string {
-  return process.env.NETWORK_PASSPHRASE ?? Networks.STANDALONE
+  // #897 — never silently fall back to STANDALONE. An unset passphrase means the
+  // backend would sign transactions for the wrong network, causing silent
+  // failures on testnet/mainnet. Require the operator to configure it
+  // explicitly.
+  const passphrase = process.env.NETWORK_PASSPHRASE
+  if (!passphrase || passphrase.trim() === "") {
+    throw Object.assign(
+      new Error(
+        "NETWORK_PASSPHRASE is not set. Configure it to match your target Stellar network " +
+          "(e.g. \"Test SDF Network ; September 2015\" for testnet).",
+      ),
+      { status: 503 },
+    )
+  }
+  return passphrase
+}
+
+/**
+ * Converts an i128 ScVal (Int128Parts) to a bigint.
+ *
+ * #898 — Calling BigInt(int128Parts.toString()) throws "Cannot convert
+ * [object Object] to a BigInt" because Int128Parts does not override
+ * toString(). Instead, reconstruct the 128-bit value from its 64-bit halves:
+ *
+ *   value = (hi << 64) | lo
+ *
+ * Both halves are stored as XDR Integer instances whose toString() returns
+ * the numeric string, so BigInt(hi.toString()) / BigInt(lo.toString()) work.
+ *
+ * Handles signed 128-bit integers correctly:
+ * - If hi >= 2^63, the value is negative (two's complement)
+ * - Convert to negative by subtracting 2^128 to maintain correct semantics
+ */
+function i128ToBigInt(parts: xdr.Int128Parts): bigint {
+  const lo = BigInt(parts.lo().toString())
+  const hi = BigInt(parts.hi().toString())
+  const value = (hi << 64n) | lo
+  
+  // Check if this is a negative number (high bit of hi is set)
+  // In two's complement, if the sign bit is set, subtract 2^128
+  const SIGN_BIT = 1n << 127n
+  if (value & SIGN_BIT) {
+    return value - (1n << 128n)
+  }
+  return value
 }
 
 export async function simulateContractRead(
@@ -49,9 +96,11 @@ export async function simulateContractRead(
   sourceAccount: string,
   networkPassphrase: string,
 ): Promise<xdr.ScVal> {
+  assertContractId(contractId)
+  assertMethodName(method)
   const contract = new Contract(contractId)
   const account = await client.getAccount(sourceAccount)
-  const tx = new TransactionBuilder(account as any, {
+  const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
   })
@@ -81,6 +130,8 @@ export async function getTokenBalance(
   sourceAccount: string,
   networkPassphrase: string,
 ): Promise<bigint> {
+  assertContractId(tokenContractId, "token contract id")
+  assertHolderAddress(holderAddress, "holder address")
   const retval = await simulateContractRead(
     client,
     tokenContractId,
@@ -93,7 +144,9 @@ export async function getTokenBalance(
   if (!balance) {
     throw Object.assign(new Error("Invalid balance response from token contract"), { status: 422 })
   }
-  return BigInt(balance.toString())
+  // #898 — reconstruct the i128 from its halves instead of calling
+  // BigInt(int128Parts.toString()), which throws "[object Object]".
+  return i128ToBigInt(balance)
 }
 
 export interface OnChainSettlement {
@@ -145,6 +198,89 @@ export async function getOnChainSettlement(
   }
 }
 
+export interface SettlementSimulation {
+  settlementId: bigint
+  status: string
+  wouldSucceed: boolean
+  approvalWeight: bigint
+  threshold: bigint
+  settlementAmount: bigint
+  treasuryBalance: bigint
+  projectedBalance: bigint
+}
+
+/**
+ * Previews the outcome of `execute_settlement` for `settlementId` without submitting
+ * or mutating any on-chain state, by simulating a call to the treasury contract's
+ * read-only `simulate_settlement` function.
+ */
+export async function getSettlementSimulation(
+  client: SorobanClient,
+  treasuryContractId: string,
+  settlementId: bigint,
+  sourceAccount: string,
+  networkPassphrase: string,
+): Promise<SettlementSimulation> {
+  const retval = await simulateContractRead(
+    client,
+    treasuryContractId,
+    "simulate_settlement",
+    [nativeToScVal(settlementId, { type: "u64" })],
+    sourceAccount,
+    networkPassphrase,
+  )
+
+  const map = retval.map()
+  if (!map) {
+    throw Object.assign(new Error("Invalid simulate_settlement response"), { status: 422 })
+  }
+
+  const entries: Record<string, xdr.ScVal> = {}
+  for (const entry of map) {
+    const key = entry.key().sym().toString()
+    entries[key] = entry.val()
+  }
+
+  // Validate required fields are present and have expected types
+  if (!entries.settlement_id?.u64()) {
+    throw Object.assign(
+      new Error("Missing or invalid settlement_id in simulate_settlement response"),
+      { status: 422 },
+    )
+  }
+  if (!entries.status) {
+    throw Object.assign(
+      new Error("Missing status in simulate_settlement response"),
+      { status: 422 },
+    )
+  }
+  if (!entries.treasury_balance?.i128()) {
+    throw Object.assign(
+      new Error("Missing or invalid treasury_balance in simulate_settlement response"),
+      { status: 422 },
+    )
+  }
+  if (!entries.projected_balance?.i128()) {
+    throw Object.assign(
+      new Error("Missing or invalid projected_balance in simulate_settlement response"),
+      { status: 422 },
+    )
+  }
+
+  return {
+    settlementId: BigInt(entries.settlement_id.u64()!.toString()),
+    status: scValToSettlementStatus(entries.status ?? xdr.ScVal.scvVoid()),
+    wouldSucceed: entries.would_succeed?.b() ?? false,
+    approvalWeight: BigInt(entries.approval_weight?.u64()?.toString() ?? "0"),
+    threshold: BigInt(entries.threshold?.u64()?.toString() ?? "0"),
+    settlementAmount: BigInt(entries.settlement_amount?.u64()?.toString() ?? "0"),
+    // #898 — use i128ToBigInt so treasury/projected balances parse correctly.
+    // Now with proper signed integer handling for negative balances
+    treasuryBalance: i128ToBigInt(entries.treasury_balance.i128()!),
+    projectedBalance: i128ToBigInt(entries.projected_balance.i128()!),
+  }
+}
+
 export async function submitContractCall(
   client: SorobanClient,
   contractId: string,
@@ -156,7 +292,7 @@ export async function submitContractCall(
   const keypair = Keypair.fromSecret(signerSecret)
   const contract = new Contract(contractId)
   const account = await client.getAccount(keypair.publicKey())
-  const tx = new TransactionBuilder(account as any, {
+  const tx = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase,
   })
@@ -172,7 +308,30 @@ export async function submitContractCall(
     )
   }
 
-  const prepared = SorobanRpc.assembleTransaction(tx, simulated as any).build()
+  const successResponse = simulated as SorobanRpc.Api.SimulateTransactionSuccessResponse
+
+  // #895 — assembleTransaction only injects the auth entries produced during
+  // simulation when the raw result payload contains them. When the success
+  // response omits the `result` field (or its `auth` array), the assembled
+  // transaction silently drops the required authorization and the contract
+  // rejects it on submission. Guard against that here so we fail fast with a
+  // clear error instead of broadcasting an unauthorized transaction.
+  const authEntries = successResponse.result?.auth
+  if (authEntries === undefined) {
+    throw Object.assign(
+      new Error(
+        `Soroban simulation for "${method}" returned no authorization entries; ` +
+          "the transaction cannot be submitted without the required auth.",
+      ),
+      { status: 422 },
+    )
+  }
+
+  // Use the typed success response (no `as any`) so the SDK correctly attaches
+  // the simulation's Soroban transaction data and auth entries to the built
+  // transaction.
+  const prepared = SorobanRpc.assembleTransaction(tx, successResponse).build()
+
   prepared.sign(keypair)
 
   const sendResult = await client.sendTransaction(prepared)
@@ -200,4 +359,60 @@ export async function submitContractCall(
   }
 
   throw Object.assign(new Error("Transaction confirmation timeout"), { status: 504 })
+}
+
+// ---------------------------------------------------------------------------
+// Event retention
+// ---------------------------------------------------------------------------
+
+export interface RetentionWindow {
+  oldestLedger: number
+  latestLedger?: number
+}
+
+/**
+ * Recognises the error Soroban RPC returns when getEvents is asked for a
+ * ledger outside its retention window, e.g.
+ *   "startLedger must be between the oldest ledger: 1200 and the latest ledger: 9800 for this rpc instance."
+ * Returns the window when it can be read from the message, `{ oldestLedger: NaN }`
+ * when the error is a retention error without numbers, and null otherwise.
+ */
+export function parseRetentionError(err: unknown): RetentionWindow | null {
+  const message =
+    typeof err === "string"
+      ? err
+      : ((err as { message?: string })?.message ??
+        (err as { error?: { message?: string } })?.error?.message ??
+        "")
+  if (!/oldest ledger|out of (the )?retention|ledger range|before the oldest/i.test(message)) {
+    return null
+  }
+  const oldest = message.match(/oldest ledger:?\s*(\d+)/i)
+  const latest = message.match(/latest ledger:?\s*(\d+)/i)
+  return {
+    oldestLedger: oldest ? Number(oldest[1]) : NaN,
+    ...(latest ? { latestLedger: Number(latest[1]) } : {}),
+  }
+}
+
+/**
+ * Oldest ledger the RPC node still retains, from getHealth (RPC >= 21
+ * reports oldestLedger there). Returns null when the node does not report it.
+ */
+export async function getOldestRetainedLedger(
+  client: { getHealth?: () => Promise<unknown> },
+): Promise<number | null> {
+  if (!client.getHealth) return null
+  const health = (await client.getHealth()) as { oldestLedger?: number }
+  return typeof health?.oldestLedger === "number" ? health.oldestLedger : null
+}
+
+/**
+ * Ledger sequence encoded in a Soroban event paging token. Tokens look like
+ * "<toid>-<event index>" where the TOID's upper 32 bits are the ledger.
+ */
+export function ledgerFromPagingToken(token: string): number | null {
+  const toid = token.split("-")[0]
+  if (!/^\d+$/.test(toid)) return null
+  return Number(BigInt(toid) >> 32n)
 }
