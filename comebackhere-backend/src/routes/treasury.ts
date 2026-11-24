@@ -245,12 +245,10 @@ export async function executeSettlementWithBalanceCheck(
   // immediately rather than submitting again and getting a NotPending error
   // from the contract.
   if (settlement.status === "Executed") {
-    return {
-      tx_hash: "",
-      settlement_id: body.settlement_id,
-      balance_checked: "0",
-      amount_required: settlement.amount.toString(),
-    }
+    throw Object.assign(
+      new Error(`Settlement #${body.settlement_id} is not pending (status: ${settlement.status})`),
+      { status: 409 },
+    )
   }
 
   if (settlement.status !== "Pending") {

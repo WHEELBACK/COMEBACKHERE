@@ -76,7 +76,6 @@ function logRejection(req: Request, code: string, detail?: string): void {
   // eslint-disable-next-line no-console
   console.warn(`[webhook-signature] rejected code=${code} correlationId=${correlationId}${suffix}`)
 }
-=======
 
 /**
  * Middleware that captures the raw body for incoming webhook requests.

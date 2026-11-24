@@ -22,6 +22,9 @@ const EVENT_LIMIT = 100
 const MAX_PROCESSED_EVENT_IDS = 1_000
 // Maximum number of settlement writes to buffer before flushing to Mongo.
 const DB_WRITE_BATCH_SIZE = 50
+// RPC retry configuration: up to 3 attempts with 500 ms base backoff (exponential).
+const RPC_MAX_ATTEMPTS = 3
+const RPC_BASE_BACKOFF_MS = 500
 
 function topicSymbol(topic: xdr.ScVal[] | undefined, index: number): string | null {
   try {
@@ -385,123 +388,132 @@ export async function processIndexerBatch(
   let lastPagingToken = cursor.paging_token
   const newEventIds: string[] = []
   const pendingWrites: PendingWrite[] = []
+  // Track paging tokens seen within this batch to deduplicate within-batch duplicates.
+  const seenPagingTokens = new Set<string>()
 
-    const eventType = topicSymbol(event.topic, 0)
-    const txHash = typeof event.txHash === "string" ? event.txHash : ""
-    const pagingToken =
-      typeof event.pagingToken === "string" && event.pagingToken.length > 0
-        ? event.pagingToken
-        : undefined
+  for (const event of events) {
+    try {
+      const eventType = topicSymbol(event.topic, 0)
+      const txHash = typeof event.txHash === "string" ? event.txHash : ""
+      const pagingToken =
+        typeof event.pagingToken === "string" && event.pagingToken.length > 0
+          ? event.pagingToken
+          : undefined
 
-    if (pagingToken) {
-      if (seenPagingTokens.has(pagingToken)) {
-        logger.debug({ pagingToken }, "Skipping duplicate paging token in batch")
+      if (pagingToken) {
+        if (seenPagingTokens.has(pagingToken)) {
+          logger.debug({ pagingToken }, "Skipping duplicate paging token in batch")
+          continue
+        }
+        seenPagingTokens.add(pagingToken)
+        lastPagingToken = pagingToken
+      }
+
+      if (
+        eventType !== "settlement_proposed" &&
+        eventType !== "settlement_approved" &&
+        eventType !== "settlement_executed"
+      ) {
         continue
       }
-      seenPagingTokens.add(pagingToken)
-      lastPagingToken = pagingToken
-    }
 
-    if (
-      eventType !== "settlement_proposed" &&
-      eventType !== "settlement_approved" &&
-      eventType !== "settlement_executed"
-    ) {
-      continue
-    }
-
-    const rawSettlementId = valueU64(event.value, 0)
-    const settlementId = Number(rawSettlementId)
-    if (!Number.isFinite(settlementId) || settlementId < 0) {
-      logger.warn(
-        { eventType, txHash, pagingToken },
-        "Skipping treasury event with invalid settlement id",
-      )
-      continue
-    }
-
-    const eventId = buildEventId(pagingToken, txHash, eventType, settlementId)
-
-    // De-duplicate: skip events we have already applied (reorg / replay protection)
-    if (processedIds.has(eventId)) {
-      logger.debug({ eventId }, "Skipping duplicate treasury event")
-      continue
-    }
-
-    if (eventType === "settlement_proposed") {
-      const token = valueAddress(event.value, 1)
-      const amount = valueU64(event.value, 2)
-      const merchant = valueAddress(event.value, 3)
-      pendingWrites.push(() =>
-        processSettlementProposed(settlements, settlementId, token, amount, merchant, txHash),
-      )
-
-      // Dispatch signed webhook for settlement_proposed
-      const webhookUrl = process.env.WEBHOOK_URL
-      if (webhookUrl) {
-        dispatchWebhook(webhookUrl, {
-          event: "settlement_proposed",
-          settlement_id: settlementId,
-          merchant_address: merchant,
-          amount: amount.toString(),
-          token,
-          tx_hash: txHash,
-        }, undefined, fetch, { eventId }).catch((err: unknown) => {
-          logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_proposed" }, "Treasury webhook dispatch failed")
-        })
+      const rawSettlementId = valueU64(event.value, 0)
+      const settlementId = Number(rawSettlementId)
+      if (!Number.isFinite(settlementId) || settlementId < 0) {
+        logger.warn(
+          { eventType, txHash, pagingToken },
+          "Skipping treasury event with invalid settlement id",
+        )
+        continue
       }
-    } else if (eventType === "settlement_approved") {
-      const signer = valueAddress(event.value, 1)
-      const newWeight = valueU64(event.value, 3)
-      pendingWrites.push(() =>
-        processSettlementApproved(settlements, settlementId, signer, newWeight),
-      )
 
-      // Dispatch signed webhook for settlement_approved
-      const webhookUrl = process.env.WEBHOOK_URL
-      if (webhookUrl) {
-        dispatchWebhook(webhookUrl, {
-          event: "settlement_approved",
-          settlement_id: settlementId,
-          signer,
-          approval_weight: newWeight.toString(),
-          tx_hash: txHash,
-        }, undefined, fetch, { eventId }).catch((err: unknown) => {
-          logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_approved" }, "Treasury webhook dispatch failed")
-        })
+      const eventId = buildEventId(pagingToken, txHash, eventType, settlementId)
+
+      // De-duplicate: skip events we have already applied (reorg / replay protection)
+      if (processedIds.has(eventId)) {
+        logger.debug({ eventId }, "Skipping duplicate treasury event")
+        continue
       }
-    } else if (eventType === "settlement_executed") {
-      pendingWrites.push(() =>
-        processSettlementExecuted(settlements, settlementId, txHash),
-      )
 
-      // Treasury balances changed on-chain; drop the cached copy so the next
-      // GET /api/treasury/balances reads fresh data instead of waiting for TTL.
-      invalidateBalanceCache(`settlement_executed id=${settlementId} tx=${txHash}`)
+      if (eventType === "settlement_proposed") {
+        const token = valueAddress(event.value, 1)
+        const amount = valueU64(event.value, 2)
+        const merchant = valueAddress(event.value, 3)
+        pendingWrites.push(() =>
+          processSettlementProposed(settlements, settlementId, token, amount, merchant, txHash),
+        )
 
-      // Dispatch signed webhook for settlement_executed.
-      // IMPORTANT: read the status from the DB record we just wrote so the
-      // webhook always reflects the current, authoritative status ("Executed")
-      // and never carries a stale in-memory value from before the DB update.
-      const webhookUrl = process.env.WEBHOOK_URL
-      if (webhookUrl) {
-        // Defer the read until after the write is flushed so the webhook always
-        // reflects the authoritative post-write state.
-        pendingWrites.push(async () => {
-          const updatedRecord = await settlements.findOne({ id: settlementId })
+        // Dispatch signed webhook for settlement_proposed
+        const webhookUrl = process.env.WEBHOOK_URL
+        if (webhookUrl) {
           dispatchWebhook(webhookUrl, {
-            event: "settlement_executed",
+            event: "settlement_proposed",
             settlement_id: settlementId,
-            status: updatedRecord?.status ?? "Executed",
-            merchant_address: updatedRecord?.merchant_address ?? "",
-            amount: updatedRecord?.amount ?? "0",
-            token: updatedRecord?.token ?? "",
+            merchant_address: merchant,
+            amount: amount.toString(),
+            token,
             tx_hash: txHash,
           }, undefined, fetch, { eventId }).catch((err: unknown) => {
-            logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_executed" }, "Treasury webhook dispatch failed")
+            logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_proposed" }, "Treasury webhook dispatch failed")
           })
-        })
+        }
+      } else if (eventType === "settlement_approved") {
+        const signer = valueAddress(event.value, 1)
+        const newWeight = valueU64(event.value, 3)
+        pendingWrites.push(() =>
+          processSettlementApproved(settlements, settlementId, signer, newWeight),
+        )
+
+        // Dispatch signed webhook for settlement_approved
+        const webhookUrl = process.env.WEBHOOK_URL
+        if (webhookUrl) {
+          dispatchWebhook(webhookUrl, {
+            event: "settlement_approved",
+            settlement_id: settlementId,
+            signer,
+            approval_weight: newWeight.toString(),
+            tx_hash: txHash,
+          }, undefined, fetch, { eventId }).catch((err: unknown) => {
+            logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_approved" }, "Treasury webhook dispatch failed")
+          })
+        }
+      } else if (eventType === "settlement_executed") {
+        pendingWrites.push(() =>
+          processSettlementExecuted(settlements, settlementId, txHash),
+        )
+
+        // Treasury balances changed on-chain; drop the cached copy so the next
+        // GET /api/treasury/balances reads fresh data instead of waiting for TTL.
+        invalidateBalanceCache(`settlement_executed id=${settlementId} tx=${txHash}`)
+
+        // Dispatch signed webhook for settlement_executed.
+        // IMPORTANT: read the status from the DB record we just wrote so the
+        // webhook always reflects the current, authoritative status ("Executed")
+        // and never carries a stale in-memory value from before the DB update.
+        const webhookUrl = process.env.WEBHOOK_URL
+        if (webhookUrl) {
+          // Defer the read until after the write is flushed so the webhook always
+          // reflects the authoritative post-write state.
+          pendingWrites.push(async () => {
+            const updatedRecord = await settlements.findOne({ id: settlementId })
+            dispatchWebhook(webhookUrl, {
+              event: "settlement_executed",
+              settlement_id: settlementId,
+              status: updatedRecord?.status ?? "Executed",
+              merchant_address: updatedRecord?.merchant_address ?? "",
+              amount: updatedRecord?.amount ?? "0",
+              token: updatedRecord?.token ?? "",
+              tx_hash: txHash,
+            }, undefined, fetch, { eventId }).catch((err: unknown) => {
+              logger.error({ errorName: err instanceof Error ? err.name : "UnknownError", eventType: "settlement_executed" }, "Treasury webhook dispatch failed")
+            })
+          })
+        }
       }
+
+      processedIds.add(eventId)
+      newEventIds.push(eventId)
+      processed++
     } catch (err) {
       // A single malformed event must not abort the whole batch. Log and move
       // on; the cursor is not advanced past this event's paging token so it
@@ -509,18 +521,11 @@ export async function processIndexerBatch(
       logger.error(
         {
           errorName: err instanceof Error ? err.name : "UnknownError",
-          eventType,
-          settlementId,
-          eventId,
         },
         "Treasury indexer failed to process event",
       )
       continue
     }
-
-    processedIds.add(eventId)
-    newEventIds.push(eventId)
-    processed++
   }
 
   // Flush all buffered writes in bounded chunks before advancing the cursor so

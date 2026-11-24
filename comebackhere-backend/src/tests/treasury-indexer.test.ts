@@ -320,7 +320,7 @@ describe("processIndexerBatch — error handling", () => {
   it("propagates errors from the Soroban client getEvents call", async () => {
     const db = makeDatabase(makeMockCursor())
     const client = makeMockClient([])
-    ;(client.getEvents as any).mockRejectedValueOnce(new Error("rpc unavailable"))
+    ;(client.getEvents as any).mockRejectedValue(new Error("rpc unavailable"))
 
     await expect(processIndexerBatch(client, CONTRACT_ID, db)).rejects.toThrow("rpc unavailable")
     expect((db as any)._settlements.updateOne).not.toHaveBeenCalled()
@@ -350,11 +350,11 @@ describe("processIndexerBatch — error handling", () => {
     const db = makeDatabase(makeMockCursor())
     const client = makeMockClient([])
 
-    ;(client.getEvents as any).mockRejectedValueOnce(new Error("transient"))
+    ;(client.getEvents as any).mockRejectedValue(new Error("transient"))
     await expect(processIndexerBatch(client, CONTRACT_ID, db)).rejects.toThrow("transient")
 
     const event = makeEvent({ pagingToken: "tok-recover", txHash: "tx-recover", settlementId: 42 })
-    ;(client.getEvents as any).mockResolvedValueOnce({ events: [event], latestLedger: 900 })
+    ;(client.getEvents as any).mockResolvedValue({ events: [event], latestLedger: 900 })
 
     const count = await processIndexerBatch(client, CONTRACT_ID, db)
     expect(count).toBe(1)

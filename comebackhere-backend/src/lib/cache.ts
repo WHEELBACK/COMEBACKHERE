@@ -158,6 +158,8 @@ export function setBalanceCache(data: TreasuryBalances): void {
 
 /** Evicts cached balances so the next GET /balances re-reads them from RPC. */
 export function invalidateBalanceCache(reason?: string): boolean {
+  // eslint-disable-next-line no-console
+  console.log(`[cache] invalidated key=${BALANCE_CACHE_KEY}${reason ? ` reason=${reason}` : ""}`)
   return invalidateCacheKey(BALANCE_CACHE_KEY, reason)
 }
 

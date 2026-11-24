@@ -114,7 +114,6 @@ export const webhookPayloadSchema = z
   .refine((payload) => payload.invoice_id !== undefined || payload.settlement_id !== undefined, {
     message: "either invoice_id or settlement_id is required",
   })
-=======
 
 export const invoiceIdParamSchema = z.object({
   id: z.string().regex(/^\d+$/, "id must be a positive integer"),
