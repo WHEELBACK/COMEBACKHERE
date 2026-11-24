@@ -4,3 +4,12 @@
 artifacts/addresses.json
 coverage/
 node_modules/
+dist/
+*.log
+.DS_Store
+**/__snapshots__/
+*.snap
+*.tsbuildinfo
+.turbo/
+.cache/
+tmp/
