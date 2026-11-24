@@ -367,3 +367,6 @@ Before starting the stack, ensure your local `.env` (or service-specific `.env` 
 
 <!-- handsoff-issue-1033 -->
 - #1033: feat(frontend): add copy-to-clipboard feedback tooltips across merchant API key displays
+
+<!-- handsoff-issue-1041 -->
+- #1041: security(invoice-settlement): harden authentication and input boundary checks in invoice-settlement to protect against injection and unauthorized access
