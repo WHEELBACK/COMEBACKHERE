@@ -1,163 +1,119 @@
-import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
-import DashboardLayout from "./components/Dashboard/DashboardLayout";
-import SettlementProposalForm from "./components/SettlementProposal/SettlementProposalForm";
-import DisputeVotingPanel from "./components/DisputeVoting/DisputeVotingPanel";
-import SignerManagement from "./components/SignerManagement/SignerManagement";
-import ABIExplorer from "./components/ABIExplorer";
-import InvoiceSearchFilter from "./components/InvoiceSearchFilter";
-import { EmptyState, EmptyStateIcon } from "./components/EmptyState/EmptyState";
-import { ErrorBoundary } from "./components/ErrorBoundary";
-import OnboardingWizard from "./components/OnboardingWizard/OnboardingWizard";
-import GraceWindowSettings from "./components/GraceWindowSettings/GraceWindowSettings";
-import SettlementDetail from "./components/SettlementDetail/SettlementDetail";
-import OnHoldSettlements from "./components/OnHoldSettlements/OnHoldSettlements";
-import TreasuryManagerPage from "./components/TreasuryManagerPage/TreasuryManagerPage";
-import NetworkMismatchBanner from "./components/NetworkMismatchBanner";
-import ThresholdConfig from "./components/ThresholdConfig/ThresholdConfig";
-import { ThemeProvider, useTheme } from "./theme";
-import { Invoice } from "./types";
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 
-// Placeholder data — replace with real API hook when the invoices endpoint is ready
-const MOCK_INVOICES: Invoice[] = [];
+const THEME_STORAGE_KEY = 'theme';
 
-function InvoicesPage() {
-  const navigate = useNavigate();
-  if (MOCK_INVOICES.length === 0) {
-    return (
-      <section>
-        <h3 style={{ marginBottom: 16 }}>Invoices</h3>
-        <EmptyState
-          icon={<EmptyStateIcon />}
-          title="No Invoices Yet"
-          description="No invoices have been created. Propose your first settlement to get started."
-          action={{
-            label: "Propose a Settlement",
-            onClick: () => navigate("/settlements"),
-          }}
-        />
-      </section>
-    );
+// Analytics dashboard charts pull in Chart.js / Recharts (~300KB+). Load them
+// on demand so they stay out of the initial bundle.
+const AnalyticsDashboard = lazy(() => import('./components/analytics/AnalyticsDashboard'));
+
+type Theme = 'light' | 'dark';
+
+function getSystemTheme(): Theme {
+  if (typeof window !== 'undefined' && window.matchMedia) {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
+  return 'light';
+}
+
+function getStoredTheme(): Theme | null {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === 'light' || stored === 'dark') {
+      return stored;
+    }
+  } catch {
+    // localStorage may be unavailable (private mode, SSR)
+  }
+  return null;
+}
+
+function applyTheme(theme: Theme) {
+  const root = document.documentElement;
+  if (theme === 'dark') {
+    root.classList.add('dark');
+  } else {
+    root.classList.remove('dark');
+  }
+}
+
+function AnalyticsSkeleton() {
   return (
-    <section>
-      <h3 style={{ marginBottom: 16 }}>Invoices</h3>
-      <InvoiceSearchFilter invoices={MOCK_INVOICES} />
-    </section>
+    <div
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label="Loading analytics dashboard"
+      className="space-y-4"
+    >
+      <div className="h-6 w-48 animate-pulse rounded bg-gray-200 dark:bg-gray-700" />
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {[0, 1, 2, 3].map((index) => (
+          <div
+            key={index}
+            className="h-64 animate-pulse rounded-lg bg-gray-200 dark:bg-gray-700"
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 
-function SettlementsPage() {
-  return (
-    <ErrorBoundary fallbackTitle="Failed to load settlements">
-      <SettlementProposalForm />
-    </ErrorBoundary>
-  );
-}
+function App() {
+  const [theme, setTheme] = useState<Theme>(() => getStoredTheme() ?? getSystemTheme());
 
-function SettlementDetailPage() {
-  return (
-    <ErrorBoundary fallbackTitle="Failed to load settlement detail">
-      <SettlementDetail
-        settlement={{ id: 0, merchant_address: "", amount: "0", approvals: [], approval_weight: 0, status: "Pending", hold_reason: null }}
-        threshold={2}
-        signers={[]}
-      />
-    </ErrorBoundary>
-  );
-}
+  // Apply the theme to the root element whenever it changes.
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
 
-function DisputesPage() {
-  const navigate = useNavigate();
-  return (
-    <ErrorBoundary fallbackTitle="Failed to load disputes">
-      <DisputeVotingPanel onNavigateToSettlements={() => navigate("/settlements")} />
-    </ErrorBoundary>
-  );
-}
+  // Sync with the system preference when no explicit override is stored.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) {
+      return;
+    }
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleChange = (event: MediaQueryListEvent) => {
+      if (getStoredTheme() === null) {
+        setTheme(event.matches ? 'dark' : 'light');
+      }
+    };
+    mediaQuery.addEventListener('change', handleChange);
+    return () => mediaQuery.removeEventListener('change', handleChange);
+  }, []);
 
-function SignersPage() {
-  return (
-    <ErrorBoundary fallbackTitle="Failed to load signer management">
-      <SignerManagement />
-    </ErrorBoundary>
-  );
-}
-
-function OnHoldPage() {
-  const navigate = useNavigate();
-  return (
-    <ErrorBoundary fallbackTitle="Failed to load on-hold settlements">
-      <OnHoldSettlements onNavigateToSettlements={() => navigate("/settlements")} />
-    </ErrorBoundary>
-  );
-}
-
-function TreasuryPage() {
-  return (
-    <ErrorBoundary fallbackTitle="Failed to load treasury">
-      <TreasuryManagerPage />
-    </ErrorBoundary>
-  );
-}
-
-function SettingsPage() {
-  const { theme, toggleTheme } = useTheme();
-  const nextTheme = theme === "dark" ? "light" : "dark";
+  const toggleTheme = useCallback(() => {
+    setTheme((current) => {
+      const next: Theme = current === 'dark' ? 'light' : 'dark';
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, next);
+      } catch {
+        // Ignore persistence failures; theme still switches immediately.
+      }
+      return next;
+    });
+  }, []);
 
   return (
-    <>
-      <GraceWindowSettings />
-      <ThresholdConfig />
-      <section className="settings-panel">
-        <div>
-          <h3 className="settings-panel__title">Appearance</h3>
-          <p className="settings-panel__description">
-            Current theme: {theme}. Your choice is remembered on this device.
-          </p>
-        </div>
+    <div className="min-h-screen bg-white text-gray-900 dark:bg-gray-900 dark:text-gray-100">
+      <header className="flex items-center justify-between border-b border-gray-200 px-4 py-3 dark:border-gray-700">
+        <h1 className="text-lg font-semibold">Merchant Dashboard</h1>
         <button
           type="button"
-          className="theme-toggle theme-toggle--wide"
           onClick={toggleTheme}
-          aria-label={`Switch to ${nextTheme} theme`}
+          aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          aria-pressed={theme === 'dark'}
+          className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium hover:bg-gray-100 dark:border-gray-600 dark:hover:bg-gray-800"
         >
-          <span>Use {nextTheme} theme</span>
+          {theme === 'dark' ? 'Light mode' : 'Dark mode'}
         </button>
-      </section>
-    </>
+      </header>
+      <main className="px-4 py-6">
+        <Suspense fallback={<AnalyticsSkeleton />}>
+          <AnalyticsDashboard />
+        </Suspense>
+      </main>
+    </div>
   );
 }
 
-function OnboardingPage() {
-  const navigate = useNavigate();
-  return <OnboardingWizard onComplete={() => navigate("/invoices")} />;
-}
-
-function AppRoutes() {
-  return (
-    <Routes>
-      <Route path="onboarding" element={<OnboardingPage />} />
-      <Route element={<DashboardLayout />}>
-        <Route index element={<Navigate to="/invoices" replace />} />
-        <Route path="invoices" element={<InvoicesPage />} />
-        <Route path="settlements" element={<SettlementsPage />} />
-        <Route path="settlements/:id" element={<SettlementDetailPage />} />
-        <Route path="on-hold" element={<OnHoldPage />} />
-        <Route path="treasury" element={<TreasuryPage />} />
-        <Route path="disputes" element={<DisputesPage />} />
-        <Route path="signers" element={<SignersPage />} />
-        <Route path="settings" element={<SettingsPage />} />
-        <Route path="abi" element={<ErrorBoundary fallbackTitle="Failed to load ABI explorer"><ABIExplorer /></ErrorBoundary>} />
-      </Route>
-    </Routes>
-  );
-}
-
-export default function App() {
-  return (
-    <ThemeProvider>
-      <NetworkMismatchBanner />
-      <AppRoutes />
-    </ThemeProvider>
-  );
-}
+export default App;

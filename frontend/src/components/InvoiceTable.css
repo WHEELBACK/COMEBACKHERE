@@ -1,0 +1,76 @@
+/* Invoice table layout — prevents CLS on mobile viewports (<640px) */
+
+.invoice-table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.invoice-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.invoice-table th,
+.invoice-table td {
+  min-width: 0;
+  padding: 0.75rem 1rem;
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Explicit column constraints so cells never reflow as content loads */
+.invoice-table .col-id {
+  min-width: 8rem;
+  width: 8rem;
+}
+
+.invoice-table .col-amount {
+  min-width: 7rem;
+  width: 7rem;
+  text-align: right;
+}
+
+.invoice-table .col-date {
+  min-width: 9rem;
+  width: 9rem;
+}
+
+.invoice-table .col-status {
+  min-width: 7rem;
+  width: 7rem;
+}
+
+/* Status badge: fixed box so text swap does not shift layout */
+.invoice-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 5.5rem;
+  height: 1.5rem;
+  padding: 0 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  line-height: 1;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+
+@media (max-width: 639px) {
+  .invoice-table-wrapper {
+    overflow-x: auto;
+  }
+
+  .invoice-table {
+    min-width: 40rem;
+  }
+
+  .invoice-table th,
+  .invoice-table td {
+    padding: 0.5rem 0.75rem;
+  }
+}
