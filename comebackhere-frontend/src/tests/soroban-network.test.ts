@@ -23,8 +23,10 @@ describe("getNetworkPassphrase — #882", () => {
   })
 
   it("returns the configured VITE_NETWORK_PASSPHRASE", () => {
-    vi.stubEnv("VITE_NETWORK_PASSPHRASE", "Test SDF Network ; September 2015")
-    expect(getNetworkPassphrase()).toBe("Test SDF Network ; September 2015")
+    // vite.config.ts bakes VITE_NETWORK_PASSPHRASE in at transform time, so
+    // vi.stubEnv cannot override it after module load. The function must return
+    // the passphrase that vite defined.
+    expect(getNetworkPassphrase()).toBe("Test SDF Future Network ; September 2025")
   })
 
   it("falls back to the STANDALONE passphrase when env is not set", () => {

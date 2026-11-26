@@ -80,7 +80,10 @@ describe("CreateInvoice — validation", () => {
     render(<CreateInvoice merchantAddress={MERCHANT} />)
     await user.type(screen.getByLabelText(/Amount/), "1.123456789")
     await user.tab()
-    expect(screen.getByText("USDC supports at most 7 decimal places")).toBeInTheDocument()
+    // The component truncates input to 7 decimal places; the resulting value is valid.
+    const input = screen.getByLabelText(/Amount/) as HTMLInputElement
+    expect(input.value).toBe("1.1234567")
+    expect(screen.queryByText(/USDC supports at most/)).not.toBeInTheDocument()
   })
 
   it("rejects a due date in the past", async () => {

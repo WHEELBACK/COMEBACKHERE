@@ -53,6 +53,7 @@ const en = {
     operationFailed: "Operation failed: {{error}}",
     transactionHash: "Transaction hash:",
     invoiceActionsAriaLabel: "Invoice actions",
+    connectToPayInvoice: "Connect wallet to pay invoice",
     disputeInProgress: "Dispute in progress.",
     disputeWarning:
       "A refund has been requested for this invoice, which opens an escrow dispute and holds the funds. Payment, cancellation, and escrow release are unavailable until the dispute is resolved.",

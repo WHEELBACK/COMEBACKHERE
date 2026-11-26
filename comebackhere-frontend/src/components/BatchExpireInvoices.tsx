@@ -61,10 +61,13 @@ export function BatchExpireInvoices({ walletAddress, walletNotReadyReason = null
     setConfirmation({ show: false, invoiceIds: [], invoiceCount: 0 })
     setResultSummary(null)
 
-    const ids = idInput
+    const rawIds = idInput
       .split(",")
       .map((s) => Number(s.trim()))
       .filter((n) => Number.isFinite(n) && n > 0)
+
+    // Deduplicate while preserving order
+    const ids = Array.from(new Set(rawIds))
 
     if (ids.length === 0) {
       setLoadError("Enter at least one valid invoice ID.")
@@ -321,7 +324,7 @@ export function BatchExpireInvoices({ walletAddress, walletNotReadyReason = null
                 className="btn btn--danger"
                 onClick={handleBatchExpire}
                 disabled={submitting}
-                aria-label={submitting ? "Processing batch expiration" : "Confirm batch expiration"}
+                aria-label={submitting ? "Processing batch expiration" : "Confirm Expiration"}
               >
                 {submitting ? "Processing..." : "Confirm Expiration"}
               </button>
@@ -337,7 +340,7 @@ export function BatchExpireInvoices({ walletAddress, walletNotReadyReason = null
               className="btn btn--danger"
               onClick={handleShowConfirmation}
               disabled={submitting || selected.size === 0 || !walletAddress || !!walletNotReadyReason}
-              aria-label={`Expire ${selected.size} selected invoices`}
+              aria-label={`Batch Expire (${selected.size} selected)`}
             >
               {submitting
                 ? "Expiring..."

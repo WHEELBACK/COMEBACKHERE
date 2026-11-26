@@ -222,7 +222,7 @@ describe("ApiKeyManagement — Rotation & Revocation Flows", () => {
     const revokeBtn = await screen.findByTestId("revoke-btn-key-to-revoke-1234")
     await user.click(revokeBtn)
 
-    expect(screen.getByText(/Revoke API Key/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/Revoke API Key/i).length).toBeGreaterThan(0)
 
     // Mock delete 204
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }))

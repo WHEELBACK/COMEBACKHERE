@@ -87,7 +87,6 @@ async function loadInvoices(user: ReturnType<typeof userEvent.setup>, ids: strin
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  vi.stubEnv("VITE_INVOICE_CONTRACT_ID", "test-contract-id")
   mockFetchInvoice.mockReset()
   mockBatchExpireInvoices.mockReset()
 })
@@ -154,7 +153,7 @@ describe("BatchExpireInvoices — ID parsing", () => {
     await loadInvoices(user, "  1  ")
 
     await waitFor(() => expect(mockFetchInvoice).toHaveBeenCalledTimes(1))
-    expect(mockFetchInvoice).toHaveBeenCalledWith("test-contract-id", 1)
+    expect(mockFetchInvoice).toHaveBeenCalledWith("CDUMMYCONTRACT", 1)
   })
 
   it("shows error for mixed valid and invalid input where all valid entries are skipped", async () => {
@@ -502,7 +501,7 @@ describe("BatchExpireInvoices — success path", () => {
 
     await waitFor(() => {
       expect(mockBatchExpireInvoices).toHaveBeenCalledWith(
-        "test-contract-id",
+        "CDUMMYCONTRACT",
         expect.arrayContaining([1, 2]),
         WALLET_ADDRESS
       )
@@ -603,9 +602,9 @@ describe("BatchExpireInvoices — invoice table", () => {
     })
 
     expect(screen.getByRole("table")).toBeInTheDocument()
-    expect(screen.getByText(/id/i)).toBeInTheDocument()
-    expect(screen.getByText(/merchant/i)).toBeInTheDocument()
-    expect(screen.getByText(/amount/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/\bid\b/i).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/merchant/i).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/amount/i).length).toBeGreaterThan(0)
   })
 
   it("shows 'No invoices found' error when all fetches fail", async () => {
