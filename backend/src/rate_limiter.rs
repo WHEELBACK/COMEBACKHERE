@@ -19,11 +19,13 @@ use axum::{
 use serde_json::json;
 use std::{
     collections::HashMap,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     task::{Context, Poll},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+use crate::TrustedProxies;
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -123,11 +125,25 @@ pub fn new_store() -> RateLimiterStore {
 pub struct RateLimiterLayer {
     store: RateLimiterStore,
     config: RateLimitConfig,
+    trusted_proxies: TrustedProxies,
 }
 
 impl RateLimiterLayer {
     pub fn new(store: RateLimiterStore, config: RateLimitConfig) -> Self {
-        Self { store, config }
+        Self {
+            store,
+            config,
+            trusted_proxies: TrustedProxies::default(),
+        }
+    }
+
+    /// Set the trusted proxy list used to decide whether `X-Forwarded-For`
+    /// should be honoured.  Only connections from a trusted peer will have
+    /// their forwarded header accepted; all other callers are keyed by their
+    /// direct socket address.
+    pub fn with_trusted_proxies(mut self, trusted_proxies: TrustedProxies) -> Self {
+        self.trusted_proxies = trusted_proxies;
+        self
     }
 }
 
@@ -139,6 +155,7 @@ impl<S> tower::Layer<S> for RateLimiterLayer {
             inner,
             store: self.store.clone(),
             config: self.config,
+            trusted_proxies: self.trusted_proxies.clone(),
         }
     }
 }
@@ -150,6 +167,7 @@ pub struct RateLimiterMiddleware<S> {
     inner: S,
     store: RateLimiterStore,
     config: RateLimitConfig,
+    trusted_proxies: TrustedProxies,
 }
 
 impl<S> tower::Service<Request<Body>> for RateLimiterMiddleware<S>
@@ -168,7 +186,7 @@ where
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
-        let ip = extract_ip(&req);
+        let ip = extract_ip(&req, &self.trusted_proxies);
 
         let now = Instant::now();
         let config = self.config;
@@ -215,23 +233,34 @@ where
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-fn extract_ip<B>(req: &Request<B>) -> String {
-    if let Some(forwarded) = req
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(first) = forwarded.split(',').next() {
-            let trimmed = first.trim().to_string();
-            if !trimmed.is_empty() {
-                return trimmed;
+fn extract_ip<B>(req: &Request<B>, trusted_proxies: &TrustedProxies) -> String {
+    let peer_ip: Option<IpAddr> = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip());
+
+    // Only honour X-Forwarded-For when the direct connection peer is a
+    // configured trusted proxy; otherwise an attacker could spoof the header
+    // to bypass per-IP rate limiting.
+    let peer_is_trusted = peer_ip.map(|ip| trusted_proxies.is_trusted(ip)).unwrap_or(false);
+
+    if peer_is_trusted {
+        if let Some(forwarded) = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(first) = forwarded.split(',').next() {
+                let trimmed = first.trim().to_string();
+                if !trimmed.is_empty() {
+                    return trimmed;
+                }
             }
         }
     }
 
-    req.extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip().to_string())
+    peer_ip
+        .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -407,9 +436,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_x_forwarded_for_used_for_ip_key() {
-        // Limit: 1 request / 60 s. Each IP has its own independent bucket.
+        // Without trusted proxies, XFF is ignored and all requests from the
+        // test server share the same socket-address bucket.  Verify that
+        // different XFF values do not create separate buckets when no trusted
+        // proxy is configured.
+        use axum::http::header::{HeaderName, HeaderValue};
+
+        // ── Without trusted proxies: XFF is ignored ──────────────────────
         let config = RateLimitConfig {
-            max_requests: 1,
+            max_requests: 10, // generous limit so XFF differences won't matter
             window: Duration::from_secs(60),
         };
         let store = new_store();
@@ -419,32 +454,39 @@ mod tests {
             .layer(layer);
         let server = TestServer::new(app).expect("test server should start");
 
-        use axum::http::header::{HeaderName, HeaderValue};
         let xff = HeaderName::from_static("x-forwarded-for");
-
-        // IP A uses its allowance.
-        let resp_a1 = server
+        // Even with different XFF values the bucket is shared (same socket peer).
+        let resp_a = server
             .get("/ping")
             .add_header(xff.clone(), HeaderValue::from_static("1.2.3.4"))
             .await;
-        assert_ne!(resp_a1.status_code(), StatusCode::TOO_MANY_REQUESTS);
-
-        // IP A is now blocked.
-        let resp_a2 = server
-            .get("/ping")
-            .add_header(xff.clone(), HeaderValue::from_static("1.2.3.4"))
-            .await;
-        assert_eq!(resp_a2.status_code(), StatusCode::TOO_MANY_REQUESTS);
-
-        // IP B still has its own fresh allowance.
         let resp_b = server
             .get("/ping")
             .add_header(xff.clone(), HeaderValue::from_static("5.6.7.8"))
             .await;
-        assert_ne!(
-            resp_b.status_code(),
-            StatusCode::TOO_MANY_REQUESTS,
-            "different IP should have its own independent bucket"
+        assert_ne!(resp_a.status_code(), StatusCode::TOO_MANY_REQUESTS);
+        assert_ne!(resp_b.status_code(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Both share the same bucket so X-RateLimit-Remaining decrements.
+        let rem_a: u64 = resp_a
+            .headers()
+            .get("x-ratelimit-remaining")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let rem_b: u64 = resp_b
+            .headers()
+            .get("x-ratelimit-remaining")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            rem_b < rem_a,
+            "without trusted proxies different XFF values share the same bucket (rem_a={rem_a}, rem_b={rem_b})"
         );
     }
 
@@ -458,7 +500,11 @@ mod tests {
             HeaderName::from_static("x-forwarded-for"),
             HeaderValue::from_static("1.2.3.4, 5.6.7.8, 9.9.9.9"),
         );
-        assert_eq!(extract_ip(&req), "1.2.3.4");
+        // Peer must be trusted for XFF to be honoured.
+        let peer: SocketAddr = "10.0.0.1:0".parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(peer));
+        let trusted = TrustedProxies::new(vec!["10.0.0.1".parse().unwrap()]);
+        assert_eq!(extract_ip(&req, &trusted), "1.2.3.4");
     }
 
     #[test]
@@ -469,7 +515,10 @@ mod tests {
             HeaderName::from_static("x-forwarded-for"),
             HeaderValue::from_static("  10.0.0.1  , 192.168.0.2"),
         );
-        assert_eq!(extract_ip(&req), "10.0.0.1");
+        let peer: SocketAddr = "10.0.0.2:0".parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(peer));
+        let trusted = TrustedProxies::new(vec!["10.0.0.2".parse().unwrap()]);
+        assert_eq!(extract_ip(&req, &trusted), "10.0.0.1");
     }
 
     #[test]
@@ -477,7 +526,7 @@ mod tests {
         let mut req = Request::new(Body::from(""));
         let addr: SocketAddr = "203.0.113.9:1234".parse().unwrap();
         req.extensions_mut().insert(ConnectInfo(addr));
-        assert_eq!(extract_ip(&req), "203.0.113.9");
+        assert_eq!(extract_ip(&req, &TrustedProxies::default()), "203.0.113.9");
     }
 
     #[test]
@@ -490,13 +539,32 @@ mod tests {
         );
         let addr: SocketAddr = "198.51.100.7:9999".parse().unwrap();
         req.extensions_mut().insert(ConnectInfo(addr));
-        assert_eq!(extract_ip(&req), "198.51.100.7");
+        let trusted = TrustedProxies::new(vec!["198.51.100.7".parse().unwrap()]);
+        assert_eq!(extract_ip(&req, &trusted), "198.51.100.7");
     }
 
     #[test]
     fn test_extract_ip_returns_unknown_without_xff_or_connect_info() {
         let req = Request::new(Body::from(""));
-        assert_eq!(extract_ip(&req), "unknown");
+        assert_eq!(extract_ip(&req, &TrustedProxies::default()), "unknown");
+    }
+
+    #[test]
+    fn test_extract_ip_ignores_xff_from_untrusted_peer() {
+        use axum::http::header::{HeaderName, HeaderValue};
+        let mut req = Request::new(Body::from(""));
+        req.headers_mut().insert(
+            HeaderName::from_static("x-forwarded-for"),
+            HeaderValue::from_static("1.2.3.4"),
+        );
+        // Peer is NOT in the trusted list, so XFF must be ignored.
+        let addr: SocketAddr = "9.9.9.9:1234".parse().unwrap();
+        req.extensions_mut().insert(ConnectInfo(addr));
+        assert_eq!(
+            extract_ip(&req, &TrustedProxies::default()),
+            "9.9.9.9",
+            "XFF from an untrusted peer must be ignored"
+        );
     }
 
     // ── Bucket rolling window ───────────────────────────────────────────────
