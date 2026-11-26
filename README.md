@@ -364,3 +364,6 @@ Before starting the stack, ensure your local `.env` (or service-specific `.env` 
 - #982: Add merchant API-key management to the frontend
 <!-- handsoff-issue-954 -->
 - #954: Version contract storage schemas and test migrations
+
+<!-- handsoff-issue-1043 -->
+- #1043: feat(merchant-portal): add comprehensive validation and error handling for merchant-portal to enhance system resilience

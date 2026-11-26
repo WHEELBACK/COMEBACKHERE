@@ -61,6 +61,9 @@ jobs:
       - name: Run Playwright tests
         run: npx playwright test --project=chromium
 
+      - name: Run checkout flow E2E tests
+        run: npx playwright test --project=chromium tests/e2e/checkout.spec.ts
+
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.7.0
