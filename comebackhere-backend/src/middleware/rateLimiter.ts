@@ -1,5 +1,6 @@
 import { type Request, type Response, type NextFunction } from "express"
 import { RateLimiterRedis, RateLimiterMemory, type RateLimiterAbstract } from "rate-limiter-flexible"
+import { createHash } from "crypto"
 import Redis from "ioredis"
 import { RateLimitError } from "../lib/errors.js"
 
@@ -14,19 +15,29 @@ import { RateLimitError } from "../lib/errors.js"
  * typo in the environment can never silently disable the limiter.
  */
 function getConfig() {
-  const positiveInt = (name: string, fallback: number): number => {
+  const positiveInt = (name: string, fallback: number, max: number): number => {
     const raw = process.env[name]
     if (raw === undefined || raw === "") return fallback
     const parsed = Number(raw)
-    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) return fallback
+    // Clamp absurdly large values so a bad env var cannot exhaust memory or
+    // overflow downstream arithmetic (e.g. msBeforeNext calculations).
+    return Math.min(parsed, max)
   }
 
   return {
-    ipPoints: positiveInt("RATE_LIMIT_POINTS", 60),
-    apiKeyPoints: positiveInt("RATE_LIMIT_API_KEY_POINTS", 600),
-    duration: positiveInt("RATE_LIMIT_DURATION", 60),
+    ipPoints: positiveInt("RATE_LIMIT_POINTS", 60, 1_000_000),
+    apiKeyPoints: positiveInt("RATE_LIMIT_API_KEY_POINTS", 600, 1_000_000),
+    duration: positiveInt("RATE_LIMIT_DURATION", 60, 86_400),
   }
 }
+
+/**
+ * Upper bound on distinct keys tracked by the in-memory limiter. Without a cap
+ * a flood of unique IPs / API keys would grow the internal map unbounded and
+ * eventually exhaust memory under peak load.
+ */
+const MEMORY_LIMITER_MAX_KEYS = 10_000
 
 // Lazily created singletons — avoid connecting to Redis at import time (important for tests).
 // One limiter per tier so each tier enforces its own documented budget; a single
@@ -49,8 +60,15 @@ function getRedisClient(): Redis | null {
   if (_redisClient && _redisUrl === redisUrl) return _redisClient
 
   const client = new Redis(redisUrl, {
+    // Never queue commands while disconnected: under high load a growing
+    // offline queue is a memory leak and adds latency instead of failing fast.
     enableOfflineQueue: false,
     lazyConnect: true,
+    // Bounded retries / timeouts so a degraded Redis cannot stall requests.
+    maxRetriesPerRequest: 1,
+    connectTimeout: 2_000,
+    commandTimeout: 1_000,
+    retryStrategy: (times: number) => (times > 5 ? null : Math.min(times * 200, 2_000)),
   })
 
   // If Redis becomes unavailable, fall through without blocking requests
@@ -80,6 +98,26 @@ function createLimiter(points: number, duration: number): RateLimiterAbstract {
 
   // No Redis configured (local dev / tests) — use memory limiter
   return new RateLimiterMemory({ points, duration })
+}
+
+/**
+ * Evicts the oldest entries from the in-memory limiter once it exceeds
+ * {@link MEMORY_LIMITER_MAX_KEYS}, keeping memory bounded under key floods.
+ * `rate-limiter-flexible` exposes its store as `_memoryStorage`; we guard the
+ * access so a future version change degrades to a no-op instead of throwing.
+ */
+function boundMemoryLimiter(limiter: RateLimiterAbstract): void {
+  const storage = (limiter as unknown as { _memoryStorage?: Map<string, unknown> })._memoryStorage
+  if (!(storage instanceof Map)) return
+  if (storage.size <= MEMORY_LIMITER_MAX_KEYS) return
+
+  const excess = storage.size - MEMORY_LIMITER_MAX_KEYS
+  let removed = 0
+  for (const key of storage.keys()) {
+    if (removed >= excess) break
+    storage.delete(key)
+    removed++
+  }
 }
 
 /** Returns (and memoises) the rate limiter for the requested tier. */
@@ -147,7 +185,8 @@ export function rateLimitMiddleware(
     req.socket.remoteAddress ??
     "unknown"
   const apiKey = req.header("X-API-Key")?.trim()
-  const key = apiKey ? `api-key:${apiKey}` : `ip:${ip}`
+  // Hash the caller-supplied key so arbitrarily long headers cannot bloat limiter memory / Redis keys.
+  const key = apiKey ? `api-key:${createHash("sha256").update(apiKey).digest("hex")}` : `ip:${ip.slice(0, 64)}`
 
   const { ipPoints, apiKeyPoints } = getConfig()
   const points = apiKey ? apiKeyPoints : ipPoints
@@ -156,12 +195,29 @@ export function rateLimitMiddleware(
   limiter
     .consume(key)
     .then((rateLimiterRes) => {
+      boundMemoryLimiter(limiter)
       setRateLimitHeaders(res, points, rateLimiterRes.remainingPoints, rateLimiterRes.msBeforeNext)
       next()
     })
-    .catch((rateLimiterRes) => {
-      const retrySecs = Math.ceil((rateLimiterRes?.msBeforeNext ?? 1000) / 1000)
-      setRateLimitHeaders(res, points, 0, rateLimiterRes?.msBeforeNext ?? 1000)
+    .catch((err: unknown) => {
+      // `rate-limiter-flexible` rejects with a RateLimiterRes when the limit is
+      // exceeded, but rejects with an Error when the store itself fails (e.g.
+      // Redis down and no insurance limiter). Distinguish the two so a store
+      // failure fails open instead of surfacing as an unexpected 429/500.
+      const isLimitExceeded =
+        typeof err === "object" &&
+        err !== null &&
+        typeof (err as { msBeforeNext?: unknown }).msBeforeNext === "number"
+
+      if (!isLimitExceeded) {
+        // Fail open: never block traffic because the limiter backend is sick.
+        next()
+        return
+      }
+
+      const msBeforeNext = (err as { msBeforeNext: number }).msBeforeNext
+      const retrySecs = Math.max(1, Math.ceil(msBeforeNext / 1000))
+      setRateLimitHeaders(res, points, 0, msBeforeNext)
       res.set("Retry-After", String(retrySecs))
       next(new RateLimitError(retrySecs))
     })

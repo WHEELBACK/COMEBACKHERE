@@ -5,8 +5,11 @@
 //! router — `build_router` — exactly as production wires it up, instead of
 //! re-assembling routes per test.
 
+pub mod balance_reconciliation;
 pub mod correlation;
+pub mod escrow_adapter;
 pub mod extractors;
+pub mod fee_distributor;
 pub mod handlers_readiness;
 pub mod idempotency;
 pub mod rate_limiter;
@@ -93,6 +96,9 @@ pub struct AppState {
     /// Retry/dead-letter dispatcher used for every production webhook event.
     pub webhooks: Arc<WebhookDispatcher>,
 
+    /// Merchant-scoped webhook configuration storage.
+    pub merchant_webhooks: Arc<routes::invoices::MerchantWebhookStore>,
+
 }
 
 impl AppState {
@@ -161,6 +167,9 @@ impl AppState {
             // Production webhook events flow through the retry + dead-letter
             // queue rather than a single best-effort attempt.
             webhooks: Arc::new(WebhookDispatcher::new(RetryConfig::from_env())),
+
+            // In-memory merchant webhook configuration store
+            merchant_webhooks: Arc::new(routes::invoices::MerchantWebhookStore::default()),
 
         }
     }

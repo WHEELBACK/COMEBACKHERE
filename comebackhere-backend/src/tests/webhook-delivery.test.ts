@@ -394,3 +394,89 @@ describe("buildWebhookPayload", () => {
     expect(p1.idempotency_key).toBe(p2.idempotency_key)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Hardening tests (#1061): input boundary checks and auth-adjacent guards
+// ---------------------------------------------------------------------------
+
+describe("webhook delivery hardening", () => {
+  it("rejects oversized payloads before any network call", async () => {
+    const fetchFn = makeFetch([{ status: 200 }])
+    const payload = makePayload({ data: { blob: "x".repeat(2_000_000) } })
+
+    const record = await deliverWebhook("https://example.com/hook", payload, 3, fetchFn, noDelay)
+
+    expect(record.status).toBe("failed")
+    expect(record.attempts).toBe(0)
+    expect(record.last_error).toMatch(/payload/i)
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it("rejects invalid endpoint URLs without attempting delivery", async () => {
+    const fetchFn = makeFetch([{ status: 200 }])
+
+    for (const endpoint of ["", "not-a-url", "ftp://example.com/hook", "javascript:alert(1)"]) {
+      const record = await deliverWebhook(endpoint, makePayload(), 3, fetchFn, noDelay)
+      expect(record.status).toBe("failed")
+      expect(record.attempts).toBe(0)
+      expect(record.last_error).toMatch(/endpoint|url/i)
+    }
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it("rejects endpoints resolving to private or loopback addresses", async () => {
+    const dns = await import("node:dns/promises")
+    const lookupMock = dns.lookup as unknown as ReturnType<typeof vi.fn>
+    lookupMock.mockResolvedValueOnce([{ address: "127.0.0.1", family: 4 }])
+
+    const fetchFn = makeFetch([{ status: 200 }])
+    const record = await deliverWebhook("https://internal.example.com/hook", makePayload(), 3, fetchFn, noDelay)
+
+    expect(record.status).toBe("failed")
+    expect(record.attempts).toBe(0)
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it("sanitizes correlation IDs before forwarding them as headers", async () => {
+    const capturedHeaders: Record<string, string>[] = []
+    const fetchFn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      capturedHeaders.push((init?.headers ?? {}) as Record<string, string>)
+      return { status: 200 } as Response
+    }) as unknown as typeof fetch
+
+    const record = await deliverWebhook(
+      "https://example.com/hook",
+      makePayload(),
+      1,
+      fetchFn,
+      noDelay,
+      "trace\r\nX-Injected: evil",
+    )
+
+    expect(capturedHeaders).toHaveLength(1)
+    const forwarded = capturedHeaders[0]["X-Request-Id"]
+    expect(forwarded).toBeDefined()
+    expect(forwarded).not.toMatch(/[\r\n]/)
+    expect(record.request_id).not.toMatch(/[\r\n]/)
+  })
+
+  it("bounds the dead-letter queue and evicts the oldest records", async () => {
+    const deadLetters = memoryDeadLetters()
+    const queue = new WebhookDeliveryQueue({
+      deadLetterStore: deadLetters,
+      maxAttempts: 1,
+      maxDeadLetters: 2,
+      fetchFn: makeFetch([{ status: 503 }]),
+      delayFn: noDelay,
+      retryConfig: { jitterRatio: 0 },
+    })
+
+    for (const id of ["1", "2", "3"]) {
+      await queue.enqueue("https://example.com/hook", makePayload({ idempotency_key: `invoice_paid:${id}` }))
+    }
+
+    const stored = await deadLetters.list()
+    expect(stored).toHaveLength(2)
+    expect(stored.map((r) => r.idempotency_key)).toEqual(["invoice_paid:2", "invoice_paid:3"])
+  })
+})

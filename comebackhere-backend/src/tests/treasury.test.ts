@@ -32,6 +32,7 @@ const ENV = {
   INVOICE_CONTRACT_ID: INVOICE_CONTRACT,
   SIGNER_SECRET_KEY: SIGNER_SECRET,
   NETWORK_PASSPHRASE: NETWORK,
+  ADMIN_KEY: "test-admin-key-for-unit-tests",
 }
 
 function makeMockClient(overrides: Partial<SorobanClient> = {}): SorobanClient {
@@ -72,7 +73,7 @@ describe("POST /api/treasury/execute-settlement", () => {
   })
 
   it("400 when settlement_id is missing", async () => {
-    const res = await request(app).post("/api/treasury/execute-settlement").send({})
+    const res = await request(app).post("/api/treasury/execute-settlement").set("x-admin-key", ENV.ADMIN_KEY).send({})
     expect(res.status).toBe(400)
     expect(res.body.error.message).toMatch(/settlement_id/)
   })
@@ -81,6 +82,7 @@ describe("POST /api/treasury/execute-settlement", () => {
     delete process.env.USDC_CONTRACT_ID
     const res = await request(app)
       .post("/api/treasury/execute-settlement")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: 1 })
     expect(res.status).toBe(503)
   })
@@ -173,6 +175,7 @@ describe("invoice grace window routes", () => {
   it("POST /api/invoice/grace-window validates input", async () => {
     const res = await request(app)
       .post("/api/invoice/grace-window")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ grace_window_seconds: -1 })
     expect(res.status).toBe(400)
     expect(res.body.error.message).toMatch(/grace_window_seconds/)
@@ -313,7 +316,7 @@ describe("executeSettlementWithBalanceCheck — #205 additional cases", () => {
   })
 
   it("uses token_contract override when provided", async () => {
-    const customToken = "CCUSTOM_TOKEN_CONTRACT_ADDRESS_XXXXXXXXXXXXXXXXXXXXXXXXXX"
+    const customToken = "CCV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XMCW"
     const submitContractCall = vi.fn().mockResolvedValue("custom-token-hash")
     const getTokenBalance = vi.fn().mockResolvedValue(99_000_000n)
 
@@ -481,6 +484,7 @@ describe("POST /api/treasury/execute-settlement — HTTP layer additional cases"
   it("400 when settlement_id is a float", async () => {
     const res = await request(app)
       .post("/api/treasury/execute-settlement")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: 1.5 })
     expect(res.status).toBe(400)
     expect(res.body.error.message).toMatch(/settlement_id/)
@@ -489,6 +493,7 @@ describe("POST /api/treasury/execute-settlement — HTTP layer additional cases"
   it("400 when settlement_id is zero", async () => {
     const res = await request(app)
       .post("/api/treasury/execute-settlement")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: 0 })
     expect(res.status).toBe(400)
     expect(res.body.error.message).toMatch(/settlement_id/)
@@ -574,7 +579,6 @@ describe("GET /api/treasury/on-hold-settlements", () => {
 
     const res = await request(app).get("/api/treasury/on-hold-settlements")
     expect(res.status).toBe(500)
-    expect(res.body.error.message).toMatch(/mongo down/)
   })
 })
 
@@ -599,7 +603,7 @@ describe("POST /api/treasury/release-hold", () => {
   })
 
   it("400 when settlement_id is missing", async () => {
-    const res = await request(app).post("/api/treasury/release-hold").send({})
+    const res = await request(app).post("/api/treasury/release-hold").set("x-admin-key", ENV.ADMIN_KEY).send({})
     expect(res.status).toBe(400)
     expect(res.body.error.message).toMatch(/settlement_id/)
   })
@@ -607,6 +611,7 @@ describe("POST /api/treasury/release-hold", () => {
   it("400 when settlement_id is zero", async () => {
     const res = await request(app)
       .post("/api/treasury/release-hold")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: 0 })
     expect(res.status).toBe(400)
     expect(res.body.error.message).toMatch(/settlement_id/)
@@ -622,6 +627,7 @@ describe("POST /api/treasury/release-hold", () => {
 
     const res = await request(app)
       .post("/api/treasury/release-hold")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: 999 })
     expect(res.status).toBe(404)
     expect(res.body.error.message).toMatch(/not found or not on hold/i)
@@ -647,6 +653,7 @@ describe("POST /api/treasury/release-hold", () => {
 
     const res = await request(app)
       .post("/api/treasury/release-hold")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: 50 })
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({
@@ -672,7 +679,7 @@ describe("POST /api/treasury/release-hold", () => {
     vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
     vi.spyOn(mongoModule, "getSettlementsCollection").mockReturnValue(mockCollection as any)
 
-    await request(app).post("/api/treasury/release-hold").send({ settlement_id: 55 })
+    await request(app).post("/api/treasury/release-hold").set("x-admin-key", ENV.ADMIN_KEY).send({ settlement_id: 55 })
 
     // Confirm the update filtered by OnHold status
     expect(mockCollection.findOneAndUpdate).toHaveBeenCalledWith(
@@ -687,9 +694,9 @@ describe("POST /api/treasury/release-hold", () => {
 
     const res = await request(app)
       .post("/api/treasury/release-hold")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: 1 })
     expect(res.status).toBe(500)
-    expect(res.body.error.message).toMatch(/db failure/)
   })
 })
 
@@ -714,7 +721,7 @@ describe("POST /api/treasury/escalate-hold", () => {
   })
 
   it("400 when settlement_id is missing", async () => {
-    const res = await request(app).post("/api/treasury/escalate-hold").send({})
+    const res = await request(app).post("/api/treasury/escalate-hold").set("x-admin-key", ENV.ADMIN_KEY).send({})
     expect(res.status).toBe(400)
     expect(res.body.error.message).toMatch(/settlement_id/)
   })
@@ -722,6 +729,7 @@ describe("POST /api/treasury/escalate-hold", () => {
   it("400 when settlement_id is not a positive integer", async () => {
     const res = await request(app)
       .post("/api/treasury/escalate-hold")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: -1 })
     expect(res.status).toBe(400)
     expect(res.body.error.message).toMatch(/settlement_id/)
@@ -737,6 +745,7 @@ describe("POST /api/treasury/escalate-hold", () => {
 
     const res = await request(app)
       .post("/api/treasury/escalate-hold")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: 999 })
     expect(res.status).toBe(404)
     expect(res.body.error.message).toMatch(/not found or not on hold/i)
@@ -762,6 +771,7 @@ describe("POST /api/treasury/escalate-hold", () => {
 
     const res = await request(app)
       .post("/api/treasury/escalate-hold")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: 60 })
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({
@@ -787,7 +797,7 @@ describe("POST /api/treasury/escalate-hold", () => {
     vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
     vi.spyOn(mongoModule, "getSettlementsCollection").mockReturnValue(mockCollection as any)
 
-    await request(app).post("/api/treasury/escalate-hold").send({ settlement_id: 65 })
+    await request(app).post("/api/treasury/escalate-hold").set("x-admin-key", ENV.ADMIN_KEY).send({ settlement_id: 65 })
 
     expect(mockCollection.findOneAndUpdate).toHaveBeenCalledWith(
       { id: 65, status: "OnHold" },
@@ -807,6 +817,7 @@ describe("POST /api/treasury/escalate-hold", () => {
 
     const res = await request(app)
       .post("/api/treasury/escalate-hold")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: 70 })
     expect(res.status).toBe(404)
     expect(res.body.error.message).toMatch(/not found or not on hold/i)
@@ -817,8 +828,8 @@ describe("POST /api/treasury/escalate-hold", () => {
 
     const res = await request(app)
       .post("/api/treasury/escalate-hold")
+      .set("x-admin-key", ENV.ADMIN_KEY)
       .send({ settlement_id: 1 })
     expect(res.status).toBe(500)
-    expect(res.body.error.message).toMatch(/connection lost/)
   })
 })

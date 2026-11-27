@@ -1,0 +1,55 @@
+/* Invoice table layout stability (issue #1034)
+   Prevent CLS on mobile viewports (<640px) caused by status badges. */
+
+.invoice-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.invoice-table th,
+.invoice-table td {
+  min-width: 0;
+  flex: 1 1 auto;
+  box-sizing: border-box;
+  vertical-align: middle;
+}
+
+.invoice-table .invoice-status-cell {
+  min-width: 96px;
+  width: 96px;
+  flex: 0 0 96px;
+}
+
+.invoice-table .invoice-amount-cell {
+  min-width: 88px;
+  width: 88px;
+  flex: 0 0 88px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.invoice-status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  height: 24px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+@media (max-width: 639px) {
+  .invoice-table-wrapper {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .invoice-table {
+    min-width: 560px;
+    table-layout: auto;
+  }
+}

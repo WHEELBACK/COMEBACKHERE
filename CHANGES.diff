@@ -1,0 +1,167 @@
+diff --git a/comebackhere-backend/src/db/mongo.ts b/comebackhere-backend/src/db/mongo.ts
+index a49c91d..52e8e35 100644
+--- a/comebackhere-backend/src/db/mongo.ts
++++ b/comebackhere-backend/src/db/mongo.ts
+@@ -185,13 +185,19 @@ export function ensureIndexes(database: Db): Promise<void> {
+ // ---------------------------------------------------------------------------
+ // #210 — Connection options: explicit pool size and timeouts so a slow or
+ // unreachable MongoDB fails fast instead of hanging indefinitely.
++// 
++// Tuned for production load:
++// - maxPoolSize increased from 10 to 25 to handle API+indexer concurrent load
++// - minPoolSize increased from 2 to 5 for faster recovery after spike
++// - socketTimeoutMS increased to 60s (was 45s) to accommodate Soroban RPC
++//   timeouts (30s max per call). Prevents cascade failures when Soroban is slow.
+ // ---------------------------------------------------------------------------
+ 
+ const MONGO_OPTIONS = {
+-  /** Maximum number of connections in the pool. */
+-  maxPoolSize: 10,
+-  /** Minimum number of idle connections to maintain. */
+-  minPoolSize: 2,
++  /** Maximum number of connections in the pool. Increased for concurrent load. */
++  maxPoolSize: 25,
++  /** Minimum number of idle connections to maintain. Faster recovery after spikes. */
++  minPoolSize: 5,
+   /**
+    * How long (ms) the driver will wait when selecting a server before
+    * throwing a MongoServerSelectionError.  Default is 30 000; we tighten
+@@ -206,8 +212,15 @@ const MONGO_OPTIONS = {
+   /**
+    * How long (ms) to wait for a socket operation to complete before
+    * giving up and returning an error to the caller.
++   * Increased to 60s (was 45s) to accommodate Soroban RPC calls which
++   * timeout at 30s max per operation. This prevents cascade failures
++   * when Soroban is experiencing delays.
+    */
+-  socketTimeoutMS: 45_000,
++  socketTimeoutMS: 60_000,
++  /**
++   * Enable TCP keepalive to detect stale connections.
++   */
++  socketKeepAlive: true,
+ }
+ 
+ export function connectMongo(): Promise<Db> {
+diff --git a/comebackhere-backend/src/indexer.ts b/comebackhere-backend/src/indexer.ts
+index 41394d4..ee16b58 100644
+--- a/comebackhere-backend/src/indexer.ts
++++ b/comebackhere-backend/src/indexer.ts
+@@ -449,6 +449,12 @@ async function initialStartLedger(rpc: IndexerRpc): Promise<number> {
+ /**
+  * Fetches and processes one batch of events, then saves the cursor.
+  *
++ * #209 ledger continuity check — after Redis reconnect, verify the ledger
++ * range hasn't shifted unexpectedly (e.g. node restart or retention shrinkage).
++ * If the oldest retained ledger is now ahead of our resume point, we record
++ * a retention gap and skip to the oldest retained ledger, preventing silent
++ * event loss.
++ *
+  * `database` defaults to the shared Mongo connection; pass null to run
+  * without Mongo (cursor kept in Redis / memory only, no idempotency).
+  * Returns the number of newly applied events.
+@@ -475,6 +481,28 @@ export async function pollOnce(
+   }
+   if (!pagingToken && !startLedger) startLedger = await initialStartLedger(rpc)
+ 
++  // #209 ledger continuity check: before fetching, verify the oldest retained
++  // ledger hasn't advanced beyond our resume point (indicating a retention gap).
++  // This catches node restarts or retention window shrinkage that would cause
++  // silent event loss.
++  const oldestRetained = await getOldestRetainedLedger(rpc)
++  if (oldestRetained !== null) {
++    const resumeLedger = startLedger ?? (pagingToken ? ledgerFromPagingToken(pagingToken) : null) ?? lastLedger
++    if (resumeLedger > 0 && oldestRetained > resumeLedger) {
++      // The oldest retained ledger is now ahead of our resume point.
++      // Record the gap and skip to the oldest retained ledger.
++      await recordRetentionGap(db, contractId, resumeLedger, oldestRetained - 1)
++      pagingToken = undefined
++      startLedger = oldestRetained
++      lastLedger = oldestRetained
++      if (db) await saveMongoCursor(db, null, oldestRetained)
++      logger.warn(
++        { resumeLedger, oldestRetained, missingLedgers: oldestRetained - resumeLedger },
++        "Retention window shifted during Redis reconnect; gap detected and recorded",
++      )
++    }
++  }
++
+   const fetchEvents = () =>
+     rpc.getEvents({
+       ...(pagingToken ? { cursor: pagingToken } : { startLedger }),
+diff --git a/comebackhere-backend/src/lib/soroban.ts b/comebackhere-backend/src/lib/soroban.ts
+index 7911c91..ca081c3 100644
+--- a/comebackhere-backend/src/lib/soroban.ts
++++ b/comebackhere-backend/src/lib/soroban.ts
+@@ -69,11 +69,23 @@ export function getNetworkPassphrase(): string {
+  *
+  * Both halves are stored as XDR Integer instances whose toString() returns
+  * the numeric string, so BigInt(hi.toString()) / BigInt(lo.toString()) work.
++ *
++ * Handles signed 128-bit integers correctly:
++ * - If hi >= 2^63, the value is negative (two's complement)
++ * - Convert to negative by subtracting 2^128 to maintain correct semantics
+  */
+ function i128ToBigInt(parts: xdr.Int128Parts): bigint {
+   const lo = BigInt(parts.lo().toString())
+   const hi = BigInt(parts.hi().toString())
+-  return (hi << 64n) | lo
++  const value = (hi << 64n) | lo
++  
++  // Check if this is a negative number (high bit of hi is set)
++  // In two's complement, if the sign bit is set, subtract 2^128
++  const SIGN_BIT = 1n << 127n
++  if (value & SIGN_BIT) {
++    return value - (1n << 128n)
++  }
++  return value
+ }
+ 
+ export async function simulateContractRead(
+@@ -229,16 +241,43 @@ export async function getSettlementSimulation(
+     entries[key] = entry.val()
+   }
+ 
++  // Validate required fields are present and have expected types
++  if (!entries.settlement_id?.u64()) {
++    throw Object.assign(
++      new Error("Missing or invalid settlement_id in simulate_settlement response"),
++      { status: 422 },
++    )
++  }
++  if (!entries.status) {
++    throw Object.assign(
++      new Error("Missing status in simulate_settlement response"),
++      { status: 422 },
++    )
++  }
++  if (!entries.treasury_balance?.i128()) {
++    throw Object.assign(
++      new Error("Missing or invalid treasury_balance in simulate_settlement response"),
++      { status: 422 },
++    )
++  }
++  if (!entries.projected_balance?.i128()) {
++    throw Object.assign(
++      new Error("Missing or invalid projected_balance in simulate_settlement response"),
++      { status: 422 },
++    )
++  }
++
+   return {
+-    settlementId: BigInt(entries.settlement_id?.u64()?.toString() ?? "0"),
++    settlementId: BigInt(entries.settlement_id.u64()!.toString()),
+     status: scValToSettlementStatus(entries.status ?? xdr.ScVal.scvVoid()),
+     wouldSucceed: entries.would_succeed?.b() ?? false,
+     approvalWeight: BigInt(entries.approval_weight?.u64()?.toString() ?? "0"),
+     threshold: BigInt(entries.threshold?.u64()?.toString() ?? "0"),
+     settlementAmount: BigInt(entries.settlement_amount?.u64()?.toString() ?? "0"),
+     // #898 — use i128ToBigInt so treasury/projected balances parse correctly.
+-    treasuryBalance: i128ToBigInt(entries.treasury_balance?.i128() ?? xdr.Int128Parts.fromXDR(Buffer.alloc(16))),
+-    projectedBalance: i128ToBigInt(entries.projected_balance?.i128() ?? xdr.Int128Parts.fromXDR(Buffer.alloc(16))),
++    // Now with proper signed integer handling for negative balances
++    treasuryBalance: i128ToBigInt(entries.treasury_balance.i128()!),
++    projectedBalance: i128ToBigInt(entries.projected_balance.i128()!),
+   }
+ }
+ 

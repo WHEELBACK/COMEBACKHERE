@@ -14,6 +14,9 @@ import { requireAdmin } from "../middleware/adminAuth.js"
 import { allowBodySchema, blockBodySchema, complianceAuditQuerySchema } from "../schemas/index.js"
 import { connectMongo, getComplianceAuditCollection } from "../db/mongo.js"
 import { cacheDelete } from "../lib/cache.js"
+import { buildAuditFilter, exceedsAuditSkip } from "../lib/audit-filter.js"
+import { assertNonEmptyAddress, isValidAllowanceExpiry } from "../lib/compliance-guards.js"
+
 
 const router = Router()
 
@@ -55,16 +58,12 @@ router.get("/audit", validateQuery(complianceAuditQuerySchema), asyncHandler(asy
   const query = req.query as unknown as {
     address?: string; event_type?: string; from_ledger?: number; to_ledger?: number; page: number; limit: number
   }
-  const filter: Record<string, unknown> = {}
-  if (query.address) filter.address = query.address
-  if (query.event_type) filter.event_type = query.event_type
-  if (query.from_ledger !== undefined || query.to_ledger !== undefined) {
-    filter.ledger = {
-      ...(query.from_ledger !== undefined ? { $gte: query.from_ledger } : {}),
-      ...(query.to_ledger !== undefined ? { $lte: query.to_ledger } : {}),
-    }
-  }
+  const filter = buildAuditFilter(query)
   const skip = (query.page - 1) * query.limit
+  if (exceedsAuditSkip(skip)) {
+    res.status(400).json({ error: "Page is too deep; narrow the query with from_ledger/to_ledger" })
+    return
+  }
   const collection = getComplianceAuditCollection(await connectMongo())
   const [events, total] = await Promise.all([
     collection.find(filter).sort({ ledger: -1, _id: -1 }).skip(skip).limit(query.limit).toArray(),
@@ -106,6 +105,7 @@ export async function callComplianceOp(
   signerSecret: string,
   networkPassphrase: string
 ): Promise<{ address: string; status: string; hash: string }> {
+  assertNonEmptyAddress(args[0]?.address()?.toString())
   const keypair = Keypair.fromSecret(signerSecret)
   const contract = new Contract(contractId)
 
@@ -133,6 +133,9 @@ export async function callComplianceOp(
   prepared.sign(keypair)
 
   const sendResult = await client.sendTransaction(prepared)
+  if (!sendResult?.hash) {
+    throw Object.assign(new Error("Soroban submission returned no transaction hash"), { status: 502 })
+  }
   if (sendResult.status === "ERROR") {
     throw Object.assign(
       new Error(
@@ -146,7 +149,13 @@ export async function callComplianceOp(
   let getResult: SorobanRpc.Api.GetTransactionResponse | null = null
   for (let i = 0; i < 10; i++) {
     await new Promise((r) => setTimeout(r, 1000))
-    getResult = await client.getTransaction(hash)
+    try {
+      getResult = await client.getTransaction(hash)
+    } catch (err) {
+      // Transient RPC errors while polling must not abort an already-submitted tx.
+      if (i === 9) throw err
+      continue
+    }
     if (getResult.status !== SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) break
   }
 
@@ -194,6 +203,9 @@ router.post("/allow", requireAdmin, validateBody(allowBodySchema), asyncHandler(
   })
 
   const client = buildSorobanClient(env.rpcUrl)
+  if (until !== undefined && !isValidAllowanceExpiry(until)) {
+    throw Object.assign(new Error("until must be a positive Unix timestamp"), { status: 400 })
+  }
   const operation = until ? "allow_address_until" : "allow_address"
   const args = until
     ? [nativeToScVal(address, { type: "address" }), nativeToScVal(until, { type: "u64" })]

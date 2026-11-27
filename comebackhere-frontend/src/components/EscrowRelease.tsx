@@ -10,6 +10,26 @@ import { config } from "../config"
 
 const TREASURY_BALANCE_POLL_MS = 10_000
 
+/** Default grace window in seconds (24 hours) used before the backend value is fetched. */
+const DEFAULT_GRACE_WINDOW_S = 86_400
+
+/** Extra seconds added to the grace window to absorb minor clock skew. */
+const CLOCK_SKEW_MARGIN_S = 30
+
+interface GraceWindowConfig {
+  grace_window_seconds: number
+}
+
+function formatCountdown(seconds: number): string {
+  const abs = Math.abs(Math.ceil(seconds))
+  const h = Math.floor(abs / 3600)
+  const m = Math.floor((abs % 3600) / 60)
+  const s = abs % 60
+  if (h > 0) return `${h}h ${m}m ${s}s`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
+}
+
 /** Exact comparison of raw stroop amounts; unparseable values never block. */
 function isBelow(balance: string, amount: string): boolean {
   try {

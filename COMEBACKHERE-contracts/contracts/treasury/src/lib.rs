@@ -4,7 +4,7 @@
 extern crate std;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, Symbol,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN, Env, IntoVal, Symbol,
     Vec,
 };
 
@@ -171,7 +171,13 @@ impl TreasuryContract {
     /// The stored admin must authorize the call. Upgrades are rejected while any
     /// settlement is in the partially executed state.
     pub fn upgrade(e: Env, new_wasm_hash: BytesN<32>) -> Result<(), TreasuryError> {
-        let admin: Address = e.storage().instance().get(&DataKey::Admin).unwrap();
+        // Return Unauthorized rather than panicking when the contract has not
+        // been initialized yet (admin key absent from storage).
+        let admin: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(TreasuryError::Unauthorized)?;
         Self::check_admin(&e, &admin)?;
 
         let next_settlement_id: u64 = e
@@ -755,7 +761,13 @@ impl TreasuryContract {
 
     fn check_admin(e: &Env, admin: &Address) -> Result<(), TreasuryError> {
         admin.require_auth();
-        let stored_admin: Address = e.storage().instance().get(&DataKey::Admin).unwrap();
+        // Return Unauthorized rather than panicking when the contract has not
+        // been initialized yet (admin key absent from storage).
+        let stored_admin: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(TreasuryError::Unauthorized)?;
         if stored_admin != *admin {
             return Err(TreasuryError::Unauthorized);
         }
@@ -946,6 +958,14 @@ impl TreasuryContract {
         let settlement = Self::get_settlement_internal(&e, settlement_id);
         if signer != settlement.merchant {
             return Err(TreasuryError::NotSettlementParty);
+        }
+        // Only a Pending settlement can be placed on hold.  Raising a dispute
+        // on an already-disputed, executed, cancelled, or expired settlement
+        // previously silently overwrote the status; now it returns the same
+        // typed error that approve_settlement and execute_settlement use,
+        // preventing unexpected state corruption under concurrent high-load.
+        if settlement.status != SettlementStatus::Pending {
+            return Err(TreasuryError::NotPending);
         }
         let mut settlement = settlement;
         settlement.status = SettlementStatus::OnHold;
@@ -1298,11 +1318,18 @@ impl TreasuryContract {
             .unwrap_or_else(|| Vec::new(&e))
     }
 
+    /// Returns the settlement for `settlement_id`, or panics with a typed
+    /// [`TreasuryError::SettlementNotFound`] trap instead of an unhandled
+    /// `unwrap()` panic.  Under high load a missing ID would previously
+    /// produce an opaque contract panic; callers now receive the same
+    /// structured error code returned by other Not-Found paths.
     fn get_settlement_internal(e: &Env, settlement_id: u64) -> Settlement {
         e.storage()
             .instance()
             .get(&DataKey::Settlement(settlement_id))
-            .unwrap()
+            .unwrap_or_else(|| {
+                panic_with_error!(e, TreasuryError::SettlementNotFound)
+            })
     }
 }
 
@@ -1420,6 +1447,114 @@ mod tests {
             c.try_cancel_settlement(&proposer, &disputed_id),
             Err(Ok(TreasuryError::NotPending))
         );
+    }
+
+    // ── fix/1037: invoice-settlement edge-case tests ──────────────────────
+
+    /// get_settlement_internal must return SettlementNotFound (not panic) for
+    /// an ID that was never created.  Under high load, concurrent requests for
+    /// stale or speculative IDs previously caused opaque contract panics.
+    #[test]
+    fn test_get_settlement_missing_id_returns_not_found() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let signer = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (signer.clone(), 1u64)], &1, &admin);
+
+        // ID 999 was never created; approve_settlement and execute_settlement
+        // both delegate to get_settlement_internal, so either call exercises
+        // the fix.
+        let result = c.try_approve_settlement(&signer, &999u64);
+        assert_eq!(result, Err(Ok(TreasuryError::SettlementNotFound)));
+    }
+
+    /// raise_dispute on an already-disputed (OnHold) settlement must be
+    /// rejected rather than silently overwriting the status a second time.
+    #[test]
+    fn test_raise_dispute_on_already_on_hold_returns_not_pending() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let proposer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (proposer.clone(), 1u64)], &1, &admin);
+
+        let settlement_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+        c.raise_dispute(&merchant, &settlement_id, &1u32);
+
+        // Second call must fail, not silently succeed.
+        let result = c.try_raise_dispute(&merchant, &settlement_id, &1u32);
+        assert_eq!(result, Err(Ok(TreasuryError::NotPending)));
+    }
+
+    /// raise_dispute on an executed settlement must be rejected.
+    #[test]
+    fn test_raise_dispute_on_executed_settlement_returns_not_pending() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let proposer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (proposer.clone(), 1u64)], &1, &admin);
+
+        let settlement_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+        c.approve_settlement(&proposer, &settlement_id);
+        c.execute_settlement(&proposer, &settlement_id, &token);
+
+        let result = c.try_raise_dispute(&merchant, &settlement_id, &1u32);
+        assert_eq!(result, Err(Ok(TreasuryError::NotPending)));
+    }
+
+    /// raise_dispute on a cancelled settlement must be rejected.
+    #[test]
+    fn test_raise_dispute_on_cancelled_settlement_returns_not_pending() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let proposer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (proposer.clone(), 1u64)], &1, &admin);
+
+        let settlement_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+        c.cancel_settlement(&proposer, &settlement_id);
+
+        let result = c.try_raise_dispute(&merchant, &settlement_id, &1u32);
+        assert_eq!(result, Err(Ok(TreasuryError::NotPending)));
+    }
+
+    /// A pending settlement can be disputed exactly once; resolution restores
+    /// Pending status and the settlement is then executable again.
+    #[test]
+    fn test_raise_dispute_then_resolve_in_favor_restores_pending() {
+        let (e, id) = setup();
+        let c = client(&e, &id);
+        let admin = soroban_sdk::Address::generate(&e);
+        let proposer = soroban_sdk::Address::generate(&e);
+        let token = soroban_sdk::Address::generate(&e);
+        let merchant = soroban_sdk::Address::generate(&e);
+        c.initialize(&soroban_sdk::vec![&e, (proposer.clone(), 1u64)], &1, &admin);
+
+        let settlement_id = c.propose_settlement(&proposer, &token, &100u64, &merchant);
+        c.approve_settlement(&proposer, &settlement_id);
+        c.raise_dispute(&merchant, &settlement_id, &1u32);
+
+        // Status is now OnHold; execution must be blocked.
+        let exec_result = c.try_execute_settlement(&proposer, &settlement_id, &token);
+        assert_eq!(exec_result, Err(Ok(TreasuryError::NotPending)));
+
+        // Resolve in favor of merchant → Pending.
+        c.resolve_dispute(&admin, &settlement_id, &true);
+        let settlement = c.get_settlement(&settlement_id).unwrap();
+        assert_eq!(settlement.status, SettlementStatus::Pending);
+
+        // Settlement is now executable again.
+        c.execute_settlement(&proposer, &settlement_id, &token);
+        let settlement = c.get_settlement(&settlement_id).unwrap();
+        assert_eq!(settlement.status, SettlementStatus::Executed);
     }
 
     #[test]

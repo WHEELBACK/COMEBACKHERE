@@ -20,6 +20,7 @@ import {
 } from "../schemas/index.js"
 import { getBalanceCache, setBalanceCache, invalidateBalanceCache } from "../lib/cache.js"
 import { logger } from "../lib/logger.js"
+import { assertContractId } from "../lib/soroban-input-guards.js"
 
 const router = Router()
 
@@ -230,7 +231,7 @@ export async function executeSettlementWithBalanceCheck(
   const client = clientOverride ?? buildSorobanClient(env.rpcUrl)
   const keypair = Keypair.fromSecret(env.signerSecret)
   const sourceAccount = keypair.publicKey()
-  const tokenContract = body.token_contract ?? env.usdcContractId
+  const tokenContract = assertContractId(body.token_contract ?? env.usdcContractId, "token_contract")
 
   const settlement = await deps.getOnChainSettlement(
     client,
@@ -244,12 +245,10 @@ export async function executeSettlementWithBalanceCheck(
   // immediately rather than submitting again and getting a NotPending error
   // from the contract.
   if (settlement.status === "Executed") {
-    return {
-      tx_hash: "",
-      settlement_id: body.settlement_id,
-      balance_checked: "0",
-      amount_required: settlement.amount.toString(),
-    }
+    throw Object.assign(
+      new Error(`Settlement #${body.settlement_id} is not pending (status: ${settlement.status})`),
+      { status: 409 },
+    )
   }
 
   if (settlement.status !== "Pending") {
@@ -274,7 +273,7 @@ export async function executeSettlementWithBalanceCheck(
       available: balance.toString(),
       token: tokenContract,
       msg: "Executing settlement balance check",
-    }),
+    }
   )
 
   if (balance < settlement.amount) {

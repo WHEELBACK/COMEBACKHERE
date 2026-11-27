@@ -3,6 +3,8 @@ import request from "supertest"
 import { createApp } from "../app.js"
 import * as mongoModule from "../db/mongo.js"
 import { listPeriods, truncateUtc } from "../routes/analytics.js"
+import { createFakeMongo } from "./helpers/fake-mongo.js"
+import { expectMatchesSchema } from "./helpers/response-schema.js"
 
 const MERCHANT = "GDR7WUDWIKWVBCUBVYLOGT3TJF5FGNQU5U7TACDDA2ZIQUETGGUET5XT"
 
@@ -158,6 +160,137 @@ describe("GET /api/analytics/metrics?bucket=", () => {
     expect(res.body).toHaveProperty("invoices")
     expect(res.body).not.toHaveProperty("series")
   })
+
+  it("returns a schema-valid bucketed response", async () => {
+    mockAggregate([
+      { _id: new Date("2026-01-01T00:00:00Z"), count: 2, volume: 1_500 },
+    ])
+
+    const res = await request(app).get(
+      `/api/analytics/metrics?bucket=day&start_date=${ts("2026-01-01T00:00:00Z")}&end_date=${ts("2026-01-02T00:00:00Z")}`,
+    )
+
+    expect(res.status).toBe(200)
+    expectMatchesSchema(res.body, "analyticsMetricsBucketed")
+  })
+
+  it("returns a schema-valid totals response when bucket is omitted", async () => {
+    mockAggregate([])
+
+    const res = await request(app).get("/api/analytics/metrics")
+
+    expect(res.status).toBe(200)
+    expectMatchesSchema(res.body, "analyticsMetricsTotals")
+  })
+
+  it("400 when start_date is after end_date", async () => {
+    mockAggregate([])
+
+    const res = await request(app).get(
+      `/api/analytics/metrics?bucket=day&start_date=${ts("2026-02-01T00:00:00Z")}&end_date=${ts("2026-01-01T00:00:00Z")}`,
+    )
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/start_date/)
+  })
+
+  it("400 for a non-numeric start_date", async () => {
+    mockAggregate([])
+
+    const res = await request(app).get("/api/analytics/metrics?bucket=day&start_date=not-a-number")
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toMatch(/start_date/)
+  })
+
+  it("500 with a defensive error when the aggregation fails", async () => {
+    vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
+    vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue({
+      aggregate: vi.fn(() => ({
+        toArray: async () => {
+          throw new Error("boom")
+        },
+      })),
+    } as any)
+
+    const res = await request(app).get(
+      `/api/analytics/metrics?bucket=day&start_date=${ts("2026-01-01T00:00:00Z")}&end_date=${ts("2026-01-02T00:00:00Z")}`,
+    )
+
+    expect(res.status).toBe(500)
+    expect(res.body).toHaveProperty("error")
+  })
+})
+
+describe("analytics bucketing against fake-mongo", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("computes day buckets end-to-end from stored invoices", async () => {
+    const fake = createFakeMongo({
+      invoices: [
+        { created_at: new Date("2026-01-01T05:00:00Z"), merchant_address: MERCHANT, token: "USDC", amount: 1_000 },
+        { created_at: new Date("2026-01-01T18:00:00Z"), merchant_address: MERCHANT, token: "USDC", amount: 500 },
+        { created_at: new Date("2026-01-03T09:00:00Z"), merchant_address: MERCHANT, token: "USDC", amount: 250 },
+      ],
+    })
+    vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
+    vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(fake.collection("invoices") as any)
+
+    const app = createApp()
+    const res = await request(app).get(
+      `/api/analytics/metrics?bucket=day&start_date=${ts("2026-01-01T00:00:00Z")}&end_date=${ts("2026-01-03T00:00:00Z")}&merchant=${MERCHANT}`,
+    )
+
+    expect(res.status).toBe(200)
+    expect(res.body.series).toEqual([
+      { period: "2026-01-01", count: 2, volume: 1_500 },
+      { period: "2026-01-02", count: 0, volume: 0 },
+      { period: "2026-01-03", count: 1, volume: 250 },
+    ])
+  })
+
+  it("excludes invoices outside the requested range", async () => {
+    const fake = createFakeMongo({
+      invoices: [
+        { created_at: new Date("2025-12-31T23:59:59Z"), merchant_address: MERCHANT, token: "USDC", amount: 999 },
+        { created_at: new Date("2026-01-02T00:00:00Z"), merchant_address: MERCHANT, token: "USDC", amount: 100 },
+      ],
+    })
+    vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
+    vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(fake.collection("invoices") as any)
+
+    const app = createApp()
+    const res = await request(app).get(
+      `/api/analytics/metrics?bucket=day&start_date=${ts("2026-01-01T00:00:00Z")}&end_date=${ts("2026-01-02T00:00:00Z")}&merchant=${MERCHANT}`,
+    )
+
+    expect(res.status).toBe(200)
+    expect(res.body.series).toEqual([
+      { period: "2026-01-01", count: 0, volume: 0 },
+      { period: "2026-01-02", count: 1, volume: 100 },
+    ])
+  })
+
+  it("filters by token when provided", async () => {
+    const fake = createFakeMongo({
+      invoices: [
+        { created_at: new Date("2026-01-01T05:00:00Z"), merchant_address: MERCHANT, token: "USDC", amount: 100 },
+        { created_at: new Date("2026-01-01T06:00:00Z"), merchant_address: MERCHANT, token: "EURC", amount: 700 },
+      ],
+    })
+    vi.spyOn(mongoModule, "connectMongo").mockResolvedValue({} as any)
+    vi.spyOn(mongoModule, "getInvoicesCollection").mockReturnValue(fake.collection("invoices") as any)
+
+    const app = createApp()
+    const res = await request(app).get(
+      `/api/analytics/metrics?bucket=day&start_date=${ts("2026-01-01T00:00:00Z")}&end_date=${ts("2026-01-01T00:00:00Z")}&merchant=${MERCHANT}&token=EURC`,
+    )
+
+    expect(res.status).toBe(200)
+    expect(res.body.series).toEqual([{ period: "2026-01-01", count: 1, volume: 700 }])
+  })
 })
 
 describe("bucket helpers", () => {
@@ -179,5 +312,24 @@ describe("bucket helpers", () => {
     const end = new Date("2026-05-10T02:00:00Z")
     expect(listPeriods(start, end, "day")).toEqual(["2026-05-10"])
     expect(listPeriods(start, end, "month")).toEqual(["2026-05-01"])
+  })
+
+  it("returns an empty list when the range is inverted", () => {
+    const start = new Date("2026-05-11T00:00:00Z")
+    const end = new Date("2026-05-10T00:00:00Z")
+    expect(listPeriods(start, end, "day")).toEqual([])
+  })
+
+  it("handles year boundaries for week and month buckets", () => {
+    expect(truncateUtc(new Date("2026-01-01T00:00:00Z"), "week").toISOString()).toBe(
+      "2025-12-29T00:00:00.000Z",
+    )
+    expect(truncateUtc(new Date("2025-12-31T23:59:59Z"), "month").toISOString()).toBe(
+      "2025-12-01T00:00:00.000Z",
+    )
+    expect(listPeriods(new Date("2025-12-30T00:00:00Z"), new Date("2026-01-06T00:00:00Z"), "week")).toEqual([
+      "2025-12-29",
+      "2026-01-05",
+    ])
   })
 })

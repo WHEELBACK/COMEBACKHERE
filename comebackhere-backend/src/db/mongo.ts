@@ -135,6 +135,31 @@ export interface IndexerGapRecord {
 export const DEFAULT_PAGE_SIZE = 20
 export const MAX_PAGE_SIZE = 100
 
+/**
+ * #1064 — Upper bound on documents returned by auth-service queries. Keeps
+ * unbounded scans from inflating memory under peak load.
+ */
+export const MAX_AUTH_QUERY_RESULTS = 500
+
+/**
+ * #1064 — Server-side time limit (ms) for auth-service queries so a slow
+ * query cannot pin a pool connection indefinitely.
+ */
+export const AUTH_QUERY_MAX_TIME_MS = 5_000
+
+/** Clamp a caller-supplied limit into [1, MAX_AUTH_QUERY_RESULTS]. */
+export function clampAuthQueryLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_PAGE_SIZE
+  const truncated = Math.trunc(limit)
+  if (truncated < 1) return 1
+  return Math.min(truncated, MAX_AUTH_QUERY_RESULTS)
+}
+
+/** Options applied to every auth-service read query. */
+export function authQueryOptions(limit?: number): { maxTimeMS: number; limit: number } {
+  return { maxTimeMS: AUTH_QUERY_MAX_TIME_MS, limit: clampAuthQueryLimit(limit) }
+}
+
 let client: MongoClient | null = null
 let db: Db | null = null
 let connecting: Promise<Db> | null = null
@@ -153,6 +178,16 @@ export function ensureIndexes(database: Db): Promise<void> {
     { collection: "invoices", keys: { status: 1, merchant_address: 1 } },
     { collection: "invoices", keys: { created_at: -1 } },
     { collection: "invoices", keys: { created_at: -1, invoice_id: -1 } },
+    // Reporting-engine: covering indexes for aggregate/group-by queries.
+    { collection: "invoices", keys: { status: 1, created_at: -1 } },
+    { collection: "invoices", keys: { merchant_address: 1, created_at: -1 } },
+    { collection: "invoices", keys: { token: 1, status: 1 } },
+    { collection: "settlements", keys: { merchant_address: 1, updated_at: -1 } },
+    { collection: "settlements", keys: { status: 1, updated_at: -1 } },
+    { collection: "settlements", keys: { token: 1, status: 1 } },
+    { collection: "compliance_audit", keys: { address: 1, event_type: 1, ledger: -1 } },
+    { collection: "compliance_audit", keys: { status: 1, ledger: -1 } },
+    { collection: "compliance_audit", keys: { created_at: -1 } },
     { collection: "indexer_cursors", keys: { _id: 1 }, unique: true },
     { collection: "invoice_events", keys: { event_id: 1 }, unique: true },
     { collection: "invoice_events", keys: { invoice_id: 1, ledger: 1 } },
@@ -166,6 +201,11 @@ export function ensureIndexes(database: Db): Promise<void> {
     { collection: "merchant_api_keys", keys: { key_id: 1 }, unique: true },
     { collection: "merchant_api_keys", keys: { merchant_address: 1 } },
     { collection: "merchant_api_keys", keys: { key_hash: 1 } },
+    // #1064 — auth-service hot paths: lookup by hash (auth), list by merchant,
+    // and revocation sweeps filtered on both.
+    { collection: "merchant_api_keys", keys: { key_hash: 1, revoked_at: 1 } },
+    { collection: "merchant_api_keys", keys: { merchant_address: 1, revoked_at: 1 } },
+    { collection: "merchant_api_keys", keys: { last_used_at: -1 } },
   ]
 
   const creating = Promise.all(
@@ -185,13 +225,32 @@ export function ensureIndexes(database: Db): Promise<void> {
 // ---------------------------------------------------------------------------
 // #210 — Connection options: explicit pool size and timeouts so a slow or
 // unreachable MongoDB fails fast instead of hanging indefinitely.
+// 
+// Tuned for production load:
+// - maxPoolSize increased from 10 to 50 to handle API+indexer+reporting
+//   concurrent load under peak traffic.
+// - minPoolSize increased from 2 to 10 for faster recovery after spike
+// - maxIdleTimeMS bounds idle connection lifetime so the pool shrinks back
+//   after peak load instead of holding sockets open indefinitely.
+// - socketTimeoutMS increased to 60s (was 45s) to accommodate Soroban RPC
+//   timeouts (30s max per call). Prevents cascade failures when Soroban is slow.
 // ---------------------------------------------------------------------------
 
 const MONGO_OPTIONS = {
-  /** Maximum number of connections in the pool. */
-  maxPoolSize: 10,
-  /** Minimum number of idle connections to maintain. */
-  minPoolSize: 2,
+  /** Maximum number of connections in the pool. Increased for concurrent load. */
+  maxPoolSize: 50,
+  /** Minimum number of idle connections to maintain. Faster recovery after spikes. */
+  minPoolSize: 10,
+  /**
+   * How long (ms) an idle connection may remain in the pool before being
+   * closed. Keeps the pool from holding excess sockets after peak load.
+   */
+  maxIdleTimeMS: 60_000,
+  /**
+   * How long (ms) a connection may be checked out of the pool before the
+   * driver logs a warning. Helps surface slow reporting queries.
+   */
+  waitQueueTimeoutMS: 15_000,
   /**
    * How long (ms) the driver will wait when selecting a server before
    * throwing a MongoServerSelectionError.  Default is 30 000; we tighten
@@ -206,8 +265,15 @@ const MONGO_OPTIONS = {
   /**
    * How long (ms) to wait for a socket operation to complete before
    * giving up and returning an error to the caller.
+   * Increased to 60s (was 45s) to accommodate Soroban RPC calls which
+   * timeout at 30s max per operation. This prevents cascade failures
+   * when Soroban is experiencing delays.
    */
-  socketTimeoutMS: 45_000,
+  socketTimeoutMS: 60_000,
+  /**
+   * Enable TCP keepalive to detect stale connections.
+   */
+  socketKeepAlive: true,
 }
 
 export function connectMongo(): Promise<Db> {
@@ -287,6 +353,46 @@ export function getIndexerGapsCollection(database: Db): Collection<IndexerGapRec
 
 export function getComplianceAuditCollection(database: Db): Collection<ComplianceAuditRecord> {
   return database.collection<ComplianceAuditRecord>("compliance_audit")
+}
+
+export function getMerchantApiKeysCollection(database: Db): Collection<MerchantApiKeyRecord> {
+  return database.collection<MerchantApiKeyRecord>("merchant_api_keys")
+}
+
+/**
+ * #1064 — Batch `last_used_at` updates for API keys. Instead of one write per
+ * authenticated request, callers accumulate key ids and flush them in a single
+ * `bulkWrite`, cutting write amplification and memory churn under peak load.
+ */
+export async function flushApiKeyLastUsed(
+  database: Db,
+  keyIds: readonly string[],
+  usedAt: Date = new Date(),
+): Promise<number> {
+  if (keyIds.length === 0) return 0
+  const uniqueIds = Array.from(new Set(keyIds)).slice(0, MAX_AUTH_QUERY_RESULTS)
+  if (uniqueIds.length === 0) return 0
+
+  try {
+    const result = await getMerchantApiKeysCollection(database).bulkWrite(
+      uniqueIds.map((key_id) => ({
+        updateOne: {
+          filter: { key_id },
+          update: { $set: { last_used_at: usedAt } },
+        },
+      })),
+      { ordered: false },
+    )
+    return result.modifiedCount ?? 0
+  } catch (error) {
+    // Usage tracking is best-effort: never fail an authenticated request
+    // because the timestamp write failed.
+    logger.warn(
+      { errorName: error instanceof Error ? error.name : "UnknownError", count: uniqueIds.length },
+      "Failed to batch-update API key last_used_at",
+    )
+    return 0
+  }
 }
 
 export async function closeMongo(): Promise<void> {

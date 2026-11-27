@@ -11,6 +11,7 @@ import thresholdRouter from "./routes/threshold.js"
 import disputesRouter from "./routes/disputes.js"
 import analyticsRouter from "./routes/analytics.js"
 import webhookDeadLettersRouter from "./routes/webhook-dead-letters.js"
+import partnerCallbacksRouter from "./routes/partner-callbacks.js"
 import merchantKeysRouter from "./routes/api-keys.js"
 import { startComplianceIndexer } from "./services/compliance-indexer.js"
 import { rateLimitMiddleware } from "./middleware/rateLimiter.js"
@@ -29,6 +30,7 @@ import {
   metricsRegistry,
   renderMetrics,
 } from "./lib/metrics.js"
+import { captureRawBody, verifyWebhookSignature, deduplicateWebhookDelivery, InMemoryDeduplicationStore } from "./middleware/webhookSignatureVerification.js"
 
 /** Maximum accepted JSON body size; larger requests get a 413 envelope. */
 export const JSON_BODY_LIMIT = "100kb"
@@ -74,6 +76,10 @@ export function createApp(options: CreateAppOptions = {}) {
   const corsOrigins = options.corsOrigins ?? parseCorsOrigins()
   const app = express()
   app.disable("x-powered-by")
+  
+  // Webhook deduplication store (used for incoming partner callbacks)
+  const webhookDeduplicationStore = new InMemoryDeduplicationStore()
+  
   // Attach / propagate X-Request-Id before any other middleware so every log
   // line, downstream call and error envelope can reference the same
   // correlation ID — including body-parsing errors.
@@ -84,10 +90,14 @@ export function createApp(options: CreateAppOptions = {}) {
       res.on("finish", () => {
         const routePath = req.route ? String(req.route.path) : "unmatched"
         const route = `${req.baseUrl}${routePath}` || "/"
-        httpRequestDuration.observe(
-          { method: req.method, route, status_code: String(res.statusCode) },
-          Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
-        )
+        // A throw inside a "finish" listener is an uncaught exception that would
+        // crash the process under load; metrics must never take the server down.
+        try {
+          httpRequestDuration.observe(
+            { method: req.method, route, status_code: String(res.statusCode) },
+            Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
+          )
+        } catch { /* ignore metric failures */ }
       })
     }
     next()
@@ -100,6 +110,21 @@ export function createApp(options: CreateAppOptions = {}) {
   // CORS runs before body parsing and rate limiting so preflights are cheap
   // and disallowed origins are rejected before any work is done.
   app.use(createCorsMiddleware(corsOrigins))
+  
+  // ── Incoming partner webhook callbacks ───────────────────────────────────
+  // These must be verified BEFORE express.json() so raw body is available
+  // for signature verification. The full webhook route is registered first
+  // to take precedence.
+  app.post(
+    "/webhooks/incoming",
+    captureRawBody,
+    verifyWebhookSignature,
+    deduplicateWebhookDelivery(webhookDeduplicationStore),
+    express.json({ limit: JSON_BODY_LIMIT }),
+    partnerCallbacksRouter
+  )
+  
+  // General JSON parsing for all other routes
   app.use(express.json({ limit: JSON_BODY_LIMIT }))
   app.use(rateLimitMiddleware)
   app.use("/invoices", idempotencyMiddleware)

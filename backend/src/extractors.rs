@@ -13,6 +13,43 @@ use crate::types::ErrorResponse;
 
 const MAX_PAYLOAD_SIZE: u64 = 1_048_576; // 1 MB
 
+/// Maximum accepted length for a single header value (e.g. `Content-Type`).
+/// Longer values are rejected before any parsing to bound work on attacker
+/// controlled input.
+const MAX_HEADER_VALUE_LEN: usize = 8_192;
+
+/// Maximum accepted length for a single string field inside a JSON body.
+/// This bounds memory use and rejects pathological inputs early.
+const MAX_FIELD_LEN: usize = 65_536;
+
+/// Build the standard `422 Unprocessable Entity` rejection used for malformed
+/// request bodies.
+fn unprocessable(message: impl Into<String>) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(ErrorResponse {
+            error: message.into(),
+            code: Some(422),
+        }),
+    )
+        .into_response()
+}
+
+/// Build the standard `413 Payload Too Large` rejection.
+fn payload_too_large() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        Json(ErrorResponse {
+            error: format!(
+                "Request payload exceeds maximum size of {} bytes",
+                MAX_PAYLOAD_SIZE
+            ),
+            code: Some(413),
+        }),
+    )
+        .into_response()
+}
+
 /// A shared body extractor that wraps Axum's [`Json`] extractor and emits a
 /// consistent `422 Unprocessable Entity` error shape when the request body is
 /// missing, not JSON, or fails to deserialise. Also validates the payload size.
@@ -45,24 +82,18 @@ where
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         // Validate Content-Length if present to reject oversized payloads early.
-        if let Some(content_length) = req
-            .headers()
-            .get(header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok())
-        {
+        // A malformed Content-Length is treated as an invalid request rather
+        // than silently ignored, so it cannot be used to bypass the size check.
+        if let Some(raw) = req.headers().get(header::CONTENT_LENGTH) {
+            let raw = raw
+                .to_str()
+                .map_err(|_| unprocessable("Invalid Content-Length header"))?;
+            let content_length = raw
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| unprocessable("Invalid Content-Length header"))?;
             if content_length > MAX_PAYLOAD_SIZE {
-                return Err((
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    Json(ErrorResponse {
-                        error: format!(
-                            "Request payload exceeds maximum size of {} bytes",
-                            MAX_PAYLOAD_SIZE
-                        ),
-                        code: Some(413),
-                    }),
-                )
-                    .into_response());
+                return Err(payload_too_large());
             }
         }
 
@@ -75,16 +106,43 @@ where
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        if !content_type.starts_with("application/json") {
-            return Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ErrorResponse {
-                    error: "Request body must be JSON (Content-Type: application/json)".to_string(),
-                    code: Some(422),
-                }),
-            )
-                .into_response());
+        if content_type.len() > MAX_HEADER_VALUE_LEN {
+            return Err(unprocessable("Content-Type header is too long"));
         }
+
+        // Accept `application/json` with optional parameters (e.g. charset).
+        let media_type = content_type
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+
+        if media_type != "application/json" {
+            return Err(unprocessable(
+                "Request body must be JSON (Content-Type: application/json)",
+            ));
+        }
+
+        // Enforce the size limit on the streamed body as well, since a client
+        // may omit or understate Content-Length (e.g. chunked transfer).
+        let (parts, body) = req.into_parts();
+        let bytes = axum::body::to_bytes(body, MAX_PAYLOAD_SIZE as usize)
+            .await
+            .map_err(|_| payload_too_large())?;
+
+        // Reject string fields that exceed the per-field cap before handing the
+        // body to serde, bounding memory and work on hostile inputs.
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if json_has_oversized_field(&value) {
+                return Err(unprocessable(format!(
+                    "Request field exceeds maximum length of {} characters",
+                    MAX_FIELD_LEN
+                )));
+            }
+        }
+
+        let req = Request::from_parts(parts, axum::body::Body::from(bytes));
 
         match Json::<T>::from_request(req, state).await {
             Ok(Json(value)) => Ok(ValidatedBody(value)),
@@ -92,25 +150,25 @@ where
                 let message = rejection.body_text();
                 // Check if error is due to payload being too large
                 if message.contains("body") || message.contains("limit") {
-                    return Err((
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        Json(ErrorResponse {
-                            error: "Request payload exceeds maximum size limit".to_string(),
-                            code: Some(413),
-                        }),
-                    )
-                        .into_response());
+                    return Err(payload_too_large());
                 }
-                Err((
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(ErrorResponse {
-                        error: format!("Invalid request body: {message}"),
-                        code: Some(422),
-                    }),
-                )
-                    .into_response())
+                Err(unprocessable(format!("Invalid request body: {message}")))
             }
         }
+    }
+}
+
+/// Recursively check whether any string value in `value` exceeds
+/// [`MAX_FIELD_LEN`]. Object keys are also bounded so a hostile body cannot
+/// smuggle oversized keys past the check.
+fn json_has_oversized_field(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.len() > MAX_FIELD_LEN,
+        serde_json::Value::Array(items) => items.iter().any(json_has_oversized_field),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(k, v)| k.len() > MAX_FIELD_LEN || json_has_oversized_field(v)),
+        _ => false,
     }
 }
 
@@ -374,7 +432,7 @@ impl RateLimitKey {
     /// intentionally ignored here so they cannot be spoofed to bypass limits.
     pub fn from_verified(verified_merchant_id: Option<&str>) -> Self {
         match verified_merchant_id {
-            Some(id) if !id.is_empty() => RateLimitKey::Merchant(id.to_string()),
+            Some(id) if !id.trim().is_empty() => RateLimitKey::Merchant(id.to_string()),
             _ => RateLimitKey::Anonymous,
         }
     }
@@ -397,4 +455,142 @@ impl RateLimitKey {
 #[derive(Debug, Clone, Default)]
 pub struct TrustedProxies {
     trusted: Vec<IpAddr>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request as HttpRequest;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct Sample {
+        #[allow(dead_code)]
+        name: String,
+    }
+
+    fn json_request(body: &str) -> Request {
+        HttpRequest::builder()
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn extract(req: Request) -> Result<ValidatedBody<Sample>, Response> {
+        ValidatedBody::<Sample>::from_request(req, &()).await
+    }
+
+    #[tokio::test]
+    async fn accepts_valid_json() {
+        let result = extract(json_request(r#"{"name":"ok"}"#)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn accepts_json_with_charset_parameter() {
+        let req = HttpRequest::builder()
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .body(Body::from(r#"{"name":"ok"}"#))
+            .unwrap();
+        assert!(extract(req).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_content_type() {
+        let req = HttpRequest::builder()
+            .method("POST")
+            .body(Body::from(r#"{"name":"ok"}"#))
+            .unwrap();
+        let err = extract(req).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn rejects_non_json_content_type() {
+        let req = HttpRequest::builder()
+            .method("POST")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from(r#"{"name":"ok"}"#))
+            .unwrap();
+        let err = extract(req).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_json() {
+        let err = extract(json_request("{not json")).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_content_length() {
+        let req = HttpRequest::builder()
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, (MAX_PAYLOAD_SIZE + 1).to_string())
+            .body(Body::from(r#"{"name":"ok"}"#))
+            .unwrap();
+        let err = extract(req).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_content_length() {
+        let req = HttpRequest::builder()
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_LENGTH, "not-a-number")
+            .body(Body::from(r#"{"name":"ok"}"#))
+            .unwrap();
+        let err = extract(req).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_streamed_body() {
+        // No Content-Length: the streamed body must still be bounded.
+        let big = format!(r#"{{"name":"{}"}}"#, "a".repeat(MAX_PAYLOAD_SIZE as usize + 1));
+        let req = HttpRequest::builder()
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(big))
+            .unwrap();
+        let err = extract(req).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_field() {
+        let big = format!(r#"{{"name":"{}"}}"#, "a".repeat(MAX_FIELD_LEN + 1));
+        let err = extract(json_request(&big)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn rate_limit_key_ignores_spoofed_headers() {
+        // Only the verified identity is consulted; caller headers are never
+        // passed to `from_verified`, so spoofing them cannot change the bucket.
+        let key = RateLimitKey::from_verified(None);
+        assert_eq!(key, RateLimitKey::Anonymous);
+        assert_eq!(key.as_bucket(), "anonymous");
+    }
+
+    #[test]
+    fn rate_limit_key_uses_verified_identity() {
+        let key = RateLimitKey::from_verified(Some("merchant-1"));
+        assert_eq!(key, RateLimitKey::Merchant("merchant-1".to_string()));
+        assert_eq!(key.as_bucket(), "merchant:merchant-1");
+    }
+
+    #[test]
+    fn rate_limit_key_treats_blank_identity_as_anonymous() {
+        assert_eq!(RateLimitKey::from_verified(Some("")), RateLimitKey::Anonymous);
+        assert_eq!(
+            RateLimitKey::from_verified(Some("   ")),
+            RateLimitKey::Anonymous
+        );
+    }
 }

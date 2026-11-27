@@ -2,6 +2,11 @@ import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { InvoicePayment } from "../components/InvoicePayment"
+import { I18nProvider } from "../i18n"
+
+function renderWithI18n(ui: React.ReactElement) {
+  return render(<I18nProvider initialLocale="en">{ui}</I18nProvider>)
+}
 
 const mockInvoice = {
   id: "42",
@@ -33,6 +38,25 @@ vi.mock("../components/InvoiceQRCode", () => ({
 
 vi.mock("../components/TransactionHistory", () => ({
   TransactionHistory: () => <div data-testid="mock-transaction-history" />,
+}))
+
+vi.mock("../components/InvoiceTimeline", () => ({
+  InvoiceTimeline: () => <div data-testid="mock-invoice-timeline" />,
+}))
+
+vi.mock("../components/PaymentReceipt", () => ({
+  PaymentReceipt: ({ invoice, transactionHash }: any) => (
+    <div data-testid="mock-payment-receipt">
+      Payment successful. Tx: {transactionHash} for invoice #{invoice.id}
+    </div>
+  ),
+}))
+
+vi.mock("../hooks/useCompletedPaymentGuard", () => ({
+  useCompletedPaymentGuard: () => ({
+    isCompleted: () => false,
+    markCompleted: vi.fn(),
+  }),
 }))
 
 vi.mock("../components/PayConfirmationModal", () => ({
@@ -76,7 +100,7 @@ beforeEach(() => {
 
 describe("InvoicePayment", () => {
   it("renders invoice lookup form", () => {
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByLabelText("Invoice ID for payment")).toBeInTheDocument()
     expect(screen.getByRole("button", { name: /load invoice/i })).toBeInTheDocument()
   })
@@ -91,7 +115,7 @@ describe("InvoicePayment", () => {
       writable: true,
     })
 
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(loadInvoice).toHaveBeenCalledWith(99)
 
     Object.defineProperty(window, "location", {
@@ -102,14 +126,14 @@ describe("InvoicePayment", () => {
 
   it("shows loading state", () => {
     mockUseInvoice.loading = true
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByText("Loading...")).toBeInTheDocument()
     expect(screen.getByLabelText("Loading invoice")).toBeDisabled()
   })
 
   it("shows error state", () => {
     mockUseInvoice.error = "Invoice not found"
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByRole("alert")).toHaveTextContent("Invoice not found")
   })
 
@@ -118,7 +142,7 @@ describe("InvoicePayment", () => {
     mockUseInvoice.loadInvoice = loadInvoice
     const user = userEvent.setup()
 
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     const input = screen.getByLabelText("Invoice ID for payment")
     await user.type(input, "42")
     await user.click(screen.getByRole("button", { name: /load invoice/i }))
@@ -128,12 +152,12 @@ describe("InvoicePayment", () => {
 
   it("disables load button while loading", () => {
     mockUseInvoice.loading = true
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByRole("button", { name: /loading invoice/i })).toBeDisabled()
   })
 
   it("disables load button when input is empty", () => {
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByRole("button", { name: /load invoice/i })).toBeDisabled()
   })
 })
@@ -141,7 +165,7 @@ describe("InvoicePayment", () => {
 describe("InvoicePayment — invoice loaded", () => {
   it("displays invoice details", () => {
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getAllByText("42").length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText("0.0001 USDC")).toBeInTheDocument()
     expect(screen.getByText("0.000105 USDC")).toBeInTheDocument()
@@ -149,7 +173,7 @@ describe("InvoicePayment — invoice loaded", () => {
 
   it("shows countdown timer when invoice has expires_at", () => {
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     const countdownEl = screen.getByText(/^\d+d \d+h \d+m \d+s$/)
     expect(countdownEl).toBeInTheDocument()
   })
@@ -161,14 +185,14 @@ describe("InvoicePayment — invoice loaded", () => {
       status: "Expired" as const,
     }
     mockUseInvoice.invoice = expiredInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     const expiredElements = screen.getAllByText("Expired")
     expect(expiredElements.length).toBeGreaterThanOrEqual(1)
   })
 
   it("renders QR code and transaction history for loaded invoice", () => {
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByTestId("mock-qr-code")).toBeInTheDocument()
     expect(screen.getByTestId("mock-transaction-history")).toBeInTheDocument()
   })
@@ -177,7 +201,7 @@ describe("InvoicePayment — invoice loaded", () => {
 describe("InvoicePayment — pay button", () => {
   it("shows connect wallet button when not connected", () => {
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByRole("button", { name: /connect wallet/i })).toBeInTheDocument()
   })
 
@@ -187,7 +211,7 @@ describe("InvoicePayment — pay button", () => {
     mockUseInvoice.invoice = mockInvoice
     const user = userEvent.setup()
 
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     await user.click(screen.getByRole("button", { name: /connect wallet/i }))
     expect(connect).toHaveBeenCalledOnce()
   })
@@ -196,21 +220,21 @@ describe("InvoicePayment — pay button", () => {
     mockUseWallet.connected = true
     mockUseWallet.address = "GDR7WUDWIKWVBCUBVYLOGT3TJF5FGNQU5U7TACDDA2ZIQUETGGUET5XT"
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByRole("button", { name: /pay invoice #42/i })).toBeInTheDocument()
   })
 
   it("pay button is not shown when invoice is not pending", () => {
     mockUseWallet.connected = true
     mockUseInvoice.invoice = { ...mockInvoice, status: "Paid" }
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.queryByRole("button", { name: /pay invoice/i })).not.toBeInTheDocument()
   })
 
   it("shows status text when invoice is not pending and connected", () => {
     mockUseWallet.connected = true
     mockUseInvoice.invoice = { ...mockInvoice, status: "Paid" }
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByText(/not available for payment/)).toBeInTheDocument()
   })
 })
@@ -220,7 +244,7 @@ describe("InvoicePayment — cancel flow", () => {
     mockUseWallet.connected = true
     mockUseWallet.address = mockInvoice.merchant
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByRole("button", { name: /cancel invoice/i })).toBeInTheDocument()
   })
 
@@ -228,7 +252,7 @@ describe("InvoicePayment — cancel flow", () => {
     mockUseWallet.connected = true
     mockUseWallet.address = "GBDXOEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.queryByRole("button", { name: /cancel invoice/i })).not.toBeInTheDocument()
   })
 
@@ -236,7 +260,7 @@ describe("InvoicePayment — cancel flow", () => {
     mockUseWallet.connected = true
     mockUseWallet.address = mockInvoice.merchant
     mockUseInvoice.invoice = { ...mockInvoice, status: "Paid" }
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.queryByRole("button", { name: /cancel invoice/i })).not.toBeInTheDocument()
   })
 })
@@ -248,7 +272,7 @@ describe("InvoicePayment — confirmation modals", () => {
     mockUseInvoice.invoice = mockInvoice
     const user = userEvent.setup()
 
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     await user.click(screen.getByRole("button", { name: /pay invoice #42/i }))
     expect(screen.getByTestId("pay-confirmation-modal")).toBeInTheDocument()
   })
@@ -261,7 +285,7 @@ describe("InvoicePayment — confirmation modals", () => {
     mockUseInvoice.pay = pay
     const user = userEvent.setup()
 
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     await user.click(screen.getByRole("button", { name: /pay invoice #42/i }))
     await user.click(screen.getByTestId("confirm-pay-btn"))
     expect(pay).toHaveBeenCalledOnce()
@@ -275,10 +299,11 @@ describe("InvoicePayment — confirmation modals", () => {
     mockUseInvoice.pay = pay
     const user = userEvent.setup()
 
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     await user.click(screen.getByRole("button", { name: /pay invoice #42/i }))
     await user.click(screen.getByTestId("confirm-pay-btn"))
-    expect(await screen.findByText(/payment successful/i)).toBeInTheDocument()
+    const matches = await screen.findAllByText(/payment successful/i)
+    expect(matches.length).toBeGreaterThan(0)
   })
 
   it("shows cancel confirmation modal when cancel is clicked", async () => {
@@ -287,7 +312,7 @@ describe("InvoicePayment — confirmation modals", () => {
     mockUseInvoice.invoice = mockInvoice
     const user = userEvent.setup()
 
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     await user.click(screen.getByRole("button", { name: /cancel invoice/i }))
     expect(screen.getByTestId("cancel-confirmation-modal")).toBeInTheDocument()
   })
@@ -300,11 +325,12 @@ describe("InvoicePayment — confirmation modals", () => {
     mockUseInvoice.cancel = cancel
     const user = userEvent.setup()
 
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     await user.click(screen.getByRole("button", { name: /cancel invoice/i }))
     await user.click(screen.getByTestId("confirm-cancel-btn"))
     expect(cancel).toHaveBeenCalledOnce()
-    expect(await screen.findByText(/payment successful/i)).toBeInTheDocument()
+    const matches = await screen.findAllByText(/payment successful/i)
+    expect(matches.length).toBeGreaterThan(0)
   })
 
   it("shows error result when pay fails", async () => {
@@ -315,7 +341,7 @@ describe("InvoicePayment — confirmation modals", () => {
     mockUseInvoice.pay = pay
     const user = userEvent.setup()
 
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     await user.click(screen.getByRole("button", { name: /pay invoice #42/i }))
     await user.click(screen.getByTestId("confirm-pay-btn"))
     expect(await screen.findByText(/operation failed: Invoice already paid/i)).toBeInTheDocument()
@@ -326,7 +352,7 @@ describe("InvoicePayment — open dispute", () => {
   it("shows a dispute notice instead of the generic status text when RefundRequested", () => {
     mockUseWallet.connected = true
     mockUseInvoice.invoice = { ...mockInvoice, status: "RefundRequested" }
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByText(/dispute in progress/i)).toBeInTheDocument()
     expect(screen.queryByText(/not available for payment/i)).not.toBeInTheDocument()
   })
@@ -334,7 +360,7 @@ describe("InvoicePayment — open dispute", () => {
   it("does not show a dispute notice for other non-pending statuses", () => {
     mockUseWallet.connected = true
     mockUseInvoice.invoice = { ...mockInvoice, status: "Paid" }
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.queryByText(/dispute in progress/i)).not.toBeInTheDocument()
   })
 
@@ -342,7 +368,7 @@ describe("InvoicePayment — open dispute", () => {
     mockUseWallet.connected = true
     mockUseWallet.address = mockInvoice.merchant
     mockUseInvoice.invoice = { ...mockInvoice, status: "RefundRequested" }
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.queryByRole("button", { name: /pay invoice/i })).not.toBeInTheDocument()
     expect(screen.queryByRole("button", { name: /cancel invoice/i })).not.toBeInTheDocument()
   })
@@ -352,7 +378,7 @@ describe("InvoicePayment — connect button disabled while connecting", () => {
   it("shows connecting state", () => {
     mockUseWallet.connecting = true
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     const btn = screen.getByRole("button", { name: /connect wallet/i })
     expect(btn).toBeDisabled()
     expect(btn).toHaveTextContent("Connecting...")
@@ -367,7 +393,7 @@ describe("InvoicePayment — wallet not ready", () => {
     mockUseWallet.address = "GDR7WUDWIKWVBCUBVYLOGT3TJF5FGNQU5U7TACDDA2ZIQUETGGUET5XT"
     mockUseWallet.notReadyReason = WRONG_NETWORK_REASON
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
 
     const pay = screen.getByRole("button", { name: /pay invoice #42/i })
     expect(pay).toBeDisabled()
@@ -380,14 +406,14 @@ describe("InvoicePayment — wallet not ready", () => {
     mockUseWallet.address = mockInvoice.merchant
     mockUseWallet.notReadyReason = WRONG_NETWORK_REASON
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByRole("button", { name: "Cancel Invoice" })).toBeDisabled()
   })
 
   it("explains why alongside the connect button when disconnected", () => {
     mockUseWallet.notReadyReason = "Connect your wallet to sign transactions."
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByRole("button", { name: /connect wallet/i })).toBeInTheDocument()
     expect(screen.getByTestId("wallet-not-ready")).toHaveTextContent("Connect your wallet to sign transactions.")
   })
@@ -397,7 +423,7 @@ describe("InvoicePayment — wallet not ready", () => {
     mockUseWallet.address = "GDR7WUDWIKWVBCUBVYLOGT3TJF5FGNQU5U7TACDDA2ZIQUETGGUET5XT"
     mockUseWallet.notReadyReason = null
     mockUseInvoice.invoice = mockInvoice
-    render(<InvoicePayment />)
+    renderWithI18n(<InvoicePayment />)
     expect(screen.getByRole("button", { name: /pay invoice #42/i })).toBeEnabled()
     expect(screen.queryByTestId("wallet-not-ready")).not.toBeInTheDocument()
   })

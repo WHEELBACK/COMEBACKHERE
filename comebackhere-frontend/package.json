@@ -15,12 +15,13 @@
   "dependencies": {
     "@soroban-react/core": "^9.0.0",
     "@soroban-react/freighter": "^9.0.0",
+    "@testing-library/dom": "^10.4.2",
     "react": "^19.3.0",
     "react-dom": "^19.2.8",
     "soroban-client": "^1.0.0"
   },
   "devDependencies": {
-    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/jest-dom": "^8.0.0",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.3.0",
@@ -31,7 +32,7 @@
     "eslint": "^10.11.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.7",
-    "jsdom": "^29.1.1",
+    "jsdom": "^31.0.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.0",
     "vitest": "^5.0.3"

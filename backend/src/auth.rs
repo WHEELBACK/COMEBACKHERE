@@ -17,6 +17,25 @@ use std::sync::Arc;
 const CHALLENGE_PREFIX: &str = "COMEBACKHERE Auth Challenge:";
 const CHALLENGE_TTL_SECONDS: i64 = 300;
 
+/// Length of a Stellar strkey public key (`G...`, 56 chars).
+const STELLAR_PUBKEY_LEN: usize = 56;
+/// Length of the decoded strkey payload: version (1) + key (32) + checksum (2).
+const STELLAR_STRKEY_DECODED_LEN: usize = 35;
+/// Version byte for Stellar ed25519 public keys.
+const STELLAR_PUBKEY_VERSION: u8 = 6 << 3;
+/// Length of a hex-encoded ed25519 signature (64 bytes -> 128 hex chars).
+const SIGNATURE_HEX_LEN: usize = 128;
+/// Maximum accepted length of a challenge string (prefix + space + 64 hex chars).
+const MAX_CHALLENGE_LEN: usize = 128;
+/// Maximum accepted length of a public key header value.
+const MAX_PUBKEY_HEADER_LEN: usize = 128;
+/// Maximum accepted length of a signature header value.
+const MAX_SIGNATURE_HEADER_LEN: usize = 256;
+/// Maximum accepted length of a single API key scope token.
+const MAX_SCOPE_TOKEN_LEN: usize = 32;
+/// Maximum number of scopes that may be attached to a single API key.
+const MAX_SCOPES_PER_KEY: usize = 16;
+
 /// Maximum requests allowed per authenticated merchant within the window.
 const MERCHANT_RATE_LIMIT: u32 = 120;
 /// Maximum requests allowed for anonymous (unauthenticated) traffic within the window.
@@ -245,15 +264,34 @@ impl ApiKeyScopes {
         let mut scopes = HashSet::new();
         for token in tokens {
             let token = token.as_ref();
+            // Bound the input before parsing so oversized or control-character
+            // payloads are rejected rather than echoed back in error messages.
+            if token.len() > MAX_SCOPE_TOKEN_LEN {
+                return Err(AuthError {
+                    error: "API key scope token too long".to_string(),
+                });
+            }
+            if token.chars().any(|c| c.is_control()) {
+                return Err(AuthError {
+                    error: "API key scope token contains invalid characters".to_string(),
+                });
+            }
             match ApiKeyScope::parse(token) {
                 Some(scope) => {
                     scopes.insert(scope);
                 }
                 None => {
+                    // Do not echo the raw token: it may contain injection-style
+                    // metacharacters that could be reflected into logs or UIs.
                     return Err(AuthError {
-                        error: format!("Unknown API key scope: {}", token),
+                        error: "Unknown API key scope".to_string(),
                     });
                 }
+            }
+            if scopes.len() > MAX_SCOPES_PER_KEY {
+                return Err(AuthError {
+                    error: "Too many API key scopes".to_string(),
+                });
             }
         }
         Ok(ApiKeyScopes { scopes })
@@ -460,7 +498,33 @@ pub fn generate_challenge(store: &ChallengeStore) -> ChallengeResponse {
     }
 }
 
+/// Validate the structural shape of a challenge string before it is looked up.
+///
+/// Rejects anything that is not exactly `<prefix> <64 lowercase hex chars>` so
+/// malformed or oversized inputs never reach the store lookup.
+fn validate_challenge_format(challenge: &str) -> Result<(), AuthError> {
+    if challenge.is_empty() || challenge.len() > MAX_CHALLENGE_LEN {
+        return Err(AuthError {
+            error: "Invalid challenge format".to_string(),
+        });
+    }
+    let nonce = challenge
+        .strip_prefix(CHALLENGE_PREFIX)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .ok_or_else(|| AuthError {
+            error: "Invalid challenge format".to_string(),
+        })?;
+    if nonce.len() != 64 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(AuthError {
+            error: "Invalid challenge format".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn verify_challenge_valid(store: &ChallengeStore, challenge: &str) -> Result<(), AuthError> {
+    validate_challenge_format(challenge)?;
+
     let entry = store.get(challenge).ok_or_else(|| AuthError {
         error: "Challenge not found or already used".to_string(),
     })?;
@@ -480,7 +544,18 @@ fn verify_challenge_valid(store: &ChallengeStore, challenge: &str) -> Result<(),
 }
 
 fn decode_stellar_pubkey(encoded: &str) -> Result<[u8; 32], AuthError> {
-    if !encoded.starts_with('G') || encoded.len() != 56 {
+    if encoded.len() != STELLAR_PUBKEY_LEN || !encoded.starts_with('G') {
+        return Err(AuthError {
+            error: "Invalid Stellar public key format".to_string(),
+        });
+    }
+
+    // Reject anything outside the base32 alphabet up front so decoding never
+    // sees control characters or injection-style metacharacters.
+    if !encoded
+        .bytes()
+        .all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b))
+    {
         return Err(AuthError {
             error: "Invalid Stellar public key format".to_string(),
         });
@@ -496,9 +571,25 @@ fn decode_stellar_pubkey(encoded: &str) -> Result<[u8; 32], AuthError> {
         }
     };
 
-    if bytes.len() != 35 {
+    if bytes.len() != STELLAR_STRKEY_DECODED_LEN {
         return Err(AuthError {
             error: "Invalid decoded public key length".to_string(),
+        });
+    }
+
+    if bytes[0] != STELLAR_PUBKEY_VERSION {
+        return Err(AuthError {
+            error: "Invalid Stellar public key version".to_string(),
+        });
+    }
+
+    // Verify the trailing CRC16-XModem checksum over version + key bytes.
+    let payload = &bytes[..STELLAR_STRKEY_DECODED_LEN - 2];
+    let expected = crc16_xmodem(payload);
+    let actual = u16::from_le_bytes([bytes[STELLAR_STRKEY_DECODED_LEN - 2], bytes[STELLAR_STRKEY_DECODED_LEN - 1]]);
+    if expected != actual {
+        return Err(AuthError {
+            error: "Invalid Stellar public key checksum".to_string(),
         });
     }
 
@@ -508,11 +599,37 @@ fn decode_stellar_pubkey(encoded: &str) -> Result<[u8; 32], AuthError> {
     Ok(key)
 }
 
+/// CRC16-XModem as used by Stellar strkey checksums.
+fn crc16_xmodem(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for byte in data {
+        crc ^= (*byte as u16) << 8;
+        for _ in 0..8 {
+            if crc & 0x8000 != 0 {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
+
 fn verify_ed25519(
     pub_key_bytes: &[u8; 32],
     message: &[u8],
     signature_hex: &str,
 ) -> Result<(), AuthError> {
+    // Bound and validate the hex signature before decoding so oversized or
+    // non-hex payloads are rejected without allocating.
+    if signature_hex.len() != SIGNATURE_HEX_LEN
+        || !signature_hex.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(AuthError {
+            error: "Invalid signature hex encoding".to_string(),
+        });
+    }
+
     let sig_bytes = hex::decode(signature_hex).map_err(|_| AuthError {
         error: "Invalid signature hex encoding".to_string(),
     })?;
@@ -550,7 +667,16 @@ pub async fn auth_middleware(
         .get("x-stellar-public-key")
         .and_then(|v| v.to_str().ok())
     {
-        Some(k) => k.to_string(),
+        Some(k) if k.len() <= MAX_PUBKEY_HEADER_LEN => k.to_string(),
+        Some(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(AuthError {
+                    error: "Invalid X-Stellar-Public-Key header".to_string(),
+                }),
+            )
+                .into_response();
+        }
         None => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -567,7 +693,16 @@ pub async fn auth_middleware(
         .get("x-stellar-signature")
         .and_then(|v| v.to_str().ok())
     {
-        Some(s) => s.to_string(),
+        Some(s) if s.len() <= MAX_SIGNATURE_HEADER_LEN => s.to_string(),
+        Some(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(AuthError {
+                    error: "Invalid X-Stellar-Signature header".to_string(),
+                }),
+            )
+                .into_response();
+        }
         None => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -584,7 +719,16 @@ pub async fn auth_middleware(
         .get("x-stellar-challenge")
         .and_then(|v| v.to_str().ok())
     {
-        Some(c) => c.to_string(),
+        Some(c) if c.len() <= MAX_CHALLENGE_LEN => c.to_string(),
+        Some(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(AuthError {
+                    error: "Invalid X-Stellar-Challenge header".to_string(),
+                }),
+            )
+                .into_response();
+        }
         None => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -725,5 +869,145 @@ mod tests {
     fn test_audit_empty_chain_is_valid() {
         let chain: Vec<AuditRecord> = Vec::new();
         assert!(verify_audit_chain(&chain).is_ok());
+    }
+
+    #[test]
+    fn test_decode_key_with_bad_checksum() {
+        // Valid alphabet/length but the trailing checksum is wrong.
+        let mut encoded = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF".to_string();
+        encoded.pop();
+        encoded.push('A');
+        let result = decode_stellar_pubkey(&encoded);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().error, "Invalid Stellar public key checksum");
+    }
+
+    #[test]
+    fn test_decode_key_rejects_injection_metacharacters() {
+        for payload in [
+            "G'; DROP TABLE users; --",
+            "G$(rm -rf /)AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "G`whoami`AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\u{0}",
+        ] {
+            let result = decode_stellar_pubkey(payload);
+            assert!(result.is_err(), "payload should be rejected: {:?}", payload);
+        }
+    }
+
+    #[test]
+    fn test_decode_key_rejects_oversized_input() {
+        let oversized = format!("G{}", "A".repeat(10_000));
+        assert!(decode_stellar_pubkey(&oversized).is_err());
+    }
+
+    #[test]
+    fn test_verify_ed25519_rejects_bad_hex() {
+        let key = [0u8; 32];
+        assert!(verify_ed25519(&key, b"msg", "not-hex").is_err());
+        assert!(verify_ed25519(&key, b"msg", &"z".repeat(SIGNATURE_HEX_LEN)).is_err());
+    }
+
+    #[test]
+    fn test_verify_ed25519_rejects_wrong_length() {
+        let key = [0u8; 32];
+        let result = verify_ed25519(&key, b"msg", "abcd");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().error, "Invalid signature hex encoding");
+    }
+
+    #[test]
+    fn test_verify_ed25519_rejects_oversized_signature() {
+        let key = [0u8; 32];
+        let oversized = "a".repeat(10_000);
+        assert!(verify_ed25519(&key, b"msg", &oversized).is_err());
+    }
+
+    #[test]
+    fn test_verify_ed25519_rejects_invalid_signature() {
+        let key = [0u8; 32];
+        let result = verify_ed25519(&key, b"msg", &"0".repeat(SIGNATURE_HEX_LEN));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_challenge_format_accepts_generated() {
+        let store = create_challenge_store();
+        let resp = generate_challenge(&store);
+        assert!(validate_challenge_format(&resp.challenge).is_ok());
+    }
+
+    #[test]
+    fn test_validate_challenge_format_rejects_malformed() {
+        for payload in [
+            "",
+            "not-a-challenge",
+            "COMEBACKHERE Auth Challenge:",
+            "COMEBACKHERE Auth Challenge: short",
+            "COMEBACKHERE Auth Challenge: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "COMEBACKHERE Auth Challenge: ' OR '1'='1",
+        ] {
+            assert!(
+                validate_challenge_format(payload).is_err(),
+                "payload should be rejected: {:?}",
+                payload
+            );
+        }
+    }
+
+    #[test]
+    fn test_verify_challenge_rejects_reuse() {
+        let store = create_challenge_store();
+        let resp = generate_challenge(&store);
+        assert!(verify_challenge_valid(&store, &resp.challenge).is_ok());
+        let second = verify_challenge_valid(&store, &resp.challenge);
+        assert!(second.is_err());
+        assert_eq!(second.unwrap_err().error, "Challenge not found or already used");
+    }
+
+    #[test]
+    fn test_verify_challenge_rejects_malformed_without_lookup() {
+        let store = create_challenge_store();
+        let result = verify_challenge_valid(&store, "'; DROP TABLE challenges; --");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().error, "Invalid challenge format");
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn test_api_key_scopes_reject_unknown_token() {
+        let result = ApiKeyScopes::from_tokens(["read", "admin"]);
+        assert!(result.is_err());
+        // The raw token must not be reflected back to the caller.
+        assert_eq!(result.unwrap_err().error, "Unknown API key scope");
+    }
+
+    #[test]
+    fn test_api_key_scopes_reject_injection_tokens() {
+        for token in ["read; DROP TABLE keys", "$(whoami)", "read\x00", "`id`"] {
+            assert!(ApiKeyScopes::from_tokens([token]).is_err());
+        }
+    }
+
+    #[test]
+    fn test_api_key_scopes_reject_oversized_token() {
+        let oversized = "r".repeat(MAX_SCOPE_TOKEN_LEN + 1);
+        let result = ApiKeyScopes::from_tokens([oversized]);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().error, "API key scope token too long");
+    }
+
+    #[test]
+    fn test_api_key_scopes_accepts_valid_tokens() {
+        let scopes = ApiKeyScopes::from_tokens(["read", "write", "READ"]).unwrap();
+        assert!(scopes.allows(ApiKeyScope::Read));
+        assert!(scopes.allows(ApiKeyScope::Write));
+        assert!(!scopes.allows(ApiKeyScope::Webhook));
+    }
+
+    #[test]
+    fn test_crc16_xmodem_known_vector() {
+        // CRC16-XModem of "123456789" is 0x31C3.
+        assert_eq!(crc16_xmodem(b"123456789"), 0x31C3);
     }
 }

@@ -2,7 +2,12 @@ import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, it, expect, vi } from "vitest"
 import { RefundRequest } from "../components/RefundRequest"
+import { I18nProvider } from "../i18n"
 import type { Invoice, InvoiceStatus } from "../types"
+
+function renderWithI18n(ui: React.ReactElement) {
+  return render(<I18nProvider initialLocale="en">{ui}</I18nProvider>)
+}
 
 vi.mock("../components/RefundConfirmationModal", () => ({
   RefundConfirmationModal: ({ onConfirm, onCancel, submitting }: any) => (
@@ -44,7 +49,7 @@ const refundRequestedInvoice: Invoice = {
 
 describe("RefundRequest", () => {
   it("renders refund form when invoice is paid and user is payer", () => {
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -56,7 +61,7 @@ describe("RefundRequest", () => {
   })
 
   it("does not render refund form when user is not the payer", () => {
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={MERCHANT_ADDRESS}
@@ -67,7 +72,7 @@ describe("RefundRequest", () => {
   })
 
   it("does not render refund form when invoice is not paid", () => {
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={pendingInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -78,7 +83,7 @@ describe("RefundRequest", () => {
   })
 
   it("shows status info when invoice status is RefundRequested", () => {
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={refundRequestedInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -89,7 +94,7 @@ describe("RefundRequest", () => {
   })
 
   it("shows hint about minimum characters", () => {
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -103,7 +108,7 @@ describe("RefundRequest", () => {
 describe("RefundRequest — reason validation", () => {
   it("shows error when reason is too short on change", async () => {
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -118,7 +123,7 @@ describe("RefundRequest — reason validation", () => {
 
   it("shows character counter", async () => {
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -132,7 +137,7 @@ describe("RefundRequest — reason validation", () => {
   })
 
   it("disables request refund button when reason is empty", () => {
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -144,7 +149,7 @@ describe("RefundRequest — reason validation", () => {
 
   it("disables request refund button when reason has error", async () => {
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -159,7 +164,7 @@ describe("RefundRequest — reason validation", () => {
 
   it("enables request refund button when reason is valid", async () => {
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -174,7 +179,7 @@ describe("RefundRequest — reason validation", () => {
 
   it("sets aria-invalid when reason has error", async () => {
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -191,7 +196,7 @@ describe("RefundRequest — reason validation", () => {
 describe("RefundRequest — submit flow", () => {
   it("shows confirmation modal when request refund is clicked with valid reason", async () => {
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -208,7 +213,7 @@ describe("RefundRequest — submit flow", () => {
   it("calls onRequestRefund when confirmed", async () => {
     const onRequestRefund = vi.fn().mockResolvedValue({ success: true, transaction_hash: "hash789" })
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -228,7 +233,7 @@ describe("RefundRequest — submit flow", () => {
   it("shows success message after successful refund", async () => {
     const onRequestRefund = vi.fn().mockResolvedValue({ success: true, transaction_hash: "hash789" })
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -248,7 +253,7 @@ describe("RefundRequest — submit flow", () => {
   it("shows error message when refund fails", async () => {
     const onRequestRefund = vi.fn().mockResolvedValue({ success: false, error: "Invoice not paid" })
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -268,7 +273,7 @@ describe("RefundRequest — submit flow", () => {
   it("does not call onRequestRefund when modal confirm is clicked with empty reason", async () => {
     const onRequestRefund = vi.fn().mockResolvedValue({ success: true })
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -288,7 +293,7 @@ describe("RefundRequest — submit flow", () => {
   it("hides refund form after successful submission", async () => {
     const onRequestRefund = vi.fn().mockResolvedValue({ success: true, transaction_hash: "hash789" })
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
@@ -310,7 +315,7 @@ describe("RefundRequest — submit flow", () => {
 describe("RefundRequest — wallet not ready", () => {
   it("disables the request with an explanation even with a valid reason", async () => {
     const user = userEvent.setup()
-    render(
+    renderWithI18n(
       <RefundRequest
         invoice={paidInvoice}
         walletAddress={PAYER_ADDRESS}
