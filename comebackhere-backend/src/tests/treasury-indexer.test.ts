@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { processIndexerBatch, buildEventId } from "../services/treasury-indexer.js"
+import {
+  processIndexerBatch,
+  buildEventId,
+  ensureSettlementIndexes,
+} from "../services/treasury-indexer.js"
 import type { SorobanClient } from "../lib/soroban.js"
 import type { Db, Collection } from "mongodb"
 
@@ -13,6 +17,7 @@ function makeEvent(overrides: Partial<{
   eventType: string
   settlementId: number
   ledger: number
+  approvalWeight: number
 }> = {}) {
   const {
     pagingToken = "tok-1",
@@ -20,6 +25,7 @@ function makeEvent(overrides: Partial<{
     eventType = "settlement_proposed",
     settlementId = 1,
     ledger = 100,
+    approvalWeight = 2,
   } = overrides
 
   // Encode topic / value in a format that topicSymbol / valueU64 / valueAddress
@@ -32,12 +38,28 @@ function makeEvent(overrides: Partial<{
   })
   const vecVal = (...items: any[]) => ({ vec: () => items })
 
+  const value = eventType === "settlement_approved"
+    ? vecVal(
+        u64Val(settlementId),
+        { address: () => ({ toString: () => "addr-signer" }) },
+        u64Val(0),
+        u64Val(approvalWeight),
+      )
+    : eventType === "settlement_executed"
+      ? vecVal(u64Val(settlementId))
+      : vecVal(
+          u64Val(settlementId),
+          { address: () => ({ toString: () => "addr-token" }) },
+          u64Val(1000),
+          { address: () => ({ toString: () => "addr-merchant" }) },
+        )
+
   return {
     pagingToken,
     txHash,
     ledger,
     topic: [topicSym(eventType), u64Val(settlementId)],
-    value: vecVal(u64Val(settlementId), { address: () => ({ toString: () => "addr-token" }) }, u64Val(1000), { address: () => ({ toString: () => "addr-merchant" }) }),
+    value,
   }
 }
 
@@ -358,5 +380,83 @@ describe("processIndexerBatch — error handling", () => {
 
     const count = await processIndexerBatch(client, CONTRACT_ID, db)
     expect(count).toBe(1)
+  })
+
+  it("skips malformed events without advancing the cursor past them", async () => {
+    const malformedEvent = makeEvent({ pagingToken: "tok-malformed" }) as any
+    malformedEvent.value = { vec: () => [{ u64: () => ({ toString: () => "1" }) }] }
+    const validEvent = makeEvent({ pagingToken: "tok-valid", settlementId: 2 })
+    const db = makeDatabase(makeMockCursor())
+    const client = makeMockClient([malformedEvent, validEvent])
+
+    expect(await processIndexerBatch(client, CONTRACT_ID, db)).toBe(1)
+
+    const cursor = await (db as any)._cursors.findOne({ _id: "treasury_settlement_events" })
+    expect(cursor.paging_token).toBeNull()
+    expect(cursor.last_ledger).toBe(0)
+    expect(cursor.processed_event_ids).toContain("tok-valid")
+    expect((db as any)._settlements.updateOne).toHaveBeenCalledTimes(1)
+  })
+
+  it("rejects settlement IDs that cannot be represented safely by the database schema", async () => {
+    const event = makeEvent({
+      pagingToken: "tok-unsafe-id",
+      settlementId: Number.MAX_SAFE_INTEGER + 1,
+    })
+    const db = makeDatabase(makeMockCursor())
+    const client = makeMockClient([event])
+
+    expect(await processIndexerBatch(client, CONTRACT_ID, db)).toBe(0)
+
+    const cursor = await (db as any)._cursors.findOne({ _id: "treasury_settlement_events" })
+    expect(cursor.paging_token).toBeNull()
+    expect((db as any)._settlements.updateOne).not.toHaveBeenCalled()
+  })
+
+  it("rejects approval weights that cannot be represented safely by the database schema", async () => {
+    const event = makeEvent({
+      pagingToken: "tok-unsafe-weight",
+      eventType: "settlement_approved",
+      approvalWeight: Number.MAX_SAFE_INTEGER + 1,
+    })
+    const db = makeDatabase(makeMockCursor())
+    const client = makeMockClient([event])
+
+    expect(await processIndexerBatch(client, CONTRACT_ID, db)).toBe(0)
+    expect((db as any)._settlements.updateOne).not.toHaveBeenCalled()
+  })
+
+  it("rejects malformed latest-ledger values instead of persisting them", async () => {
+    const db = makeDatabase(makeMockCursor())
+    const client = makeMockClient([])
+    ;(client.getEvents as any).mockResolvedValue({ events: [], latestLedger: Number.NaN })
+
+    await expect(processIndexerBatch(client, CONTRACT_ID, db)).rejects.toThrow(
+      "Treasury indexer received an invalid latest ledger",
+    )
+    expect((db as any)._cursors.updateOne).not.toHaveBeenCalled()
+  })
+
+  it("rejects event responses without an events array", async () => {
+    const db = makeDatabase(makeMockCursor())
+    const client = makeMockClient([])
+    ;(client.getEvents as any).mockResolvedValue({ latestLedger: 200 })
+
+    await expect(processIndexerBatch(client, CONTRACT_ID, db)).rejects.toThrow(
+      "Treasury indexer received an invalid events response",
+    )
+    expect((db as any)._cursors.updateOne).not.toHaveBeenCalled()
+  })
+})
+
+describe("ensureSettlementIndexes", () => {
+  it("propagates index creation failures so the indexer can retry", async () => {
+    const database = {
+      collection: vi.fn(() => ({
+        createIndex: vi.fn().mockRejectedValue(new Error("index creation failed")),
+      })),
+    } as unknown as Db
+
+    await expect(ensureSettlementIndexes(database)).rejects.toThrow("index creation failed")
   })
 })
