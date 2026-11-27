@@ -59,12 +59,28 @@ function valueU64(value: xdr.ScVal | undefined, index: number): bigint {
   }
 }
 
+function hasValueU64(value: xdr.ScVal | undefined, index: number): boolean {
+  try {
+    return value?.vec()?.[index]?.u64() != null
+  } catch {
+    return false
+  }
+}
+
 function valueAddress(value: xdr.ScVal | undefined, index: number): string {
   try {
     const vec = value?.vec()
     return vec?.[index]?.address()?.toString() ?? ""
   } catch {
     return ""
+  }
+}
+
+function hasValueAddress(value: xdr.ScVal | undefined, index: number): boolean {
+  try {
+    return Boolean(value?.vec()?.[index]?.address()?.toString())
+  } catch {
+    return false
   }
 }
 
@@ -182,6 +198,7 @@ export async function ensureSettlementIndexes(
       { errorName: err instanceof Error ? err.name : "UnknownError" },
       "Failed to ensure settlement indexes",
     )
+    throw err
   }
 }
 
@@ -367,7 +384,17 @@ export async function processIndexerBatch(
     }),
   )
 
-  const events = Array.isArray(response?.events) ? response.events : []
+  if (!response || !Array.isArray(response.events)) {
+    throw new Error("Treasury indexer received an invalid events response")
+  }
+  if (
+    response?.latestLedger !== undefined &&
+    (!Number.isSafeInteger(response.latestLedger) || response.latestLedger < 0)
+  ) {
+    throw new Error("Treasury indexer received an invalid latest ledger")
+  }
+
+  const events = response.events
   if (events.length === 0) {
     // Nothing to do; still advance the ledger cursor if the RPC reported one.
     const emptyLedger = Number(response?.latestLedger)
@@ -390,6 +417,9 @@ export async function processIndexerBatch(
   const pendingWrites: PendingWrite[] = []
   // Track paging tokens seen within this batch to deduplicate within-batch duplicates.
   const seenPagingTokens = new Set<string>()
+  // Never move the cursor beyond a malformed event; later events may still be
+  // persisted and will be deduplicated if they are replayed on the next tick.
+  let cursorBlocked = false
 
   for (const event of events) {
     try {
@@ -406,7 +436,6 @@ export async function processIndexerBatch(
           continue
         }
         seenPagingTokens.add(pagingToken)
-        lastPagingToken = pagingToken
       }
 
       if (
@@ -414,12 +443,32 @@ export async function processIndexerBatch(
         eventType !== "settlement_approved" &&
         eventType !== "settlement_executed"
       ) {
+        if (!cursorBlocked && pagingToken) lastPagingToken = pagingToken
+        continue
+      }
+
+      const requiredU64Indexes =
+        eventType === "settlement_proposed" ? [0, 2] :
+          eventType === "settlement_approved" ? [0, 3] : [0]
+      const requiredAddressIndexes =
+        eventType === "settlement_proposed" ? [1, 3] :
+          eventType === "settlement_approved" ? [1] : []
+      const requiredValuesPresent =
+        requiredU64Indexes.every((index) => hasValueU64(event.value, index)) &&
+        requiredAddressIndexes.every((index) => hasValueAddress(event.value, index))
+      if (!requiredValuesPresent) {
+        cursorBlocked = true
+        logger.warn(
+          { eventType, txHash, pagingToken },
+          "Skipping treasury event with malformed payload",
+        )
         continue
       }
 
       const rawSettlementId = valueU64(event.value, 0)
       const settlementId = Number(rawSettlementId)
-      if (!Number.isFinite(settlementId) || settlementId < 0) {
+      if (!Number.isSafeInteger(settlementId) || settlementId < 0) {
+        cursorBlocked = true
         logger.warn(
           { eventType, txHash, pagingToken },
           "Skipping treasury event with invalid settlement id",
@@ -432,6 +481,19 @@ export async function processIndexerBatch(
       // De-duplicate: skip events we have already applied (reorg / replay protection)
       if (processedIds.has(eventId)) {
         logger.debug({ eventId }, "Skipping duplicate treasury event")
+        if (!cursorBlocked && pagingToken) lastPagingToken = pagingToken
+        continue
+      }
+
+      if (
+        eventType === "settlement_approved" &&
+        valueU64(event.value, 3) > BigInt(Number.MAX_SAFE_INTEGER)
+      ) {
+        cursorBlocked = true
+        logger.warn(
+          { eventType, txHash, pagingToken },
+          "Skipping treasury event with invalid approval weight",
+        )
         continue
       }
 
@@ -514,10 +576,12 @@ export async function processIndexerBatch(
       processedIds.add(eventId)
       newEventIds.push(eventId)
       processed++
+      if (!cursorBlocked && pagingToken) lastPagingToken = pagingToken
     } catch (err) {
       // A single malformed event must not abort the whole batch. Log and move
       // on; the cursor is not advanced past this event's paging token so it
       // will be retried on the next tick.
+      cursorBlocked = true
       logger.error(
         {
           errorName: err instanceof Error ? err.name : "UnknownError",
@@ -534,7 +598,10 @@ export async function processIndexerBatch(
     await flushWrites(pendingWrites)
   }
 
-  const lastLedger = response.latestLedger ?? cursor.last_ledger
+  const lastLedger = cursorBlocked
+    ? cursor.last_ledger
+    : Math.max(response.latestLedger ?? cursor.last_ledger, cursor.last_ledger)
+  if (cursorBlocked) lastPagingToken = cursor.paging_token
   await saveCursor(database, lastPagingToken, lastLedger, newEventIds)
   indexerLedgerLag.set(
     { indexer: "treasury" },
@@ -570,6 +637,11 @@ export function startTreasuryIndexer(): void {
   let inFlight = false
 
   const tick = async () => {
+    if (inFlight) {
+      logger.debug("Skipping treasury indexer tick; previous tick is still running")
+      return
+    }
+    inFlight = true
     const startedAt = Date.now()
     try {
       const database = await connectMongo()
@@ -581,7 +653,7 @@ export function startTreasuryIndexer(): void {
     } catch (err) {
       logger.error({ errorName: err instanceof Error ? err.name : "UnknownError" }, "Treasury indexer failed")
     } finally {
-      indexerLedgerLag.set({ indexer: "treasury" }, indexerLedgerLag.get({ indexer: "treasury" }) ?? 0)
+      inFlight = false
       logger.debug({ durationMs: Date.now() - startedAt }, "Treasury indexer tick completed")
     }
   }
